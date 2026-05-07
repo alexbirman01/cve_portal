@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cve-portal-config
+data:
+  POSTGRES_DSN: postgresql+psycopg://cve_portal:cve_portal@postgres:5432/cve_portal
+  REDIS_URL: redis://redis:6379/0
+  JIRA_USE_JSM_INTERNAL_COMMENTS: "false"
+

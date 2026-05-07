@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from api.app.db import db_session
+from api.app.jira_client import JiraClient
+from api.app.models import CveCache, ProcessingRun
+from api.app.nvd_client import NvdClient, _extract_affected_packages
+from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
+from worker.app.celery_app import celery_app
+
+
+def _set_run_status(run_id: str, status: str) -> None:
+    with db_session() as db:
+        run = db.get(ProcessingRun, run_id)
+        if run:
+            run.status = status
+            db.add(run)
+            db.commit()
+
+
+@celery_app.task(name="process_issue", bind=True)
+def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
+    # v1 extraction: description + attachments (Excel/PDF) with provenance.
+    try:
+        _set_run_status(run_id, "fetching_issue")
+        jira = JiraClient()
+        issue = jira.get_issue(issue_key)
+
+        _set_run_status(run_id, "extracting_from_description")
+        desc_text = normalize_description(issue.description_raw)
+        desc_cves = extract_cves(desc_text, "description")
+        desc_images = extract_images(desc_text, "description")
+
+        _set_run_status(run_id, "downloading_attachments")
+        blobs = []
+        for a in issue.attachments:
+            if not a.get("id") or not a.get("content") or not a.get("filename"):
+                continue
+            blobs.append((a, jira.download_attachment(a["content"])))
+
+        _set_run_status(run_id, "parsing_attachments")
+        parsed_attachments = []
+        for a, blob in blobs:
+            parsed = parse_attachment_bytes(
+                attachment_id=str(a["id"]),
+                filename=str(a["filename"]),
+                mime_type=a.get("mimeType"),
+                data=blob,
+            )
+            parsed_attachments.append(
+                {
+                    "id": parsed.attachment_id,
+                    "filename": parsed.filename,
+                    "mimeType": parsed.mime_type,
+                    "status": parsed.status,
+                    "cves": [{"cve_id": c.cve_id, "source": c.source} for c in parsed.cves],
+                    "images": [{"image": i.image, "tag": i.tag, "source": i.source} for i in parsed.images],
+                }
+            )
+
+        cve_ids = sorted({c.cve_id for c in desc_cves} | {c["cve_id"] for p in parsed_attachments for c in p["cves"]})
+
+        images = [{"image": i.image, "tag": i.tag, "source": i.source} for i in desc_images]
+        for p in parsed_attachments:
+            images.extend(p["images"])
+
+        _set_run_status(run_id, "enriching_nvd")
+        nvd = NvdClient()
+        try:
+            enriched = []
+            with db_session() as db:
+                for cve_id in cve_ids:
+                    cached = db.get(CveCache, cve_id)
+                    if cached and cached.state == "ok":
+                        # Re-parse packages from cached raw_json (no schema change needed).
+                        pkgs = []
+                        if cached.raw_json:
+                            try:
+                                raw = json.loads(cached.raw_json)
+                                cve_doc = ((raw.get("vulnerabilities") or [{}])[0] or {}).get("cve") or {}
+                                pkgs = [
+                                    {"vendor": p.vendor, "product": p.product,
+                                     "version_start": p.version_start, "fixed_version": p.fixed_version}
+                                    for p in _extract_affected_packages(cve_doc)
+                                ]
+                            except Exception:
+                                pass
+                        enriched.append(
+                            {
+                                "cve_id": cve_id,
+                                "state": cached.state,
+                                "severity": cached.severity,
+                                "score": cached.score,
+                                "published": cached.published,
+                                "modified": cached.modified,
+                                "packages": pkgs,
+                            }
+                        )
+                        continue
+
+                    try:
+                        nvd_cve = nvd.fetch_cve(cve_id)
+                    except Exception:
+                        nvd_cve = None
+
+                    if nvd_cve is None:
+                        db.merge(CveCache(cve_id=cve_id, state="error"))
+                        enriched.append({"cve_id": cve_id, "state": "error"})
+                    else:
+                        db.merge(
+                            CveCache(
+                                cve_id=nvd_cve.cve_id,
+                                state=nvd_cve.state,
+                                severity=nvd_cve.severity,
+                                score=nvd_cve.score,
+                                published=nvd_cve.published,
+                                modified=nvd_cve.modified,
+                                raw_json=nvd_cve.raw_json,
+                            )
+                        )
+                        enriched.append(
+                            {
+                                "cve_id": nvd_cve.cve_id,
+                                "state": nvd_cve.state,
+                                "severity": nvd_cve.severity,
+                                "score": nvd_cve.score,
+                                "published": nvd_cve.published,
+                                "modified": nvd_cve.modified,
+                                "packages": [
+                                    {"vendor": p.vendor, "product": p.product,
+                                     "version_start": p.version_start, "fixed_version": p.fixed_version}
+                                    for p in nvd_cve.affected_packages
+                                ],
+                            }
+                        )
+                db.commit()
+        finally:
+            nvd.close()
+
+        # Look up associated PLAT Security Vulnerability tickets for each CVE.
+        _set_run_status(run_id, "looking_up_plat_tickets")
+        cve_to_plat: dict[str, str | None] = {}
+        try:
+            for cve_id in cve_ids:
+                try:
+                    cve_to_plat[cve_id] = jira.search_cve_ticket(cve_id)
+                except Exception:
+                    cve_to_plat[cve_id] = None
+        finally:
+            jira.close()
+
+        nvd_by_id = {e["cve_id"]: e for e in enriched}
+
+        # Known PlainID product image name tokens (case-insensitive).
+        _PLAINID_IMAGE_TOKENS = (
+            "plainid",
+            "agent",
+            "pip-operator",
+            "pip_operator",
+            "theruntime",
+            "runtime",
+            "rclone",
+            "secret-mgmt",
+            "secret_mgmt",
+            "access-file",
+            "access_file",
+            "authorizer",
+            "opa-authorizer",
+            "opa_authorizer",
+        )
+
+        def _is_plainid_image(image_name: str) -> bool:
+            lower = image_name.lower()
+            return any(tok in lower for tok in _PLAINID_IMAGE_TOKENS)
+
+        # Build a map: cve_id -> list of PlainID images (from description + attachments).
+        cve_to_images: dict[str, list[dict]] = {c: [] for c in cve_ids}
+
+        # Images from description apply to all CVEs found in the description.
+        desc_cve_ids = {c.cve_id for c in desc_cves}
+        desc_plainid_imgs = [
+            {"image": i.image, "tag": i.tag, "source": i.source}
+            for i in desc_images if _is_plainid_image(i.image)
+        ]
+        for cve_id in desc_cve_ids:
+            if cve_id in cve_to_images:
+                cve_to_images[cve_id].extend(desc_plainid_imgs)
+
+        # Images from attachments apply to CVEs found in the same attachment.
+        for p in parsed_attachments:
+            att_cves = {c["cve_id"] for c in p["cves"]}
+            plainid_imgs = [i for i in p["images"] if _is_plainid_image(i["image"])]
+            for cve_id in att_cves:
+                if cve_id in cve_to_images:
+                    cve_to_images[cve_id].extend(plainid_imgs)
+
+        cve_rows = []
+        for cve_id in cve_ids:
+            nvd_entry = nvd_by_id.get(cve_id, {})
+            imgs = cve_to_images.get(cve_id, [])
+            img = imgs[0] if imgs else None
+
+            # Use first affected package from NVD for resource/version columns.
+            pkgs: list[dict] = nvd_entry.get("packages") or []
+            pkg = pkgs[0] if pkgs else None
+            affected_resource = pkg["product"] if pkg else None
+            affected_version = pkg["version_start"] if pkg else None
+            fixed_version = pkg["fixed_version"] if pkg else None
+
+            # Confidence: medium when a PlainID image was inferred, low otherwise.
+            confidence = "medium" if img else "low"
+
+            cve_rows.append(
+                {
+                    "cve_id": cve_id,
+                    "severity": nvd_entry.get("severity"),
+                    "score": nvd_entry.get("score"),
+                    "nvd_state": nvd_entry.get("state", "unknown"),
+                    "affected_image": img["image"] if img else "NA",
+                    "affected_tag": img["tag"] if img else None,
+                    "affected_resource": affected_resource,
+                    "affected_version": affected_version,
+                    "fixed_version": fixed_version,
+                    "all_packages": pkgs,
+                    "confidence": confidence,
+                    "plat_ticket": cve_to_plat.get(cve_id),
+                    "sources": list(
+                        {c.source for c in desc_cves if c.cve_id == cve_id}
+                        | {c["source"] for p in parsed_attachments for c in p["cves"] if c["cve_id"] == cve_id}
+                    ),
+                }
+            )
+
+        result = {
+            "issue_key": issue.key,
+            "cves": cve_ids,
+            "cve_rows": cve_rows,
+            "nvd": enriched,
+            "cve_sources": [{"cve_id": c.cve_id, "source": c.source} for c in desc_cves]
+            + [c for p in parsed_attachments for c in p["cves"]],
+            "attachments": parsed_attachments,
+            "images": images,
+        }
+    except Exception as e:
+        _set_run_status(run_id, f"failed: {type(e).__name__}")
+        raise
+
+    with db_session() as db:
+        run = db.get(ProcessingRun, run_id)
+        if run:
+            run.status = "done"
+            run.result_json = json.dumps(result)
+            db.add(run)
+            db.commit()
+
+    return result
+

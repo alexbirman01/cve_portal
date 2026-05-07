@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cve-portal-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cve-portal-worker
+  template:
+    metadata:
+      labels:
+        app: cve-portal-worker
+    spec:
+      containers:
+        - name: worker
+          image: cve-portal-worker:latest
+          envFrom:
+            - configMapRef:
+                name: cve-portal-config
+            - secretRef:
+                name: cve-portal-secrets
+
