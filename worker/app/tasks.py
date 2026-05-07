@@ -57,6 +57,15 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "status": parsed.status,
                     "cves": [{"cve_id": c.cve_id, "source": c.source} for c in parsed.cves],
                     "images": [{"image": i.image, "tag": i.tag, "source": i.source} for i in parsed.images],
+                    "packages": [
+                        {
+                            "cve_id": p.cve_id,
+                            "package_name": p.package_name,
+                            "package_version": p.package_version,
+                            "fixed_version": p.fixed_version,
+                        }
+                        for p in parsed.packages
+                    ],
                 }
             )
 
@@ -153,6 +162,24 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
 
         nvd_by_id = {e["cve_id"]: e for e in enriched}
 
+        def _ver_tuple(v: str | None) -> tuple:
+            if not v:
+                return ()
+            try:
+                return tuple(int(x) for x in v.split("."))
+            except ValueError:
+                return ()
+
+        def _dedup_packages(pkgs: list[dict]) -> list[dict]:
+            """Collapse same-product entries, keeping the one with the highest fixed_version."""
+            seen: dict[str, dict] = {}
+            for p in pkgs:
+                key = p.get("product", "")
+                existing = seen.get(key)
+                if not existing or _ver_tuple(p.get("fixed_version")) > _ver_tuple(existing.get("fixed_version")):
+                    seen[key] = p
+            return list(seen.values())
+
         # Known PlainID product image name tokens (case-insensitive).
         _PLAINID_IMAGE_TOKENS = (
             "plainid",
@@ -196,18 +223,50 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 if cve_id in cve_to_images:
                     cve_to_images[cve_id].extend(plainid_imgs)
 
+        # Build a map of CVE -> list of package records from Excel attachments.
+        cve_to_excel_pkgs: dict[str, list[dict]] = {}
+        for p in parsed_attachments:
+            for ep in p.get("packages", []):
+                cve_to_excel_pkgs.setdefault(ep["cve_id"], []).append(ep)
+
         cve_rows = []
         for cve_id in cve_ids:
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
             img = imgs[0] if imgs else None
 
-            # Use first affected package from NVD for resource/version columns.
-            pkgs: list[dict] = nvd_entry.get("packages") or []
-            pkg = pkgs[0] if pkgs else None
-            affected_resource = pkg["product"] if pkg else None
-            affected_version = pkg["version_start"] if pkg else None
-            fixed_version = pkg["fixed_version"] if pkg else None
+            # Excel package data takes priority over NVD CPE (it reflects the actual installed version).
+            excel_pkgs = cve_to_excel_pkgs.get(cve_id, [])
+            if excel_pkgs:
+                # Deduplicate by package name, keep first occurrence per package.
+                seen_names: set[str] = set()
+                deduped_excel: list[dict] = []
+                for ep in excel_pkgs:
+                    if ep["package_name"] not in seen_names:
+                        seen_names.add(ep["package_name"])
+                        deduped_excel.append(ep)
+                first_ep = deduped_excel[0]
+                affected_resource = first_ep["package_name"]
+                affected_version = first_ep["package_version"]
+                fixed_version = first_ep["fixed_version"]
+                # Store as all_packages for the comment builder.
+                all_packages = [
+                    {
+                        "vendor": "",
+                        "product": ep["package_name"],
+                        "version_start": ep["package_version"],
+                        "fixed_version": ep["fixed_version"],
+                    }
+                    for ep in deduped_excel
+                ]
+            else:
+                # Fall back to NVD CPE data.
+                nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
+                first_np = nvd_pkgs[0] if nvd_pkgs else None
+                affected_resource = first_np["product"] if first_np else None
+                affected_version = first_np["version_start"] if first_np else None
+                fixed_version = first_np["fixed_version"] if first_np else None
+                all_packages = nvd_pkgs
 
             # Confidence: medium when a PlainID image was inferred, low otherwise.
             confidence = "medium" if img else "low"
@@ -223,7 +282,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "affected_resource": affected_resource,
                     "affected_version": affected_version,
                     "fixed_version": fixed_version,
-                    "all_packages": pkgs,
+                    "all_packages": all_packages,
                     "confidence": confidence,
                     "plat_ticket": cve_to_plat.get(cve_id),
                     "sources": list(

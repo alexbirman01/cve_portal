@@ -82,6 +82,27 @@ def start_processing(issue_key: str):
     return {"run_id": str(run_id), "task_id": async_result.id}
 
 
+@app.get("/api/jobs")
+def list_jobs(limit: int = 50):
+    with db_session() as db:
+        runs = (
+            db.query(ProcessingRun)
+            .order_by(ProcessingRun.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "run_id": str(r.id),
+                "issue_key": r.issue_key,
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "cve_count": len(json.loads(r.result_json).get("cves", [])) if r.result_json else None,
+            }
+            for r in runs
+        ]
+
+
 @app.get("/api/jobs/{run_id}")
 def job_status(run_id: str):
     rid = uuid.UUID(run_id)

@@ -63,6 +63,14 @@ export type JobResponse = {
   result?: JobResult | null
 }
 
+export type HistoryRun = {
+  run_id: string
+  issue_key: string
+  status: string
+  created_at?: string | null
+  cve_count?: number | null
+}
+
 export function formatStatus(status?: string | null): string {
   if (!status) return ''
   const map: Record<string, string> = {
@@ -145,9 +153,8 @@ export function buildSuggestedComment(result: JobResult): string {
     const pkgs = r.all_packages ?? []
     if (pkgs.length) {
       for (const p of pkgs) {
-        const ver = p.version_start ? ` >= ${p.version_start}` : ''
         const fix = p.fixed_version ? ` → fix: ${p.fixed_version}` : ''
-        lines.push(`  Package:  ${p.product}${ver}${fix}`)
+        lines.push(`  Package:  ${p.product}${fix}`)
       }
     } else if (r.affected_resource) {
       lines.push(`  Resource: ${r.affected_resource}${r.affected_version ? ` >= ${r.affected_version}` : ''}`)

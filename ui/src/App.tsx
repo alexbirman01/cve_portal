@@ -8,6 +8,7 @@ import {
   sortCveRows,
   statusSteps,
   type CveRow,
+  type HistoryRun,
   type IssueResponse,
   type JobResponse,
   type ProcessResponse,
@@ -71,65 +72,65 @@ function CveTable({ rows }: { rows: CveRow[] }) {
   const sorted = useMemo(() => sortCveRows(rows), [rows])
   if (!sorted.length) return <div className="muted small">No CVEs found.</div>
   return (
-    <table className="cveTable">
-      <thead>
-        <tr>
-          <th>CVE ID</th>
-          <th>PLAT Ticket</th>
-          <th>Severity / Score</th>
-          <th>Affected image : tag</th>
-          <th>Resource / Version</th>
-          <th>Fixed Version</th>
-          <th>Confidence</th>
-        </tr>
-      </thead>
-      <tbody>
-        {sorted.map((r) => (
-          <tr key={r.cve_id}>
-            <td>
-              <a
-                className="cveId"
-                href={`https://nvd.nist.gov/vuln/detail/${r.cve_id}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {r.cve_id}
-              </a>
-            </td>
-            <td>
-              {r.plat_ticket
-                ? <a className="cveId" href={`https://plainid.atlassian.net/browse/${r.plat_ticket}`} target="_blank" rel="noreferrer">{r.plat_ticket}</a>
-                : <span className="dash">NA</span>}
-            </td>
-            <td><SevBadge sev={r.severity} score={r.score} /></td>
-            <td>
-              {r.affected_image && r.affected_image !== 'NA'
-                ? <span className="mono">{r.affected_image}{r.affected_tag ? `:${r.affected_tag}` : ''}</span>
-                : <span className="dash">NA</span>}
-            </td>
-            <td>
-              {r.affected_resource
-                ? (
-                  <span className="mono">
-                    {r.affected_resource}
-                    {r.affected_version ? <span className="muted"> ≥{r.affected_version}</span> : null}
-                    {(r.all_packages?.length ?? 0) > 1
-                      ? <span className="muted small"> +{(r.all_packages!.length - 1)} more</span>
-                      : null}
-                  </span>
-                )
-                : <Dash />}
-            </td>
-            <td>
-              {r.fixed_version
-                ? <span className="mono" style={{ color: '#4ade80' }}>{r.fixed_version}</span>
-                : <Dash />}
-            </td>
-            <td><ConfBadge conf={r.confidence} /></td>
+    <div className="cveTableWrap">
+      <table className="cveTable">
+          <thead>
+          <tr>
+            <th style={{ minWidth: 160 }}>CVE ID</th>
+            <th style={{ minWidth: 110 }}>PLAT Ticket</th>
+            <th style={{ minWidth: 100 }}>Severity</th>
+            <th style={{ minWidth: 190 }}>Affected Image : Tag</th>
+            <th style={{ minWidth: 140 }}>Resource</th>
+            <th style={{ minWidth: 110 }}>Affected Ver.</th>
+            <th style={{ minWidth: 110 }}>Fixed Version</th>
+            <th style={{ minWidth: 90 }}>Confidence</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr key={r.cve_id}>
+              <td>
+                <a
+                  className="cveId"
+                  href={`https://nvd.nist.gov/vuln/detail/${r.cve_id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {r.cve_id}
+                </a>
+              </td>
+              <td>
+                {r.plat_ticket
+                  ? <a className="platTicketPill" href={`https://plainid.atlassian.net/browse/${r.plat_ticket}`} target="_blank" rel="noreferrer">{r.plat_ticket}</a>
+                  : <Dash />}
+              </td>
+              <td><SevBadge sev={r.severity} score={r.score} /></td>
+              <td>
+                {r.affected_image && r.affected_image !== 'NA'
+                  ? <span className="mono">{r.affected_image.replace(/^plainid\//i, '')}{r.affected_tag ? `:${r.affected_tag}` : ''}</span>
+                  : <Dash />}
+              </td>
+              <td>
+                {r.affected_resource
+                  ? <span className="mono">{r.affected_resource}</span>
+                  : <Dash />}
+              </td>
+              <td>
+                {r.affected_version
+                  ? <span className="mono">{r.affected_version}</span>
+                  : <Dash />}
+              </td>
+              <td>
+                {r.fixed_version
+                  ? <span className="mono fixedVer">{r.fixed_version}</span>
+                  : <Dash />}
+              </td>
+              <td><ConfBadge conf={r.confidence} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -155,7 +156,23 @@ function TicketPanel({
     <div className="card">
       <div className="ticketHeader">
         <div className="ticketKey">{issue.key}</div>
-        <div className="ticketSummary">{issue.summary ?? '—'}</div>
+        <div className="ticketTitleRow">
+          <div className="ticketSummary">{issue.summary ?? '—'}</div>
+          <div className="ticketActions">
+            {!isDone && (
+              <button className="btn btnPrimary" disabled={loading || isActive} onClick={onStartProcessing}>
+                {isActive ? 'Processing…' : 'Start processing'}
+              </button>
+            )}
+            {isDone && (
+              <button className="btn btnPrimary" onClick={onViewResults}>View results</button>
+            )}
+            {isDone && (
+              <button className="btn btnSecondary" onClick={onStartProcessing} disabled={loading}>Re-run</button>
+            )}
+            {job?.status && <StatusBadge status={job.status} />}
+          </div>
+        </div>
         <div className="ticketMeta">
           <div className="metaItem">Project <span>{issue.project ?? '—'}</span></div>
           <div className="metaItem">Type <span>{issue.issuetype ?? '—'}</span></div>
@@ -167,25 +184,6 @@ function TicketPanel({
             <div className="metaItem">Organizations <span>{issue.organizations!.join(', ')}</span></div>
           )}
         </div>
-      </div>
-
-      <div className="btnRow">
-        {!isDone && (
-          <button className="btn btnPrimary" disabled={loading || isActive} onClick={onStartProcessing}>
-            {isActive ? 'Processing…' : 'Start processing'}
-          </button>
-        )}
-        {isDone && (
-          <button className="btn btnPrimary" onClick={onViewResults}>
-            View results
-          </button>
-        )}
-        {isDone && (
-          <button className="btn btnSecondary" onClick={onStartProcessing} disabled={loading}>
-            Re-run
-          </button>
-        )}
-        {job?.status && <StatusBadge status={job.status} />}
       </div>
 
       {job?.status && <StepList status={job.status} />}
@@ -303,9 +301,99 @@ function ResultsPanel({
   )
 }
 
+// ─── history view ────────────────────────────────────────────────────────────
+
+function HistoryView({ onOpen }: { onOpen: (issueKey: string, runId: string) => void }) {
+  const [runs, setRuns] = useState<HistoryRun[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    apiGet<HistoryRun[]>('/api/jobs')
+      .then((data) => { if (alive) setRuns(data) })
+      .catch((e) => { if (alive) setError(e?.message ?? String(e)) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [])
+
+  function relativeTime(iso?: string | null) {
+    if (!iso) return '—'
+    const diff = Date.now() - new Date(iso).getTime()
+    const m = Math.floor(diff / 60000)
+    if (m < 1) return 'just now'
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    if (h < 24) return `${h}h ago`
+    return `${Math.floor(h / 24)}d ago`
+  }
+
+  return (
+    <div className="card historyCard">
+      <div className="cardHeader">
+        <span className="cardTitle">Recent processing runs</span>
+        {!loading && <span className="muted small">{runs.length} runs</span>}
+      </div>
+
+      {loading && <div className="muted small">Loading…</div>}
+      {error && <div className="errorBox">{error}</div>}
+
+      {!loading && !error && runs.length === 0 && (
+        <div className="muted small">No runs yet. Fetch a ticket and start processing.</div>
+      )}
+
+      {!loading && runs.length > 0 && (
+        <table className="historyTable">
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Status</th>
+              <th>CVEs</th>
+              <th>When</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((r) => (
+              <tr key={r.run_id}>
+                <td>
+                  <span className="mono" style={{ color: 'rgba(99,130,241,1)', fontWeight: 700 }}>
+                    {r.issue_key}
+                  </span>
+                </td>
+                <td><StatusBadge status={r.status} /></td>
+                <td>
+                  {r.cve_count != null
+                    ? <span className="cvePill">{r.cve_count} CVE{r.cve_count !== 1 ? 's' : ''}</span>
+                    : <span className="dash">—</span>}
+                </td>
+                <td><span className="muted small">{relativeTime(r.created_at)}</span></td>
+                <td>
+                  {r.status === 'done' && (
+                    <button
+                      className="btn btnSecondary"
+                      style={{ padding: '4px 12px', fontSize: 12 }}
+                      onClick={() => onOpen(r.issue_key, r.run_id)}
+                    >
+                      Open
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
 // ─── main app ────────────────────────────────────────────────────────────────
 
+type Page = 'new' | 'history'
+
 function App() {
+  const [page, setPage]               = useState<Page>('new')
   const [issueKey, setIssueKey]       = useState('')
   const [loading, setLoading]         = useState(false)
   const [error, setError]             = useState<string | null>(null)
@@ -397,55 +485,163 @@ function App() {
     }
   }
 
+  async function openFromHistory(key: string, rid: string) {
+    setPage('new')
+    setError(null)
+    setIssueKey(key)
+    setCommentPosted(false)
+    setLoading(true)
+    try {
+      const [issueData, jobData] = await Promise.all([
+        apiGet<IssueResponse>(`/api/issues/${key}`),
+        apiGet<JobResponse>(`/api/jobs/${rid}`),
+      ])
+      setIssue(issueData)
+      setJob(jobData)
+      setRunId(rid)
+      setViewMode('results')
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const showResults = issue && job && viewMode === 'results'
+  const showTicket  = issue && viewMode === 'ticket'
+
   return (
-    <div className="container">
-      {/* Top nav */}
-      <div className="topNav">
-        <span className="topNavLogo">CVE Portal</span>
-        <span className="topNavSub">PlainID Security Team</span>
-      </div>
+    <div className="appShell">
+      {/* ── Side nav ── */}
+      <nav className="sideNav">
+        <div className="sideNavLogo">
+          <div>
+            <img src="/plainid-logo.svg" alt="PlainID" className="sideNavLogoImg" />
+            <div className="sideNavLogoSub">CVE Portal · Security Team</div>
+          </div>
+        </div>
 
-      {/* Lookup bar */}
-      <div className="lookupCard">
-        <input
-          className="lookupInput"
-          placeholder="PLATFORM-1234"
-          value={issueKey}
-          onChange={(e) => setIssueKey(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && issueKey.trim() && !loading && fetchIssue()}
-        />
-        <button className="btn btnPrimary" disabled={!issueKey.trim() || loading} onClick={fetchIssue}>
-          {loading && !issue ? 'Fetching…' : 'Fetch'}
-        </button>
-        {loading && issue && <span className="muted small">Working…</span>}
-      </div>
+        <div className="sideNavItems">
+          <button
+            className={`sideNavItem ${page === 'new' ? 'sideNavItemActive' : ''}`}
+            onClick={() => {
+              setPage('new')
+              setIssue(null)
+              setIssueKey('')
+              setRunId(null)
+              setJob(null)
+              setViewMode('ticket')
+              setCommentBody('')
+              setCommentPosted(false)
+              setError(null)
+            }}
+          >
+            <span className="sideNavIcon">＋</span> New
+          </button>
+          <button
+            className={`sideNavItem ${page === 'history' ? 'sideNavItemActive' : ''}`}
+            onClick={() => setPage('history')}
+          >
+            <span className="sideNavIcon">⏱</span> History
+          </button>
+        </div>
 
-      {/* Error */}
-      {error && <div className="errorBox">{error}</div>}
+        <div className="sideNavFooter">
+          <a
+            className="sideNavFooterLink"
+            href="https://nvd.nist.gov/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            NVD ↗
+          </a>
+          <a
+            className="sideNavFooterLink"
+            href="https://plainid.atlassian.net/jira/projects"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Jira ↗
+          </a>
+        </div>
+      </nav>
 
-      {/* Ticket or Results */}
-      {issue && viewMode === 'ticket' && (
-        <TicketPanel
-          issue={issue}
-          job={job}
-          loading={loading}
-          onStartProcessing={startProcessing}
-          onViewResults={() => setViewMode('results')}
-        />
-      )}
+      {/* ── Main content ── */}
+      <main className="mainContent">
+        {/* ── NEW page ── */}
+        {page === 'new' && (
+          <>
+            {/* Lookup bar */}
+            {!issue && (
+              <div className="heroSearch">
+                <div className="heroTitle">Process a security ticket</div>
+                <div className="heroSub">Enter a PLATFORM ticket number to fetch and analyze its CVEs</div>
+                <div className="heroInputRow">
+                  <input
+                    className="lookupInput heroInput"
+                    placeholder="PLATFORM-1234"
+                    value={issueKey}
+                    onChange={(e) => setIssueKey(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && issueKey.trim() && !loading && fetchIssue()}
+                    autoFocus
+                  />
+                  <button className="btn btnPrimary" disabled={!issueKey.trim() || loading} onClick={fetchIssue}>
+                    {loading ? 'Fetching…' : 'Fetch'}
+                  </button>
+                </div>
+                {error && <div className="errorBox" style={{ marginTop: 16 }}>{error}</div>}
+              </div>
+            )}
 
-      {issue && job && viewMode === 'results' && (
-        <ResultsPanel
-          issue={issue}
-          job={job}
-          loading={loading}
-          commentBody={commentBody}
-          onCommentChange={setCommentBody}
-          onPushComment={pushComment}
-          onBack={() => setViewMode('ticket')}
-          commentPosted={commentPosted}
-        />
-      )}
+            {issue && (
+              <div className="pageHeader">
+                <div className="lookupCard">
+                  <input
+                    className="lookupInput"
+                    placeholder="PLATFORM-1234"
+                    value={issueKey}
+                    onChange={(e) => setIssueKey(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && issueKey.trim() && !loading && fetchIssue()}
+                  />
+                  <button className="btn btnPrimary" disabled={!issueKey.trim() || loading} onClick={fetchIssue}>
+                    {loading && !job ? 'Fetching…' : 'Fetch'}
+                  </button>
+                  {loading && job && <span className="muted small">Working…</span>}
+                </div>
+                {error && <div className="errorBox">{error}</div>}
+              </div>
+            )}
+
+            {showResults && (
+              <ResultsPanel
+                issue={issue}
+                job={job}
+                loading={loading}
+                commentBody={commentBody}
+                onCommentChange={setCommentBody}
+                onPushComment={pushComment}
+                onBack={() => setViewMode('ticket')}
+                commentPosted={commentPosted}
+              />
+            )}
+
+            {showTicket && (
+              <TicketPanel
+                issue={issue}
+                job={job}
+                loading={loading}
+                onStartProcessing={startProcessing}
+                onViewResults={() => setViewMode('results')}
+              />
+            )}
+          </>
+        )}
+
+        {/* ── HISTORY page ── */}
+        {page === 'history' && (
+          <HistoryView onOpen={openFromHistory} />
+        )}
+      </main>
     </div>
   )
 }
