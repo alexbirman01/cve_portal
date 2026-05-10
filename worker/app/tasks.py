@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient
 from api.app.models import CveCache, ProcessingRun
@@ -65,6 +66,10 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                             "fixed_version": p.fixed_version,
                         }
                         for p in parsed.packages
+                    ],
+                    "cve_image_facts": [
+                        {"cve_id": f.cve_id, "image": f.image, "tag": f.tag, "source": f.source}
+                        for f in parsed.cve_image_facts
                     ],
                 }
             )
@@ -180,48 +185,65 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     seen[key] = p
             return list(seen.values())
 
-        # Known PlainID product image name tokens (case-insensitive).
-        _PLAINID_IMAGE_TOKENS = (
-            "plainid",
-            "agent",
-            "pip-operator",
-            "pip_operator",
-            "theruntime",
-            "runtime",
-            "rclone",
-            "secret-mgmt",
-            "secret_mgmt",
-            "access-file",
-            "access_file",
-            "authorizer",
-            "opa-authorizer",
-            "opa_authorizer",
+        # Build PlainID image filter from configurable token list.
+        _plainid_tokens = tuple(
+            t.strip().lower()
+            for t in settings.plainid_image_patterns.split(",")
+            if t.strip()
         )
+        # Always accept images whose path starts with "plainid/".
+        _plainid_tokens = _plainid_tokens + ("plainid",)
 
         def _is_plainid_image(image_name: str) -> bool:
             lower = image_name.lower()
-            return any(tok in lower for tok in _PLAINID_IMAGE_TOKENS)
+            return any(tok in lower for tok in _plainid_tokens)
 
-        # Build a map: cve_id -> list of PlainID images (from description + attachments).
+        # Build cve_to_images from CveImageFacts (structured per-row links) first.
+        # This avoids fragile cross-attachment correlation.
         cve_to_images: dict[str, list[dict]] = {c: [] for c in cve_ids}
+        seen_img_keys: set[tuple[str, str, str]] = set()  # (cve_id, image, tag)
 
-        # Images from description apply to all CVEs found in the description.
-        desc_cve_ids = {c.cve_id for c in desc_cves}
-        desc_plainid_imgs = [
-            {"image": i.image, "tag": i.tag, "source": i.source}
-            for i in desc_images if _is_plainid_image(i.image)
-        ]
-        for cve_id in desc_cve_ids:
-            if cve_id in cve_to_images:
-                cve_to_images[cve_id].extend(desc_plainid_imgs)
-
-        # Images from attachments apply to CVEs found in the same attachment.
+        # 1. Structured facts from Excel (direct CVE ↔ image mapping per row).
         for p in parsed_attachments:
+            for fact in p.get("cve_image_facts", []):
+                if not _is_plainid_image(fact["image"]):
+                    continue
+                key = (fact["cve_id"], fact["image"], fact["tag"])
+                if fact["cve_id"] in cve_to_images and key not in seen_img_keys:
+                    seen_img_keys.add(key)
+                    cve_to_images[fact["cve_id"]].append(
+                        {"image": fact["image"], "tag": fact["tag"], "source": fact["source"]}
+                    )
+
+        # 2. Legacy: free-text images from description apply to all CVEs in description.
+        desc_cve_ids = {c.cve_id for c in desc_cves}
+        for i in desc_images:
+            if not _is_plainid_image(i.image):
+                continue
+            for cve_id in desc_cve_ids:
+                if cve_id not in cve_to_images:
+                    continue
+                key = (cve_id, i.image, i.tag)
+                if key not in seen_img_keys:
+                    seen_img_keys.add(key)
+                    cve_to_images[cve_id].append({"image": i.image, "tag": i.tag, "source": i.source})
+
+        # 3. Legacy: free-text images from attachments (when no structured facts were extracted).
+        #    Correlate by CVEs found in the same attachment.
+        for p in parsed_attachments:
+            if p.get("cve_image_facts"):
+                continue  # structured extraction succeeded — skip legacy correlation
             att_cves = {c["cve_id"] for c in p["cves"]}
-            plainid_imgs = [i for i in p["images"] if _is_plainid_image(i["image"])]
-            for cve_id in att_cves:
-                if cve_id in cve_to_images:
-                    cve_to_images[cve_id].extend(plainid_imgs)
+            for img_dict in p.get("images", []):
+                if not _is_plainid_image(img_dict["image"]):
+                    continue
+                for cve_id in att_cves:
+                    if cve_id not in cve_to_images:
+                        continue
+                    key = (cve_id, img_dict["image"], img_dict["tag"])
+                    if key not in seen_img_keys:
+                        seen_img_keys.add(key)
+                        cve_to_images[cve_id].append(img_dict)
 
         # Build a map of CVE -> list of package records from Excel attachments.
         cve_to_excel_pkgs: dict[str, list[dict]] = {}

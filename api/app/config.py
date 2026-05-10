@@ -14,6 +14,10 @@ class Settings(BaseSettings):
 
     nvd_api_key: str | None = None
 
+    # Comma-separated lowercase tokens used to decide if an image is a PlainID image.
+    # Matched case-insensitively as a substring of image name or tag.
+    plainid_image_patterns: str = "agent,pip-operator,runtime,rclone,secret-mgmt,access-file,authorizer"
+
 
 settings = Settings()
 
