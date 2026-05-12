@@ -263,6 +263,21 @@ export function platDisplayLabelForImage(r: CveRow, imageBasename: string): stri
   return v ? `${imageBasename}:${v}` : imageBasename
 }
 
+/** Short `image:tag` line for compact PLAT panel (basename:tag per image). */
+export function platDisplaySketchSummary(r: CveRow): string {
+  const basenames = imageBasenamesForCveRow(r)
+  if (basenames.length > 0) {
+    return basenames.map((b) => platDisplayLabelForImage(r, b)).join('; ')
+  }
+  if (r.affected_image && r.affected_image !== 'NA') {
+    const bn = imagePathBasename(r.affected_image)
+    if (bn) return platDisplayLabelForImage(r, bn)
+    const tail = r.affected_image.replace(/^plainid\//i, '').trim()
+    return r.affected_tag ? `${tail}:${String(r.affected_tag).trim()}` : tail
+  }
+  return ''
+}
+
 /** Full image ref for PLAT row label: repo path (no `plainid/` prefix) + optional `:tag` — same shape as former “Affected Image : Tag” column. */
 export function platDisplayFullImageForRow(r: CveRow, imageBasename: string): string {
   const path = imagePathForBasename(r, imageBasename)
@@ -421,6 +436,52 @@ export function platSecKeysForImage(r: CveRow, imageBasename: string): string[] 
 export function imageBasenameForPlat(r: CveRow): string | null {
   const all = imageBasenamesForCveRow(r)
   return all[0] ?? null
+}
+
+/** Apply a PLAT create (new or already-existing) response onto the CVE table row list. */
+export function mergePlatCreateIntoRows(
+  rows: CveRow[],
+  cveId: string,
+  imageBasename: string,
+  out: CreatePlatResponse,
+): CveRow[] {
+  return rows.map((r) => {
+    if (r.cve_id !== cveId) return r
+    const mergeKeys = out.exists ? out.keys : [out.key]
+    const m = { ...(r.plat_security_for_images ?? {}) }
+    const cur = new Set(m[imageBasename] ?? [])
+    for (const k of mergeKeys) cur.add(k)
+    m[imageBasename] = [...cur]
+
+    const byKey = new Map((r.plat_tickets ?? []).map((t) => [t.key, t]))
+    for (const k of mergeKeys) {
+      if (!byKey.has(k)) byKey.set(k, { key: k, issue_type: 'Security Vulnerability' })
+    }
+    const allSec = new Set([...(r.plat_security_keys ?? []), ...mergeKeys])
+    return {
+      ...r,
+      plat_security_for_images: m,
+      plat_security_keys: [...allSec],
+      plat_tickets: [...byKey.values()],
+    }
+  })
+}
+
+export type PlatMissingCveSlot = { cve_id: string; image_basename: string }
+
+/** Row/image pairs that show “Create CVE” (version present, image known, no Sec-Vuln PLAT yet). */
+export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
+  const out: PlatMissingCveSlot[] = []
+  for (const r of rows) {
+    const verOk = !!(r.affected_version && String(r.affected_version).trim())
+    if (!verOk) continue
+    for (const imageBasename of imageBasenamesForCveRow(r)) {
+      if (platSecKeysForImage(r, imageBasename).length === 0) {
+        out.push({ cve_id: r.cve_id, image_basename: imageBasename })
+      }
+    }
+  }
+  return out
 }
 
 export function buildSuggestedComment(result: JobResult): string {

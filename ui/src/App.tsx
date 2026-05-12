@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   apiCreatePlat,
@@ -8,11 +8,15 @@ import {
   exportCvesToExcel,
   formatStatus,
   imageBasenamesForCveRow,
+  mergePlatCreateIntoRows,
   platBugTicketsForImage,
+  platMissingCveCreateSlots,
   platOrphanSecKeys,
   platSecKeysForImage,
   platDisplayFullImageForRow,
   platDisplayFullImagesSummary,
+  platDisplayLabelForImage,
+  platDisplaySketchSummary,
   platOrgRefsFromIssue,
   platPackageNameForRow,
   platSecurityKeys,
@@ -74,6 +78,74 @@ function Dash() {
   return <span className="dash">—</span>
 }
 
+/** Lowercase blob for CVE row text search */
+function cveRowSearchText(r: CveRow): string {
+  const tickets = [
+    ...(r.plat_tickets ?? []),
+    ...(r.plat_ticket ? [{ key: r.plat_ticket, issue_type: '' as const }] : []),
+  ]
+  const keys = tickets.map((t) => t.key).join(' ')
+  return [
+    r.cve_id,
+    r.affected_resource,
+    r.affected_version,
+    r.fixed_version,
+    platDisplaySketchSummary(r),
+    platDisplayFullImagesSummary(r),
+    keys,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+}
+
+function rowMatchesCveFilters(
+  r: CveRow,
+  q: string,
+  sev: string,
+  res: string,
+): boolean {
+  const needle = q.trim().toLowerCase()
+  if (needle && !cveRowSearchText(r).includes(needle)) return false
+  if (sev && (r.severity ?? '').toUpperCase() !== sev.toUpperCase()) return false
+  if (res && (r.affected_resource ?? '') !== res) return false
+  return true
+}
+
+function severitySortKey(s: string): number {
+  const u = s.toUpperCase()
+  const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
+  const i = order.indexOf(u)
+  return i >= 0 ? i : 99
+}
+
+/** Worst (highest) severity among findings for ticket-level summary chip */
+function aggregateSeverityLabel(rows: CveRow[]): string {
+  if (!rows.length) return ''
+  const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+  let bestIdx = -1
+  for (const r of rows) {
+    const u = (r.severity ?? '').toUpperCase().trim()
+    const i = order.indexOf(u)
+    if (i >= 0) bestIdx = bestIdx === -1 ? i : Math.min(bestIdx, i)
+  }
+  return bestIdx < 0 ? '' : order[bestIdx]
+}
+
+function severityMetaChipClass(label: string): string {
+  const u = label.toUpperCase()
+  if (u === 'CRITICAL') return 'attrChipMetaBox attrChipSevCritical'
+  if (u === 'HIGH') return 'attrChipMetaBox attrChipSevHigh'
+  if (u === 'MEDIUM') return 'attrChipMetaBox attrChipSevMedium'
+  if (u === 'LOW') return 'attrChipMetaBox attrChipSevLow'
+  return 'attrChipMetaBox attrChipSevUnknown'
+}
+
+function formatSeverityTitleCase(label: string): string {
+  if (!label) return '—'
+  return label.charAt(0) + label.slice(1).toLowerCase()
+}
+
 // ─── CVE table ───────────────────────────────────────────────────────────────
 
 function CveTable({
@@ -81,38 +153,70 @@ function CveTable({
   issueKey,
   platOrganizationRefs,
   onPlatCreated,
+  hideBuiltInToolbar,
+  sourceRowCount,
+  onClearFilters,
 }: {
   rows: CveRow[]
   issueKey?: string
   platOrganizationRefs?: OrgRef[] | null
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
+  hideBuiltInToolbar?: boolean
+  /** When filters hide all rows but source had rows, show clear action */
+  sourceRowCount?: number
+  onClearFilters?: () => void
 }) {
   const sorted = useMemo(() => sortCveRows(rows), [rows])
   const [platBusy, setPlatBusy] = useState<string | null>(null)
   const [platErrRow, setPlatErrRow] = useState<string | null>(null)
   const [platErrMsg, setPlatErrMsg] = useState<string | null>(null)
-  if (!sorted.length) return <div className="muted small">No CVEs found.</div>
+  if (!sorted.length) {
+    const hadSource = (sourceRowCount ?? 0) > 0
+    if (hadSource && onClearFilters) {
+      return (
+        <div className="cveTableWrap cveTableWrapEmpty">
+          <p className="muted small cveTableEmptyMsg">
+            No CVEs match filters.{' '}
+            <button type="button" className="resultsClearFiltersLink" onClick={onClearFilters}>
+              Clear filters
+            </button>
+          </p>
+        </div>
+      )
+    }
+    return <div className="muted small">No CVEs found.</div>
+  }
   const filename = issueKey ? `${issueKey}-cve-findings.xlsx` : 'cve-findings.xlsx'
   return (
     <div className="cveTableWrap">
-      <div className="cveTableToolbar">
-        <button
-          className="btnExport"
-          onClick={() => exportCvesToExcel(sorted, filename)}
-          title="Export to Excel"
-        >
-          ↓ Export Excel
-        </button>
-      </div>
+      {!hideBuiltInToolbar && (
+        <div className="cveTableToolbar">
+          <button
+            className="btnExport"
+            onClick={() => exportCvesToExcel(sorted, filename)}
+            title="Export to Excel"
+          >
+            ↓ Export Excel
+          </button>
+        </div>
+      )}
       <table className="cveTable">
+        <colgroup>
+          <col className="cveColCve" />
+          <col className="cveColPlat" />
+          <col className="cveColSev" />
+          <col className="cveColRes" />
+          <col className="cveColVer" />
+          <col className="cveColFix" />
+        </colgroup>
         <thead>
           <tr>
-            <th style={{ minWidth: 160 }}>CVE ID</th>
-            <th style={{ minWidth: 320 }}>Affected image PLAT ticket</th>
-            <th style={{ minWidth: 100 }}>Severity</th>
-            <th style={{ minWidth: 120 }}>Resource</th>
-            <th style={{ minWidth: 90 }}>Affected Ver.</th>
-            <th style={{ minWidth: 90 }}>Vendor Fix</th>
+            <th>CVE ID</th>
+            <th>Affected image PLAT ticket</th>
+            <th>Severity</th>
+            <th>Resource</th>
+            <th>Affected Ver.</th>
+            <th>Vendor Fix</th>
           </tr>
         </thead>
         <tbody>
@@ -142,7 +246,7 @@ function CveTable({
                   const allSecKeys = platSecurityKeys(r)
 
                   return (
-                    <div className="platCell">
+                    <div className="platCell platCellSketchBoard">
                       {perImages.length > 0 ? (
                         <>
                           {perImages.map((imgBasename) => {
@@ -155,10 +259,13 @@ function CveTable({
                               !bugsForImg.length && !secKeys.length && !canCreateThis
                             return (
                               <div key={imgBasename} className="platPerImage">
-                                <span className="platPerImageLabel mono" title="Affected image (full path and tag)">
-                                  {platDisplayFullImageForRow(r, imgBasename)}
+                                <span
+                                  className="platPerImageLabel mono"
+                                  title={platDisplayFullImageForRow(r, imgBasename)}
+                                >
+                                  {platDisplayLabelForImage(r, imgBasename)}
                                 </span>
-                                <div className="platPerImageActions">
+                                <div className="platPerImageActions platSketchActions">
                                   {bugsForImg.map((t) => (
                                     <a
                                       key={t.key}
@@ -169,7 +276,7 @@ function CveTable({
                                       title={t.issue_type}
                                     >
                                       {t.key}
-                                      <span className="platTicketType platTicketKindBug">Bug</span>
+                                      <span className="platTicketType">bug</span>
                                     </a>
                                   ))}
                                   {secKeys.map((pk) => (
@@ -182,7 +289,7 @@ function CveTable({
                                       title="Security Vulnerability"
                                     >
                                       {pk}
-                                      <span className="platTicketType platTicketKindCve">cve</span>
+                                      <span className="platTicketType">cve</span>
                                     </a>
                                   ))}
                                   {!secKeys.length && canCreateThis && (
@@ -234,7 +341,7 @@ function CveTable({
                               >
                                 Unmapped Sec
                               </span>
-                              <div className="platPerImageActions">
+                              <div className="platPerImageActions platSketchActions">
                                 {orphanSec.map((pk) => (
                                   <a
                                     key={pk}
@@ -245,7 +352,7 @@ function CveTable({
                                     title="Security Vulnerability—unmapped to image"
                                   >
                                     {pk}
-                                    <span className="platTicketType platTicketKindCve">cve</span>
+                                    <span className="platTicketType">cve</span>
                                   </a>
                                 ))}
                               </div>
@@ -256,15 +363,22 @@ function CveTable({
                         <>
                           {(bugTickets.length > 0 ||
                             allSecKeys.length > 0 ||
-                            platDisplayFullImagesSummary(r)) && (
+                            platDisplayFullImagesSummary(r) ||
+                            platDisplaySketchSummary(r)) && (
                             <div className="platPerImage platPerImageAggregated">
                               <span
                                 className="platPerImageLabel mono"
-                                title="Affected image (full path and tag)"
+                                title={
+                                  platDisplayFullImagesSummary(r) ||
+                                  platDisplaySketchSummary(r) ||
+                                  undefined
+                                }
                               >
-                                {platDisplayFullImagesSummary(r) || '—'}
+                                {platDisplaySketchSummary(r) ||
+                                  platDisplayFullImagesSummary(r) ||
+                                  '—'}
                               </span>
-                              <div className="platPerImageActions">
+                              <div className="platPerImageActions platSketchActions">
                                 {bugTickets.map((t) => (
                                   <a
                                     key={t.key}
@@ -275,7 +389,7 @@ function CveTable({
                                     title={t.issue_type}
                                   >
                                     {t.key}
-                                    <span className="platTicketType platTicketKindBug">Bug</span>
+                                    <span className="platTicketType">bug</span>
                                   </a>
                                 ))}
                                 {allSecKeys.map((pk) => (
@@ -288,7 +402,7 @@ function CveTable({
                                     title="Security Vulnerability"
                                   >
                                     {pk}
-                                    <span className="platTicketType platTicketKindCve">cve</span>
+                                    <span className="platTicketType">cve</span>
                                   </a>
                                 ))}
                                 {bugTickets.length === 0 &&
@@ -300,7 +414,8 @@ function CveTable({
                           )}
                           {bugTickets.length === 0 &&
                             allSecKeys.length === 0 &&
-                            !platDisplayFullImagesSummary(r) && (
+                            !platDisplayFullImagesSummary(r) &&
+                            !platDisplaySketchSummary(r) && (
                               <div className="platFallbackRow">
                                 <Dash />
                               </div>
@@ -448,6 +563,64 @@ function TicketPanel({
   )
 }
 
+function ResultsOverflowMenu({ issueKey }: { issueKey: string }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const fn = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', fn)
+    return () => document.removeEventListener('mousedown', fn)
+  }, [open])
+
+  const jiraUrl = `https://plainid.atlassian.net/browse/${encodeURIComponent(issueKey)}`
+
+  return (
+    <div className="resultsOverflowWrap" ref={ref}>
+      <button
+        type="button"
+        className="resultsOverflowBtn"
+        aria-expanded={open}
+        aria-label="More actions"
+        onClick={() => setOpen(!open)}
+      >
+        ⋮
+      </button>
+      {open && (
+        <ul className="resultsOverflowMenu" role="menu">
+          <li role="none">
+            <button
+              type="button"
+              role="menuitem"
+              className="resultsOverflowMenuItem"
+              onClick={() => {
+                void navigator.clipboard.writeText(issueKey)
+                setOpen(false)
+              }}
+            >
+              Copy issue key
+            </button>
+          </li>
+          <li role="none">
+            <a
+              className="resultsOverflowMenuItem"
+              role="menuitem"
+              href={jiraUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setOpen(false)}
+            >
+              Open in Jira
+            </a>
+          </li>
+        </ul>
+      )}
+    </div>
+  )
+}
+
 // ─── results panel ───────────────────────────────────────────────────────────
 
 function ResultsPanel({
@@ -458,6 +631,7 @@ function ResultsPanel({
   onCommentChange,
   onPushComment,
   onBack,
+  onRefreshJob,
   commentPosted,
 }: {
   issue: IssueResponse
@@ -467,92 +641,270 @@ function ResultsPanel({
   onCommentChange: (v: string) => void
   onPushComment: () => void
   onBack: () => void
+  onRefreshJob: () => void | Promise<void>
   commentPosted: boolean
 }) {
   const [rows, setRows] = useState<CveRow[]>([])
+  const [filterText, setFilterText] = useState('')
+  const [severityFilter, setSeverityFilter] = useState('')
+  const [resourceFilter, setResourceFilter] = useState('')
+  const [platBulkBusy, setPlatBulkBusy] = useState(false)
+  const [platBulkProgress, setPlatBulkProgress] = useState<{ done: number; total: number } | null>(null)
+  const [platBulkErr, setPlatBulkErr] = useState<string | null>(null)
+
   useEffect(() => {
     if (job.status === 'done' && job.result?.cve_rows) {
       setRows(job.result.cve_rows)
+    } else {
+      setRows([])
     }
-  }, [job.run_id, job.status])
+  }, [job])
 
   const onPlatCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r.cve_id !== cveId) return r
-        const m = { ...(r.plat_security_for_images ?? {}) }
-        const mergeKeys = out.exists ? out.keys : [out.key]
-        const cur = new Set(m[imageBasename] ?? [])
-        for (const k of mergeKeys) cur.add(k)
-        m[imageBasename] = [...cur]
-
-        const byKey = new Map((r.plat_tickets ?? []).map((t) => [t.key, t]))
-        for (const k of mergeKeys) {
-          if (!byKey.has(k)) byKey.set(k, { key: k, issue_type: 'Security Vulnerability' })
-        }
-        const allSec = new Set([...(r.plat_security_keys ?? []), ...mergeKeys])
-        return {
-          ...r,
-          plat_security_for_images: m,
-          plat_security_keys: [...allSec],
-          plat_tickets: [...byKey.values()],
-        }
-      }),
-    )
+    setRows((prev) => mergePlatCreateIntoRows(prev, cveId, imageBasename, out))
   }
+
+  const severityOptions = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of rows) {
+      if (r.severity?.trim()) s.add(r.severity.trim().toUpperCase())
+    }
+    return [...s].sort((a, b) => severitySortKey(a) - severitySortKey(b) || a.localeCompare(b))
+  }, [rows])
+
+  const resourceOptions = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of rows) {
+      if (r.affected_resource?.trim()) s.add(r.affected_resource.trim())
+    }
+    return [...s].sort((a, b) => a.localeCompare(b))
+  }, [rows])
+
+  const findingsSeveritySummary = useMemo(() => aggregateSeverityLabel(rows), [rows])
+
+  const filteredRows = useMemo(
+    () => rows.filter((r) => rowMatchesCveFilters(r, filterText, severityFilter, resourceFilter)),
+    [rows, filterText, severityFilter, resourceFilter],
+  )
+
+  const missingCveSlots = useMemo(
+    () => platMissingCveCreateSlots(filteredRows),
+    [filteredRows],
+  )
+
+  async function createAllMissingPlatCves() {
+    const slots = [...missingCveSlots]
+    if (!issue.key || slots.length === 0) return
+    setPlatBulkBusy(true)
+    setPlatBulkErr(null)
+    setPlatBulkProgress({ done: 0, total: slots.length })
+    const orgRefs = platOrgRefsFromIssue(issue)
+    let acc = rows
+    const failures: string[] = []
+    try {
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        const r = acc.find((x) => x.cve_id === slot.cve_id)
+        if (!r) continue
+        const ver = (r.affected_version ?? '').trim()
+        if (!ver) continue
+        try {
+          const out = await apiCreatePlat({
+            cve_id: r.cve_id,
+            image_basename: slot.image_basename,
+            package_name: platPackageNameForRow(r),
+            package_version: ver,
+            severity: r.severity,
+            organizations: orgRefs,
+            source_issue_key: issue.key,
+          })
+          acc = mergePlatCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
+          setRows(acc)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          failures.push(`${r.cve_id} / ${slot.image_basename}: ${msg}`)
+        }
+        setPlatBulkProgress({ done: i + 1, total: slots.length })
+      }
+      if (failures.length) {
+        setPlatBulkErr(
+          failures.length === slots.length
+            ? `All ${failures.length} failed. ${failures[0]}`
+            : `${failures.length} of ${slots.length} failed. ${failures.slice(0, 3).join(' · ')}${failures.length > 3 ? ' …' : ''}`,
+        )
+      }
+    } finally {
+      setPlatBulkBusy(false)
+      setPlatBulkProgress(null)
+    }
+  }
+
+  function clearAllFilters() {
+    setFilterText('')
+    setSeverityFilter('')
+    setResourceFilter('')
+  }
+
+  const findingsDone = job.status === 'done'
+  const exportFilename = issue.key ? `${issue.key}-cve-findings.xlsx` : 'cve-findings.xlsx'
 
   return (
     <div className="resultsStack">
       <div className="resultsBarWrap">
-        <div className="resultsBar">
-          <button className="resultsBarBack" onClick={onBack}>←</button>
-          <span className="resultsBarKey">{issue.key}</span>
-          <span className="resultsBarSep">·</span>
-          <span className="resultsBarTitle">{issue.summary ?? '—'}</span>
-          <StatusBadge status={job.status} />
+        <div className="resultsBarGrid">
+          <div className="resultsBarLeft">
+            <button type="button" className="resultsBarBack" onClick={onBack}>
+              ←
+            </button>
+            <span className="resultsMonoKey">{issue.key}</span>
+          </div>
+          <h1 className="resultsBarTitleMain">{issue.summary ?? '—'}</h1>
+          <div className="resultsBarRight">
+            {job.status === 'done' ? (
+              <span className="resultsDonePill">✓ Done</span>
+            ) : (
+              <StatusBadge status={job.status} />
+            )}
+            <ResultsOverflowMenu issueKey={issue.key} />
+          </div>
         </div>
-        <div className="resultsAttrRow">
-          <div className="attrChip attrChipProject">
+        <div className="resultsAttrRow resultsAttrRowMeta">
+          <div className="attrChip attrChipMetaBox attrChipProject">
             <span className="attrChipLabel">Project</span>
-            <span className="attrChipValue mono">{issue.project ?? '—'}</span>
+            <span className="attrChipValuePill">
+              <span className="mono">{issue.project ?? '—'}</span>
+            </span>
           </div>
-          <div className="attrChip attrChipType">
+          <div className={`attrChip ${severityMetaChipClass(findingsSeveritySummary)}`}>
+            <span className="attrChipLabel">Severity</span>
+            <span className="attrChipValuePill">{formatSeverityTitleCase(findingsSeveritySummary)}</span>
+          </div>
+          <div className="attrChip attrChipMetaBox attrChipType">
             <span className="attrChipLabel">Type</span>
-            <span className="attrChipValue">{issue.issuetype ?? '—'}</span>
+            <span className="attrChipValuePill">{issue.issuetype ?? '—'}</span>
           </div>
-          {(issue.attachments?.length ?? 0) > 0 && (
-            <div className="attrChip attrChipAttach">
-              <span className="attrChipLabel">Attachments</span>
-              <span className="attrChipValue">
-                {issue.attachments.length} file{issue.attachments.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-          )}
+          <div className="attrChip attrChipMetaBox attrChipAttach">
+            <span className="attrChipLabel">Attachments</span>
+            <span className="attrChipValuePill">
+              {issue.attachments.length} file{issue.attachments.length !== 1 ? 's' : ''}
+            </span>
+          </div>
           {issue.reporter && (
-            <div className="attrChip attrChipReporter">
+            <div className="attrChip attrChipMetaBox attrChipReporter">
               <span className="attrChipLabel">Reporter</span>
-              <span className="attrChipValue">{issue.reporter}</span>
+              <span className="attrChipValuePill">{issue.reporter}</span>
             </div>
           )}
           {(issue.organizations?.length ?? 0) > 0 && (
-            <div className="attrChip attrChipOrg">
-              <span className="attrChipLabel">Organizations</span>
-              <span className="attrChipValue">{issue.organizations!.join(', ')}</span>
+            <div className="attrChip attrChipMetaBox attrChipOrg">
+              <span className="attrChipLabel">Organization</span>
+              <span className="attrChipValuePill">{issue.organizations!.join(', ')}</span>
             </div>
           )}
         </div>
       </div>
 
       {/* CVE table */}
-      <div className="card">
-        <div className="cardHeader">
-          <span className="cardTitle">CVE Findings ({rows.length})</span>
+      <div className="card resultsFindingsCard">
+        <div className="cardHeader resultsFindingsCardHeader">
+          <span className="cardTitle">
+            CVE Findings ({filteredRows.length}
+            {filteredRows.length !== rows.length ? ` of ${rows.length}` : ''})
+          </span>
         </div>
+        {findingsDone && (
+          <div className="resultsFindingsToolbar">
+            <div className="resultsFindingsToolbarMain">
+              <label className="resultsFilterSearchWrap">
+                <input
+                  type="search"
+                  className="resultsFilterSearch"
+                  placeholder="Filter by CVE ID, resource, image, etc…"
+                  value={filterText}
+                  onChange={(e) => setFilterText(e.target.value)}
+                  autoComplete="off"
+                />
+              </label>
+              <select
+                className="resultsFilterSelect"
+                value={severityFilter}
+                onChange={(e) => setSeverityFilter(e.target.value)}
+                aria-label="Severity filter"
+              >
+                <option value="">Severity</option>
+                {severityOptions.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <select
+                className="resultsFilterSelect"
+                value={resourceFilter}
+                onChange={(e) => setResourceFilter(e.target.value)}
+                aria-label="Resource filter"
+              >
+                <option value="">Resource</option>
+                {resourceOptions.map((res) => (
+                  <option key={res} value={res}>{res}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="resultsFiltersResetBtn"
+                onClick={clearAllFilters}
+                title="Reset all filters"
+              >
+                Filters
+              </button>
+              <button
+                type="button"
+                className="resultsRefreshBtn"
+                onClick={() => void onRefreshJob()}
+                disabled={loading}
+                title="Refresh results from server"
+              >
+                ↻
+              </button>
+            </div>
+            <div className="resultsFindingsToolbarActions">
+              <button
+                type="button"
+                className="btnCreateAllPlat"
+                disabled={loading || platBulkBusy || missingCveSlots.length === 0}
+                title={
+                  missingCveSlots.length === 0
+                    ? 'No filtered findings need a new CVE PLAT ticket (requires affected version and image)'
+                    : `Create Security Vulnerability PLAT tickets for ${missingCveSlots.length} filtered image/CVE pair(s) missing a CVE ticket`
+                }
+                onClick={() => void createAllMissingPlatCves()}
+              >
+                {platBulkBusy && platBulkProgress
+                  ? `Creating… ${platBulkProgress.done}/${platBulkProgress.total}`
+                  : `＋ Create all CVE tickets${missingCveSlots.length ? ` (${missingCveSlots.length})` : ''}`}
+              </button>
+              <button
+                type="button"
+                className="btnExport"
+                onClick={() => exportCvesToExcel(filteredRows, exportFilename)}
+                title="Export filtered rows to Excel"
+              >
+                ↓ Export Excel
+              </button>
+            </div>
+          </div>
+        )}
+        {findingsDone && platBulkErr && (
+          <div className="resultsPlatBulkErr small" role="alert">
+            {platBulkErr}
+          </div>
+        )}
         <CveTable
-          rows={rows}
+          rows={filteredRows}
           issueKey={issue.key}
           platOrganizationRefs={platOrgRefsFromIssue(issue)}
           onPlatCreated={onPlatCreated}
+          hideBuiltInToolbar={findingsDone}
+          sourceRowCount={rows.length}
+          onClearFilters={findingsDone && rows.length > 0 ? clearAllFilters : undefined}
         />
       </div>
 
@@ -855,6 +1207,20 @@ function App() {
     }
   }
 
+  async function refreshJob() {
+    if (!runId) return
+    setError(null)
+    setLoading(true)
+    try {
+      const j = await apiGet<JobResponse>(`/api/jobs/${runId}`)
+      setJob(j)
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function openFromHistory(key: string, rid: string) {
     setPage('new')
     setError(null)
@@ -975,6 +1341,7 @@ function App() {
                 onCommentChange={setCommentBody}
                 onPushComment={pushComment}
                 onBack={() => setViewMode('ticket')}
+                onRefreshJob={refreshJob}
                 commentPosted={commentPosted}
               />
             )}

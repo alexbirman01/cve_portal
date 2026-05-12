@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from api.app.config import settings
 from api.app.db import db_session
-from api.app.jira_client import JiraClient
+from api.app.jira_client import JiraClient, PlatTicket
 from api.app.models import CveCache, ProcessingRun
 from api.app.nvd_client import NvdClient, _extract_affected_packages
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
@@ -153,15 +154,28 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         finally:
             nvd.close()
 
-        # Look up associated PLAT Security Vulnerability tickets for each CVE.
+        # Look up associated PLAT tickets (Security Vulnerability + Bug) for each CVE.
         _set_run_status(run_id, "looking_up_plat_tickets")
-        cve_to_plat: dict[str, str | None] = {}
+        cve_to_plat: dict[str, list[dict]] = {}
+        cve_to_plat_security_by_image: dict[str, dict[str, list[str]]] = {}
         try:
             for cve_id in cve_ids:
                 try:
-                    cve_to_plat[cve_id] = jira.search_cve_ticket(cve_id)
+                    tickets: list[PlatTicket] = jira.search_plat_tickets(cve_id)
+                    cve_to_plat[cve_id] = [
+                        {"key": t.key, "issue_type": t.issue_type, "summary": t.summary}
+                        for t in tickets
+                    ]
+                    by_img: dict[str, list[str]] = {}
+                    for item in jira.search_plat_security_for_cve(cve_id):
+                        img = (item.get("image_basename") or "").strip()
+                        if not img:
+                            continue
+                        by_img.setdefault(img, []).append(item["key"])
+                    cve_to_plat_security_by_image[cve_id] = by_img
                 except Exception:
-                    cve_to_plat[cve_id] = None
+                    cve_to_plat[cve_id] = []
+                    cve_to_plat_security_by_image[cve_id] = {}
         finally:
             jira.close()
 
@@ -251,11 +265,35 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             for ep in p.get("packages", []):
                 cve_to_excel_pkgs.setdefault(ep["cve_id"], []).append(ep)
 
+        def _img_tokens(img_name: str) -> list[str]:
+            """Return searchable substrings for an image name, e.g. 'plainid/pip-operator' → ['pip-operator','pip','operator']."""
+            name = re.sub(r"^plainid/", "", img_name, flags=re.IGNORECASE).lower()
+            parts = re.split(r"[-_]", name)
+            return [name] + parts
+
+        def _token_in_summary(tok: str, summary_lower: str) -> bool:
+            """Match token as a complete segment — not as a prefix/suffix of a longer hyphenated word.
+            e.g. 'pip' matches 'pip' and '[pip]' but NOT 'pip-mgmt' or 'pip-operator'."""
+            return bool(re.search(r"(?<![a-zA-Z0-9\-_])" + re.escape(tok) + r"(?![a-zA-Z0-9\-_])", summary_lower))
+
+        def _filter_plat_tickets(tickets: list[dict], imgs: list[dict]) -> list[dict]:
+            """Keep Security Vulnerability tickets as-is; filter Bug tickets to those matching an affected image."""
+            img_token_set = {tok for i in imgs for tok in _img_tokens(i["image"]) if len(tok) > 2}
+            result = []
+            for t in tickets:
+                if t["issue_type"] == "Bug" and img_token_set:
+                    summary_lower = (t.get("summary") or "").lower()
+                    if not any(_token_in_summary(tok, summary_lower) for tok in img_token_set):
+                        continue  # no image match — skip this Bug ticket
+                result.append(t)
+            return result
+
+        _set_run_status(run_id, "building_results")
+
         cve_rows = []
         for cve_id in cve_ids:
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
-            img = imgs[0] if imgs else None
 
             # Excel package data takes priority over NVD CPE (it reflects the actual installed version).
             excel_pkgs = cve_to_excel_pkgs.get(cve_id, [])
@@ -290,8 +328,11 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 fixed_version = first_np["fixed_version"] if first_np else None
                 all_packages = nvd_pkgs
 
-            # Confidence: medium when a PlainID image was inferred, low otherwise.
-            confidence = "medium" if img else "low"
+            raw_plat = cve_to_plat.get(cve_id, [])
+            plat_security_keys = [
+                t["key"] for t in raw_plat if t["issue_type"] == "Security Vulnerability"
+            ]
+            plat_security_for_images = dict(cve_to_plat_security_by_image.get(cve_id, {}))
 
             cve_rows.append(
                 {
@@ -299,14 +340,18 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "severity": nvd_entry.get("severity"),
                     "score": nvd_entry.get("score"),
                     "nvd_state": nvd_entry.get("state", "unknown"),
-                    "affected_image": img["image"] if img else "NA",
-                    "affected_tag": img["tag"] if img else None,
+                    # All matched PlainID images for this CVE (may be multiple).
+                    "affected_images": [{"image": i["image"], "tag": i["tag"]} for i in imgs],
+                    # Legacy single-image fields kept for backward compatibility.
+                    "affected_image": imgs[0]["image"] if imgs else "NA",
+                    "affected_tag": imgs[0]["tag"] if imgs else None,
                     "affected_resource": affected_resource,
                     "affected_version": affected_version,
                     "fixed_version": fixed_version,
                     "all_packages": all_packages,
-                    "confidence": confidence,
-                    "plat_ticket": cve_to_plat.get(cve_id),
+                    "plat_security_keys": plat_security_keys,
+                    "plat_security_for_images": plat_security_for_images,
+                    "plat_tickets":  _filter_plat_tickets(raw_plat, imgs),
                     "sources": list(
                         {c.source for c in desc_cves if c.cve_id == cve_id}
                         | {c["source"] for p in parsed_attachments for c in p["cves"] if c["cve_id"] == cve_id}

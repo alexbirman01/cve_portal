@@ -393,6 +393,7 @@
 .cveTableWrap {
   overflow-x: auto;
   margin: 0 -4px;
+  max-width: 100%;
 }
 
 .cveTableToolbar {
@@ -418,29 +419,46 @@
 .btnExport:hover { background: #22a070; }
 
 .cveTable {
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
-  font-size: 13.5px;
+  font-size: 12.5px;
 }
+
+/* Laptop-friendly column slice (fits ~1280px with main padding) */
+.cveColCve { width: 12%; }
+.cveColPlat { width: 36%; }
+.cveColSev { width: 11%; }
+.cveColRes { width: 19%; }
+.cveColVer { width: 11%; }
+.cveColFix { width: 11%; }
 
 .cveTable thead tr { border-bottom: 1px solid rgba(255,255,255,0.1); }
 
 .cveTable th {
   text-align: left;
-  padding: 10px 14px;
-  font-size: 11px;
+  padding: 8px 10px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   opacity: 0.45;
   font-weight: 600;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.2;
+  hyphens: auto;
 }
 
 .cveTable td {
-  padding: 14px 14px;
+  padding: 10px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
   vertical-align: middle;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.cveTable td:first-child {
+  word-break: normal;
 }
 
 .cveTable tbody tr:last-child td { border-bottom: none; }
@@ -449,7 +467,7 @@
 .cveId {
   font-family: ui-monospace, monospace;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12px;
   color: rgba(165,180,252,1);
   white-space: nowrap;
   text-decoration: none;
@@ -459,10 +477,10 @@
 .platTicketPill {
   display: inline-block;
   font-family: ui-monospace, monospace;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  border-radius: 4px;
-  padding: 2px 8px;
+  border-radius: 3px;
+  padding: 1px 6px;
   text-decoration: none;
   white-space: nowrap;
   line-height: 1.35;
@@ -495,7 +513,7 @@ button.platCreatePill {
   appearance: none;
   -webkit-appearance: none;
   font-family: ui-monospace, monospace;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   line-height: 1.35;
   cursor: pointer;
@@ -519,13 +537,6 @@ button.platCreatePill:disabled:hover {
   font-weight: inherit;
   opacity: 0.88;
   letter-spacing: 0.04em;
-}
-
-.platTicketKindBug {
-  text-transform: uppercase;
-}
-
-.platTicketKindCve {
   text-transform: lowercase;
 }
 
@@ -536,7 +547,7 @@ button.platCreatePill:disabled:hover {
 }
 
 .platTicketCell {
-  min-width: 320px;
+  min-width: 0;
 }
 
 .platCell {
@@ -547,7 +558,50 @@ button.platCreatePill:disabled:hover {
   border-radius: 8px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.18);
-  max-width: 720px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* ── Sketch layout: boxed rows, image:tag left, PLAT keys + Create CVE in a row ── */
+.platCellSketchBoard {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.platCellSketchBoard .platPerImage {
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  column-gap: 0.65rem;
+  padding: 0.4rem 0.55rem;
+  align-items: center;
+}
+
+.platCellSketchBoard .platPerImage:first-of-type {
+  padding-top: 0.4rem;
+  border-top: none;
+}
+
+.platSketchActions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.platCellSketchBoard .platPerImage:not(.platPerImageAggregated) .platPerImageLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platCellSketchBoard .platPerImageAggregated .platPerImageLabel {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
 }
 
 .platPerImage {
@@ -573,7 +627,7 @@ button.platCreatePill:disabled:hover {
 }
 
 .platPerImageLabel {
-  font-size: 12px;
+  font-size: 11.5px;
   opacity: 0.9;
   min-width: 0;
   font-weight: 600;
@@ -615,6 +669,10 @@ button.platCreatePill:disabled:hover {
   padding: 0.65rem 0.85rem;
 }
 
+.platCellSketchBoard .platFallbackRow {
+  padding: 0.4rem 0.55rem;
+}
+
 .platFallbackRow .platPerImageActions {
   justify-content: flex-start;
 }
@@ -628,6 +686,12 @@ button.platCreatePill:disabled:hover {
 .imageStackItem {
   display: block;
   white-space: nowrap;
+}
+
+.cveTable .sevBadge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 
 .sevBadge {
@@ -757,6 +821,144 @@ button.platCreatePill:disabled:hover {
   overflow: hidden;
 }
 
+.resultsBarGrid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  align-items: center;
+  padding: 14px 18px 12px;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.resultsBarLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.resultsMonoKey {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(99, 130, 241, 1);
+  white-space: nowrap;
+}
+
+.resultsBarTitleMain {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: rgba(255, 255, 255, 0.95);
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .resultsBarGrid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .resultsBarRight {
+    justify-self: start;
+  }
+  .resultsFilterSearchWrap {
+    max-width: none;
+    flex: 1 1 100%;
+  }
+}
+
+.resultsBarRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.resultsDonePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.18);
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  color: #4ade80;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.resultsOverflowWrap {
+  position: relative;
+}
+
+.resultsOverflowBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.resultsOverflowBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.resultsOverflowMenu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 188px;
+  padding: 6px 0;
+  list-style: none;
+  margin: 0;
+  background: #12151c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+}
+
+.resultsOverflowMenu li {
+  margin: 0;
+  padding: 0;
+}
+
+.resultsOverflowMenuItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
+.resultsOverflowMenu a.resultsOverflowMenuItem {
+  color: rgba(147, 197, 253, 0.98);
+}
+
+.resultsOverflowMenuItem:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .resultsAttrRow {
   display: flex;
   flex-wrap: wrap;
@@ -767,7 +969,281 @@ button.platCreatePill:disabled:hover {
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-/* compact one-liner header bar */
+/* Results ticket metadata: bordered box + label + inner pill (reference UI) */
+.resultsAttrRowMeta {
+  gap: 10px;
+}
+
+.resultsAttrRowMeta .attrChipMetaBox,
+.resultsAttrRowMeta .attrChipSevCritical,
+.resultsAttrRowMeta .attrChipSevHigh,
+.resultsAttrRowMeta .attrChipSevMedium,
+.resultsAttrRowMeta .attrChipSevLow,
+.resultsAttrRowMeta .attrChipSevUnknown {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.25;
+  background: rgba(15, 18, 26, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: none;
+}
+
+.resultsAttrRowMeta .attrChipLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 1;
+  flex-shrink: 0;
+}
+
+.resultsAttrRowMeta .attrChipValuePill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.96);
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.resultsAttrRowMeta .attrChipProject .attrChipLabel { color: #a5b4fc; }
+.resultsAttrRowMeta .attrChipProject .attrChipValuePill {
+  background: rgba(67, 56, 202, 0.55);
+  border: 1px solid rgba(129, 140, 248, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipType .attrChipLabel { color: #67e8f9; }
+.resultsAttrRowMeta .attrChipType .attrChipValuePill {
+  background: rgba(8, 145, 178, 0.45);
+  border: 1px solid rgba(34, 211, 238, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipAttach .attrChipLabel { color: #6ee7b7; }
+.resultsAttrRowMeta .attrChipAttach .attrChipValuePill {
+  background: rgba(5, 150, 105, 0.45);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipReporter .attrChipLabel { color: #e2e8f0; }
+.resultsAttrRowMeta .attrChipReporter .attrChipValuePill {
+  background: rgba(71, 85, 105, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipOrg .attrChipLabel { color: #e9d5ff; }
+.resultsAttrRowMeta .attrChipOrg .attrChipValuePill {
+  background: rgba(107, 33, 168, 0.5);
+  border: 1px solid rgba(192, 132, 252, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipSevCritical .attrChipLabel { color: #f87171; }
+.resultsAttrRowMeta .attrChipSevCritical .attrChipValuePill {
+  background: rgba(185, 28, 28, 0.5);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+}
+
+.resultsAttrRowMeta .attrChipSevHigh .attrChipLabel { color: #fb923c; }
+.resultsAttrRowMeta .attrChipSevHigh .attrChipValuePill {
+  background: rgba(194, 65, 12, 0.5);
+  border: 1px solid rgba(251, 146, 60, 0.4);
+}
+
+.resultsAttrRowMeta .attrChipSevMedium .attrChipLabel { color: #fbbf24; }
+.resultsAttrRowMeta .attrChipSevMedium .attrChipValuePill {
+  background: rgba(161, 98, 7, 0.5);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.resultsAttrRowMeta .attrChipSevLow .attrChipLabel { color: #4ade80; }
+.resultsAttrRowMeta .attrChipSevLow .attrChipValuePill {
+  background: rgba(21, 128, 61, 0.5);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+
+.resultsAttrRowMeta .attrChipSevUnknown .attrChipLabel { color: rgba(255, 255, 255, 0.45); }
+.resultsAttrRowMeta .attrChipSevUnknown .attrChipValuePill {
+  background: rgba(51, 65, 85, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.resultsFindingsCard .cardHeader {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.resultsFindingsToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.resultsFindingsToolbarMain {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.resultsFindingsToolbarActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btnCreateAllPlat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  background: #1d4ed8;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btnCreateAllPlat:hover:not(:disabled) {
+  background: #2563eb;
+}
+.btnCreateAllPlat:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.resultsPlatBulkErr {
+  color: #f87171;
+  padding: 8px 16px 0;
+  margin: 0;
+  max-width: none;
+  word-break: break-word;
+}
+
+.resultsFilterSearchWrap {
+  flex: 1 1 220px;
+  min-width: 160px;
+  max-width: 420px;
+  position: relative;
+}
+
+.resultsFilterSearchWrap::before {
+  content: '⌕';
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.38;
+  font-size: 14px;
+  pointer-events: none;
+  line-height: 1;
+}
+
+.resultsFilterSearch {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px 8px 36px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 12.5px;
+}
+
+.resultsFilterSearch::placeholder {
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.resultsFilterSelect {
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 12px;
+  max-width: 130px;
+}
+
+.resultsFiltersResetBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.resultsFiltersResetBtn:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.resultsRefreshBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.resultsRefreshBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.resultsRefreshBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.resultsClearFiltersLink {
+  background: none;
+  border: none;
+  color: #93c5fd;
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+  padding: 0;
+}
+
+.cveTableWrapEmpty {
+  padding: 16px 18px 20px;
+}
+
+.cveTableEmptyMsg {
+  margin: 0;
+}
+
+/* compact one-liner header bar — legacy name kept for ticket flow if needed */
 .resultsBar {
   display: flex;
   align-items: center;
