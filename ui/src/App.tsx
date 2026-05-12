@@ -1,16 +1,29 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import {
+  apiCreatePlat,
   apiGet,
   apiPost,
   buildSuggestedComment,
+  exportCvesToExcel,
   formatStatus,
+  imageBasenamesForCveRow,
+  platBugTicketsForImage,
+  platOrphanSecKeys,
+  platSecKeysForImage,
+  platDisplayFullImageForRow,
+  platDisplayFullImagesSummary,
+  platOrgRefsFromIssue,
+  platPackageNameForRow,
+  platSecurityKeys,
   sortCveRows,
   statusSteps,
+  type CreatePlatResponse,
   type CveRow,
   type HistoryRun,
   type IssueResponse,
   type JobResponse,
+  type OrgRef,
   type ProcessResponse,
 } from './api'
 
@@ -30,11 +43,6 @@ function SevBadge({ sev, score }: { sev?: string | null; score?: string | null }
   )
 }
 
-function ConfBadge({ conf }: { conf?: string | null }) {
-  const c = conf?.toLowerCase()
-  const cls = c === 'high' ? 'confHigh' : c === 'medium' ? 'confMedium' : 'confLow'
-  return <span className={`confBadge ${cls}`}>{conf ?? 'low'}</span>
-}
 
 function StepList({ status }: { status?: string | null }) {
   const steps = statusSteps(status)
@@ -68,22 +76,43 @@ function Dash() {
 
 // ─── CVE table ───────────────────────────────────────────────────────────────
 
-function CveTable({ rows }: { rows: CveRow[] }) {
+function CveTable({
+  rows,
+  issueKey,
+  platOrganizationRefs,
+  onPlatCreated,
+}: {
+  rows: CveRow[]
+  issueKey?: string
+  platOrganizationRefs?: OrgRef[] | null
+  onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
+}) {
   const sorted = useMemo(() => sortCveRows(rows), [rows])
+  const [platBusy, setPlatBusy] = useState<string | null>(null)
+  const [platErrRow, setPlatErrRow] = useState<string | null>(null)
+  const [platErrMsg, setPlatErrMsg] = useState<string | null>(null)
   if (!sorted.length) return <div className="muted small">No CVEs found.</div>
+  const filename = issueKey ? `${issueKey}-cve-findings.xlsx` : 'cve-findings.xlsx'
   return (
     <div className="cveTableWrap">
+      <div className="cveTableToolbar">
+        <button
+          className="btnExport"
+          onClick={() => exportCvesToExcel(sorted, filename)}
+          title="Export to Excel"
+        >
+          ↓ Export Excel
+        </button>
+      </div>
       <table className="cveTable">
-          <thead>
+        <thead>
           <tr>
             <th style={{ minWidth: 160 }}>CVE ID</th>
-            <th style={{ minWidth: 110 }}>PLAT Ticket</th>
+            <th style={{ minWidth: 320 }}>Affected image PLAT ticket</th>
             <th style={{ minWidth: 100 }}>Severity</th>
-            <th style={{ minWidth: 190 }}>Affected Image : Tag</th>
-            <th style={{ minWidth: 140 }}>Resource</th>
-            <th style={{ minWidth: 110 }}>Affected Ver.</th>
-            <th style={{ minWidth: 110 }}>Fixed Version</th>
-            <th style={{ minWidth: 90 }}>Confidence</th>
+            <th style={{ minWidth: 120 }}>Resource</th>
+            <th style={{ minWidth: 90 }}>Affected Ver.</th>
+            <th style={{ minWidth: 90 }}>Vendor Fix</th>
           </tr>
         </thead>
         <tbody>
@@ -99,16 +128,195 @@ function CveTable({ rows }: { rows: CveRow[] }) {
                   {r.cve_id}
                 </a>
               </td>
-              <td>
-                {r.plat_ticket
-                  ? <a className="platTicketPill" href={`https://plainid.atlassian.net/browse/${r.plat_ticket}`} target="_blank" rel="noreferrer">{r.plat_ticket}</a>
-                  : <Dash />}
+              <td className="platTicketCell">
+                {(() => {
+                  const tickets = [
+                    ...(r.plat_tickets ?? (r.plat_ticket ? [{ key: r.plat_ticket, issue_type: 'Security Vulnerability' }] : [])),
+                  ]
+                  const bugTickets = tickets.filter((t) => t.issue_type === 'Bug')
+                  bugTickets.sort((a, b) => a.key.localeCompare(b.key))
+
+                  const perImages = imageBasenamesForCveRow(r)
+                  const verOk = !!(r.affected_version && String(r.affected_version).trim())
+                  const orphanSec = platOrphanSecKeys(r)
+                  const allSecKeys = platSecurityKeys(r)
+
+                  return (
+                    <div className="platCell">
+                      {perImages.length > 0 ? (
+                        <>
+                          {perImages.map((imgBasename) => {
+                            const bugsForImg = platBugTicketsForImage(r, imgBasename)
+                            const secKeys = platSecKeysForImage(r, imgBasename)
+                            const busyKey = `${r.cve_id}|${imgBasename}`
+                            const canCreateThis =
+                              onPlatCreated && verOk && secKeys.length === 0
+                            const showDash =
+                              !bugsForImg.length && !secKeys.length && !canCreateThis
+                            return (
+                              <div key={imgBasename} className="platPerImage">
+                                <span className="platPerImageLabel mono" title="Affected image (full path and tag)">
+                                  {platDisplayFullImageForRow(r, imgBasename)}
+                                </span>
+                                <div className="platPerImageActions">
+                                  {bugsForImg.map((t) => (
+                                    <a
+                                      key={t.key}
+                                      className="platTicketPill platTicketFound"
+                                      href={`https://plainid.atlassian.net/browse/${t.key}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title={t.issue_type}
+                                    >
+                                      {t.key}
+                                      <span className="platTicketType platTicketKindBug">Bug</span>
+                                    </a>
+                                  ))}
+                                  {secKeys.map((pk) => (
+                                    <a
+                                      key={pk}
+                                      className="platTicketPill platTicketFound"
+                                      href={`https://plainid.atlassian.net/browse/${pk}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title="Security Vulnerability"
+                                    >
+                                      {pk}
+                                      <span className="platTicketType platTicketKindCve">cve</span>
+                                    </a>
+                                  ))}
+                                  {!secKeys.length && canCreateThis && (
+                                    <button
+                                      type="button"
+                                      className="platTicketPill platTicketCreate platCreatePill"
+                                      disabled={platBusy === busyKey}
+                                      title={`Create Security Vulnerability (CVE) PLAT for ${imgBasename}`}
+                                      onClick={async () => {
+                                        const ver = (r.affected_version ?? '').trim()
+                                        if (!ver || !onPlatCreated) return
+                                        setPlatBusy(busyKey)
+                                        setPlatErrRow(null)
+                                        setPlatErrMsg(null)
+                                        try {
+                                          const out = await apiCreatePlat({
+                                            cve_id: r.cve_id,
+                                            image_basename: imgBasename,
+                                            package_name: platPackageNameForRow(r),
+                                            package_version: ver,
+                                            severity: r.severity,
+                                            organizations: platOrganizationRefs ?? [],
+                                            source_issue_key: issueKey,
+                                          })
+                                          onPlatCreated(r.cve_id, imgBasename, out)
+                                        } catch (e) {
+                                          setPlatErrRow(r.cve_id)
+                                          setPlatErrMsg(e instanceof Error ? e.message : String(e))
+                                        } finally {
+                                          setPlatBusy(null)
+                                        }
+                                      }}
+                                    >
+                                      {platBusy === busyKey ? 'Creating…' : 'Create CVE'}
+                                    </button>
+                                  )}
+                                  {showDash && (
+                                    <span className="muted small platPerImageNA">—</span>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {orphanSec.length > 0 && (
+                            <div className="platPerImage platPerImageOrphan">
+                              <span
+                                className="platPerImageLabel"
+                                title="Security PLAT not linked to a specific image in Jira data"
+                              >
+                                Unmapped Sec
+                              </span>
+                              <div className="platPerImageActions">
+                                {orphanSec.map((pk) => (
+                                  <a
+                                    key={pk}
+                                    className="platTicketPill platTicketFound"
+                                    href={`https://plainid.atlassian.net/browse/${pk}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title="Security Vulnerability—unmapped to image"
+                                  >
+                                    {pk}
+                                    <span className="platTicketType platTicketKindCve">cve</span>
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {(bugTickets.length > 0 ||
+                            allSecKeys.length > 0 ||
+                            platDisplayFullImagesSummary(r)) && (
+                            <div className="platPerImage platPerImageAggregated">
+                              <span
+                                className="platPerImageLabel mono"
+                                title="Affected image (full path and tag)"
+                              >
+                                {platDisplayFullImagesSummary(r) || '—'}
+                              </span>
+                              <div className="platPerImageActions">
+                                {bugTickets.map((t) => (
+                                  <a
+                                    key={t.key}
+                                    className="platTicketPill platTicketFound"
+                                    href={`https://plainid.atlassian.net/browse/${t.key}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title={t.issue_type}
+                                  >
+                                    {t.key}
+                                    <span className="platTicketType platTicketKindBug">Bug</span>
+                                  </a>
+                                ))}
+                                {allSecKeys.map((pk) => (
+                                  <a
+                                    key={pk}
+                                    className="platTicketPill platTicketFound"
+                                    href={`https://plainid.atlassian.net/browse/${pk}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title="Security Vulnerability"
+                                  >
+                                    {pk}
+                                    <span className="platTicketType platTicketKindCve">cve</span>
+                                  </a>
+                                ))}
+                                {bugTickets.length === 0 &&
+                                  allSecKeys.length === 0 && (
+                                    <span className="muted small platPerImageNA">—</span>
+                                  )}
+                              </div>
+                            </div>
+                          )}
+                          {bugTickets.length === 0 &&
+                            allSecKeys.length === 0 &&
+                            !platDisplayFullImagesSummary(r) && (
+                              <div className="platFallbackRow">
+                                <Dash />
+                              </div>
+                            )}
+                        </>
+                      )}
+
+                      {platErrRow === r.cve_id && platErrMsg && (
+                        <div className="platCreateErr small">{platErrMsg}</div>
+                      )}
+                    </div>
+                  )
+                })()}
               </td>
-              <td><SevBadge sev={r.severity} score={r.score} /></td>
               <td>
-                {r.affected_image && r.affected_image !== 'NA'
-                  ? <span className="mono">{r.affected_image.replace(/^plainid\//i, '')}{r.affected_tag ? `:${r.affected_tag}` : ''}</span>
-                  : <Dash />}
+                <SevBadge sev={r.severity} score={r.score} />
               </td>
               <td>
                 {r.affected_resource
@@ -125,7 +333,6 @@ function CveTable({ rows }: { rows: CveRow[] }) {
                   ? <span className="mono fixedVer">{r.fixed_version}</span>
                   : <Dash />}
               </td>
-              <td><ConfBadge conf={r.confidence} /></td>
             </tr>
           ))}
         </tbody>
@@ -174,14 +381,29 @@ function TicketPanel({
           </div>
         </div>
         <div className="ticketMeta">
-          <div className="metaItem">Project <span>{issue.project ?? '—'}</span></div>
-          <div className="metaItem">Type <span>{issue.issuetype ?? '—'}</span></div>
-          <div className="metaItem">Attachments <span>{issue.attachments?.length ?? 0}</span></div>
+          <div className="attrChip attrChipProject">
+            <span className="attrChipLabel">Project</span>
+            <span className="attrChipValue mono">{issue.project ?? '—'}</span>
+          </div>
+          <div className="attrChip attrChipType">
+            <span className="attrChipLabel">Type</span>
+            <span className="attrChipValue">{issue.issuetype ?? '—'}</span>
+          </div>
+          <div className="attrChip attrChipAttach">
+            <span className="attrChipLabel">Attachments</span>
+            <span className="attrChipValue">{issue.attachments?.length ?? 0}</span>
+          </div>
           {issue.reporter && (
-            <div className="metaItem">Reporter <span>{issue.reporter}</span></div>
+            <div className="attrChip attrChipReporter">
+              <span className="attrChipLabel">Reporter</span>
+              <span className="attrChipValue">{issue.reporter}</span>
+            </div>
           )}
           {(issue.organizations?.length ?? 0) > 0 && (
-            <div className="metaItem">Organizations <span>{issue.organizations!.join(', ')}</span></div>
+            <div className="attrChip attrChipOrg">
+              <span className="attrChipLabel">Organizations</span>
+              <span className="attrChipValue">{issue.organizations!.join(', ')}</span>
+            </div>
           )}
         </div>
       </div>
@@ -247,24 +469,78 @@ function ResultsPanel({
   onBack: () => void
   commentPosted: boolean
 }) {
-  const rows: CveRow[] = job.result?.cve_rows ?? []
+  const [rows, setRows] = useState<CveRow[]>([])
+  useEffect(() => {
+    if (job.status === 'done' && job.result?.cve_rows) {
+      setRows(job.result.cve_rows)
+    }
+  }, [job.run_id, job.status])
+
+  const onPlatCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.cve_id !== cveId) return r
+        const m = { ...(r.plat_security_for_images ?? {}) }
+        const mergeKeys = out.exists ? out.keys : [out.key]
+        const cur = new Set(m[imageBasename] ?? [])
+        for (const k of mergeKeys) cur.add(k)
+        m[imageBasename] = [...cur]
+
+        const byKey = new Map((r.plat_tickets ?? []).map((t) => [t.key, t]))
+        for (const k of mergeKeys) {
+          if (!byKey.has(k)) byKey.set(k, { key: k, issue_type: 'Security Vulnerability' })
+        }
+        const allSec = new Set([...(r.plat_security_keys ?? []), ...mergeKeys])
+        return {
+          ...r,
+          plat_security_for_images: m,
+          plat_security_keys: [...allSec],
+          plat_tickets: [...byKey.values()],
+        }
+      }),
+    )
+  }
+
   return (
     <div className="resultsStack">
-      {/* Results header — compact single row */}
-      <div className="resultsBar">
-        <button className="resultsBarBack" onClick={onBack}>←</button>
-        <span className="resultsBarKey">{issue.key}</span>
-        <span className="resultsBarSep">·</span>
-        <span className="resultsBarTitle">{issue.summary ?? '—'}</span>
-        <span className="resultsBarMeta">
-          <span>{issue.issuetype}</span>
-          <span className="resultsBarDot">·</span>
-          <span>{issue.project}</span>
+      <div className="resultsBarWrap">
+        <div className="resultsBar">
+          <button className="resultsBarBack" onClick={onBack}>←</button>
+          <span className="resultsBarKey">{issue.key}</span>
+          <span className="resultsBarSep">·</span>
+          <span className="resultsBarTitle">{issue.summary ?? '—'}</span>
+          <StatusBadge status={job.status} />
+        </div>
+        <div className="resultsAttrRow">
+          <div className="attrChip attrChipProject">
+            <span className="attrChipLabel">Project</span>
+            <span className="attrChipValue mono">{issue.project ?? '—'}</span>
+          </div>
+          <div className="attrChip attrChipType">
+            <span className="attrChipLabel">Type</span>
+            <span className="attrChipValue">{issue.issuetype ?? '—'}</span>
+          </div>
           {(issue.attachments?.length ?? 0) > 0 && (
-            <><span className="resultsBarDot">·</span><span>{issue.attachments.length} attachment{issue.attachments.length !== 1 ? 's' : ''}</span></>
+            <div className="attrChip attrChipAttach">
+              <span className="attrChipLabel">Attachments</span>
+              <span className="attrChipValue">
+                {issue.attachments.length} file{issue.attachments.length !== 1 ? 's' : ''}
+              </span>
+            </div>
           )}
-        </span>
-        <StatusBadge status={job.status} />
+          {issue.reporter && (
+            <div className="attrChip attrChipReporter">
+              <span className="attrChipLabel">Reporter</span>
+              <span className="attrChipValue">{issue.reporter}</span>
+            </div>
+          )}
+          {(issue.organizations?.length ?? 0) > 0 && (
+            <div className="attrChip attrChipOrg">
+              <span className="attrChipLabel">Organizations</span>
+              <span className="attrChipValue">{issue.organizations!.join(', ')}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* CVE table */}
@@ -272,7 +548,12 @@ function ResultsPanel({
         <div className="cardHeader">
           <span className="cardTitle">CVE Findings ({rows.length})</span>
         </div>
-        <CveTable rows={rows} />
+        <CveTable
+          rows={rows}
+          issueKey={issue.key}
+          platOrganizationRefs={platOrgRefsFromIssue(issue)}
+          onPlatCreated={onPlatCreated}
+        />
       </div>
 
       {/* Suggested comment */}
@@ -301,12 +582,21 @@ function ResultsPanel({
   )
 }
 
-// ─── history view ────────────────────────────────────────────────────────────
+// ─── dashboard ───────────────────────────────────────────────────────────────
 
-function HistoryView({ onOpen }: { onOpen: (issueKey: string, runId: string) => void }) {
+const PAGE_SIZE = 10
+
+function DashboardView({
+  onOpen,
+  onNew,
+}: {
+  onOpen: (issueKey: string, runId: string) => void
+  onNew: () => void
+}) {
   const [runs, setRuns] = useState<HistoryRun[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(1)
 
   useEffect(() => {
     let alive = true
@@ -328,72 +618,143 @@ function HistoryView({ onOpen }: { onOpen: (issueKey: string, runId: string) => 
     return `${Math.floor(h / 24)}d ago`
   }
 
+  const done      = runs.filter(r => r.status === 'done')
+  const failed    = runs.filter(r => r.status.startsWith('failed'))
+  const totalCves = done.reduce((s, r) => s + (r.cve_count ?? 0), 0)
+
+  const totalPages = Math.max(1, Math.ceil(runs.length / PAGE_SIZE))
+  const pageRuns   = runs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
   return (
-    <div className="card historyCard">
-      <div className="cardHeader">
-        <span className="cardTitle">Recent processing runs</span>
-        {!loading && <span className="muted small">{runs.length} runs</span>}
+    <div className="dashboard">
+      {/* greeting */}
+      <div className="dashGreeting">
+        <div>
+          <div className="dashTitle">CVE Security Dashboard</div>
+          <div className="dashSub">Monitor and process PlainID security tickets</div>
+        </div>
+        <button className="btn btnPrimary" onClick={onNew}>＋ Process new ticket</button>
       </div>
 
-      {loading && <div className="muted small">Loading…</div>}
-      {error && <div className="errorBox">{error}</div>}
-
-      {!loading && !error && runs.length === 0 && (
-        <div className="muted small">No runs yet. Fetch a ticket and start processing.</div>
+      {/* stat cards */}
+      {!loading && !error && (
+        <div className="dashStats">
+          <div className="statCard">
+            <div className="statValue">{runs.length}</div>
+            <div className="statLabel">Tickets processed</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueGreen">{totalCves}</div>
+            <div className="statLabel">Total CVEs found</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue">{done.length}</div>
+            <div className="statLabel">Completed runs</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueRed">{failed.length}</div>
+            <div className="statLabel">Failed runs</div>
+          </div>
+        </div>
       )}
 
-      {!loading && runs.length > 0 && (
-        <table className="historyTable">
-          <thead>
-            <tr>
-              <th>Ticket</th>
-              <th>Status</th>
-              <th>CVEs</th>
-              <th>When</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((r) => (
-              <tr key={r.run_id}>
-                <td>
-                  <span className="mono" style={{ color: 'rgba(99,130,241,1)', fontWeight: 700 }}>
-                    {r.issue_key}
-                  </span>
-                </td>
-                <td><StatusBadge status={r.status} /></td>
-                <td>
-                  {r.cve_count != null
-                    ? <span className="cvePill">{r.cve_count} CVE{r.cve_count !== 1 ? 's' : ''}</span>
-                    : <span className="dash">—</span>}
-                </td>
-                <td><span className="muted small">{relativeTime(r.created_at)}</span></td>
-                <td>
-                  {r.status === 'done' && (
-                    <button
-                      className="btn btnSecondary"
-                      style={{ padding: '4px 12px', fontSize: 12 }}
-                      onClick={() => onOpen(r.issue_key, r.run_id)}
-                    >
-                      Open
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      {/* recent runs */}
+      <div className="card" style={{ marginTop: 24 }}>
+        <div className="cardHeader">
+          <span className="cardTitle">Recent runs</span>
+          {!loading && <span className="muted small">{runs.length} total</span>}
+        </div>
+
+        {loading && <div className="muted small">Loading…</div>}
+        {error && <div className="errorBox">{error}</div>}
+
+        {!loading && !error && runs.length === 0 && (
+          <div className="muted small">No runs yet — process your first ticket to get started.</div>
+        )}
+
+        {!loading && runs.length > 0 && (
+          <>
+            <table className="historyTable">
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Status</th>
+                  <th>CVEs found</th>
+                  <th>When</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageRuns.map((r) => (
+                  <tr key={r.run_id}>
+                    <td>
+                      <span className="mono" style={{ color: 'rgba(99,130,241,1)', fontWeight: 700 }}>
+                        {r.issue_key}
+                      </span>
+                    </td>
+                    <td><StatusBadge status={r.status} /></td>
+                    <td>
+                      {r.cve_count != null
+                        ? <span className="cvePill">{r.cve_count} CVE{r.cve_count !== 1 ? 's' : ''}</span>
+                        : <span className="dash">—</span>}
+                    </td>
+                    <td><span className="muted small">{relativeTime(r.created_at)}</span></td>
+                    <td>
+                      {r.status === 'done' && (
+                        <button
+                          className="btn btnSecondary"
+                          style={{ padding: '4px 12px', fontSize: 12 }}
+                          onClick={() => onOpen(r.issue_key, r.run_id)}
+                        >
+                          Open
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {totalPages > 1 && (
+              <div className="pagination">
+                <button
+                  className="pageBtn"
+                  disabled={page === 1}
+                  onClick={() => setPage(p => p - 1)}
+                >
+                  ← Prev
+                </button>
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                  <button
+                    key={p}
+                    className={`pageBtn ${p === page ? 'pageBtnActive' : ''}`}
+                    onClick={() => setPage(p)}
+                  >
+                    {p}
+                  </button>
+                ))}
+                <button
+                  className="pageBtn"
+                  disabled={page === totalPages}
+                  onClick={() => setPage(p => p + 1)}
+                >
+                  Next →
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
 }
 
 // ─── main app ────────────────────────────────────────────────────────────────
 
-type Page = 'new' | 'history'
+type Page = 'dashboard' | 'new'
 
 function App() {
-  const [page, setPage]               = useState<Page>('new')
+  const [page, setPage]               = useState<Page>('dashboard')
   const [issueKey, setIssueKey]       = useState('')
   const [loading, setLoading]         = useState(false)
   const [error, setError]             = useState<string | null>(null)
@@ -435,7 +796,16 @@ function App() {
     return () => { alive = false; clearInterval(t) }
   }, [runId])
 
+  function normalizeIssueKey(raw: string): string {
+    const trimmed = raw.trim()
+    // Accept full Jira URLs like https://....atlassian.net/browse/PLATFORM-1875
+    const m = trimmed.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/i)
+    return m ? m[1].toUpperCase() : trimmed.toUpperCase()
+  }
+
   async function fetchIssue() {
+    const key = normalizeIssueKey(issueKey)
+    setIssueKey(key)
     setError(null)
     setLoading(true)
     setIssue(null)
@@ -444,7 +814,7 @@ function App() {
     setViewMode('ticket')
     setCommentPosted(false)
     try {
-      const data = await apiGet<IssueResponse>(`/api/issues/${issueKey.trim()}`)
+      const data = await apiGet<IssueResponse>(`/api/issues/${key}`)
       setIssue(data)
     } catch (e: any) {
       setError(e?.message ?? String(e))
@@ -512,18 +882,22 @@ function App() {
 
   return (
     <div className="appShell">
-      {/* ── Side nav ── */}
-      <nav className="sideNav">
-        <div className="sideNavLogo">
-          <div>
-            <img src="/plainid-logo.svg" alt="PlainID" className="sideNavLogoImg" />
-            <div className="sideNavLogoSub">CVE Portal · Security Team</div>
-          </div>
-        </div>
+      {/* ── Top nav ── */}
+      <header className="topNav">
+        <button className="topNavBrand" onClick={() => setPage('dashboard')}>
+          <img src="/plainid-logo.svg" alt="PlainID" className="topNavLogoImg" />
+          <span className="topNavSub">CVE Portal · Global Services</span>
+        </button>
 
-        <div className="sideNavItems">
+        <div className="topNavItems">
           <button
-            className={`sideNavItem ${page === 'new' ? 'sideNavItemActive' : ''}`}
+            className={`topNavItem ${page === 'dashboard' ? 'topNavItemActive' : ''}`}
+            onClick={() => setPage('dashboard')}
+          >
+            ⊞ Dashboard
+          </button>
+          <button
+            className={`topNavItem ${page === 'new' ? 'topNavItemActive' : ''}`}
             onClick={() => {
               setPage('new')
               setIssue(null)
@@ -536,35 +910,15 @@ function App() {
               setError(null)
             }}
           >
-            <span className="sideNavIcon">＋</span> New
-          </button>
-          <button
-            className={`sideNavItem ${page === 'history' ? 'sideNavItemActive' : ''}`}
-            onClick={() => setPage('history')}
-          >
-            <span className="sideNavIcon">⏱</span> History
+            ＋ New
           </button>
         </div>
 
-        <div className="sideNavFooter">
-          <a
-            className="sideNavFooterLink"
-            href="https://nvd.nist.gov/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            NVD ↗
-          </a>
-          <a
-            className="sideNavFooterLink"
-            href="https://plainid.atlassian.net/jira/projects"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Jira ↗
-          </a>
+        <div className="topNavLinks">
+          <a className="topNavLink" href="https://nvd.nist.gov/" target="_blank" rel="noreferrer">NVD ↗</a>
+          <a className="topNavLink" href="https://plainid.atlassian.net/jira/projects" target="_blank" rel="noreferrer">Jira ↗</a>
         </div>
-      </nav>
+      </header>
 
       {/* ── Main content ── */}
       <main className="mainContent">
@@ -637,9 +991,22 @@ function App() {
           </>
         )}
 
-        {/* ── HISTORY page ── */}
-        {page === 'history' && (
-          <HistoryView onOpen={openFromHistory} />
+        {/* ── DASHBOARD page ── */}
+        {page === 'dashboard' && (
+          <DashboardView
+            onOpen={openFromHistory}
+            onNew={() => {
+              setIssue(null)
+              setIssueKey('')
+              setRunId(null)
+              setJob(null)
+              setViewMode('ticket')
+              setCommentBody('')
+              setCommentPosted(false)
+              setError(null)
+              setPage('new')
+            }}
+          />
         )}
       </main>
     </div>
