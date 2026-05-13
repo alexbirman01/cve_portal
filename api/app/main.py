@@ -1,10 +1,16 @@
 import json
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 
+from api.app.cve_row_derived import (
+    cve_rows_from_result,
+    derive_cve_state,
+    plat_keys_aggregate_from_rows,
+)
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
 from api.app.models import Base, ProcessingRun
@@ -188,6 +194,94 @@ def list_jobs(limit: int = 50):
             }
             for r in runs
         ]
+
+
+@app.get("/api/jobs/cve-status")
+def list_jobs_cve_status(limit: int = 50):
+    """Latest processing run per issue, with per-CVE derived state from that run."""
+
+    def _parent_issue_and_project(res: dict | None, fallback_key: str) -> tuple[str, str]:
+        parent = ""
+        if isinstance(res, dict) and res.get("issue_key"):
+            parent = str(res["issue_key"]).strip()
+        if not parent:
+            parent = (fallback_key or "").strip()
+        proj = parent.split("-", 1)[0].strip().upper() if "-" in parent else parent.upper()
+        return parent, proj
+
+    cap = max(1, min(limit, 200))
+    with db_session() as db:
+        runs = (
+            db.query(ProcessingRun)
+            .order_by(ProcessingRun.created_at.desc())
+            .limit(2000)
+            .all()
+        )
+    seen: dict[str, object] = {}
+    for r in runs:
+        if r.issue_key in seen:
+            continue
+        seen[r.issue_key] = r
+        if len(seen) >= cap:
+            break
+
+    chosen = sorted(
+        seen.values(),
+        key=lambda x: x.created_at or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+
+    out: list[dict] = []
+    for r in chosen:
+        result = json.loads(r.result_json) if r.result_json else None
+        rows = cve_rows_from_result(result if isinstance(result, dict) else None)
+        rows_clean = [x for x in rows if isinstance(x, dict)]
+        plat_keys = plat_keys_aggregate_from_rows(rows_clean)
+        cves: list[dict] = []
+        if rows and (r.status == "done" or r.status.startswith("failed")):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                cve_id = row.get("cve_id")
+                if not cve_id:
+                    continue
+                cves.append(
+                    {
+                        "cve_id": str(cve_id),
+                        "severity": row.get("severity"),
+                        "cve_state": derive_cve_state(row, r.status),
+                    }
+                )
+        cve_count = len(json.loads(r.result_json).get("cves", [])) if r.result_json else None
+        needs_plat = sum(1 for c in cves if c.get("cve_state") == "needs_plat_cve")
+        parent_issue_key, issue_project = _parent_issue_and_project(
+            result if isinstance(result, dict) else None,
+            r.issue_key,
+        )
+        if r.status.startswith("failed"):
+            ticket_status = "failed"
+        elif r.status != "done":
+            ticket_status = "processing"
+        elif needs_plat > 0:
+            ticket_status = "in_progress"
+        else:
+            ticket_status = "done"
+        out.append(
+            {
+                "issue_key": r.issue_key,
+                "parent_issue_key": parent_issue_key,
+                "issue_project": issue_project,
+                "run_id": str(r.id),
+                "run_status": r.status,
+                "ticket_status": ticket_status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "cve_count": cve_count,
+                "needs_plat_cve_count": needs_plat,
+                "plat_keys": plat_keys,
+                "cves": cves,
+            }
+        )
+    return out
 
 
 @app.get("/api/jobs/{run_id}")

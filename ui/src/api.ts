@@ -93,6 +93,75 @@ export type HistoryRun = {
   cve_count?: number | null
 }
 
+export type DashboardCveState =
+  | 'pipeline_running'
+  | 'pipeline_failed'
+  | 'nvd_error'
+  | 'no_image'
+  | 'needs_plat_cve'
+  | 'needs_version'
+  | 'plat_complete'
+
+export type IssueCveStatusEntry = {
+  cve_id: string
+  severity?: string | null
+  cve_state: DashboardCveState | string
+}
+
+export type DashboardTicketStatus = 'processing' | 'failed' | 'in_progress' | 'done'
+
+export type IssueCveStatusSummary = {
+  issue_key: string
+  /** Parent security ticket (e.g. PLATFORM-1234); may mirror issue_key */
+  parent_issue_key?: string
+  /** Jira project prefix of parent ticket, e.g. PLATFORM */
+  issue_project?: string
+  run_id: string
+  run_status: string
+  /** PLAT workflow: done = all CVE PLAT tickets created; in_progress = some still missing. */
+  ticket_status?: DashboardTicketStatus | string
+  created_at?: string | null
+  cve_count?: number | null
+  needs_plat_cve_count?: number
+  /** PLAT-xxx keys from linked Jira tickets in the last run result */
+  plat_keys?: string[]
+  cves: IssueCveStatusEntry[]
+}
+
+export function dashboardCveStateLabel(state: string): string {
+  const map: Record<string, string> = {
+    pipeline_running: 'Pipeline running',
+    pipeline_failed: 'Pipeline failed',
+    nvd_error: 'NVD error',
+    no_image: 'No image',
+    needs_plat_cve: 'Needs PLAT CVE',
+    needs_version: 'Needs version',
+    plat_complete: 'PLAT complete',
+  }
+  return map[state] ?? state
+}
+
+export function dashboardTicketStatusLabel(status: string): string {
+  const map: Record<string, string> = {
+    processing: 'Processing',
+    failed: 'Failed',
+    in_progress: 'In progress',
+    done: 'Done',
+  }
+  return map[status] ?? status
+}
+
+export function ticketStatusForSummary(s: IssueCveStatusSummary): DashboardTicketStatus {
+  const ts = s.ticket_status
+  if (ts === 'processing' || ts === 'failed' || ts === 'in_progress' || ts === 'done') {
+    return ts
+  }
+  if (s.run_status.startsWith('failed')) return 'failed'
+  if (s.run_status !== 'done') return 'processing'
+  if ((s.needs_plat_cve_count ?? 0) > 0) return 'in_progress'
+  return 'done'
+}
+
 export type CreatePlatResponse =
   | { exists: true; keys: string[] }
   | { exists: false; key: string }

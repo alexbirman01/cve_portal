@@ -22,9 +22,13 @@ import {
   platSecurityKeys,
   sortCveRows,
   statusSteps,
+  dashboardCveStateLabel,
+  dashboardTicketStatusLabel,
+  ticketStatusForSummary,
   type CreatePlatResponse,
   type CveRow,
-  type HistoryRun,
+  type DashboardTicketStatus,
+  type IssueCveStatusSummary,
   type IssueResponse,
   type JobResponse,
   type OrgRef,
@@ -631,7 +635,7 @@ function ResultsPanel({
   onCommentChange,
   onPushComment,
   onBack,
-  onRefreshJob,
+  onReprocessTicket,
   commentPosted,
 }: {
   issue: IssueResponse
@@ -641,7 +645,7 @@ function ResultsPanel({
   onCommentChange: (v: string) => void
   onPushComment: () => void
   onBack: () => void
-  onRefreshJob: () => void | Promise<void>
+  onReprocessTicket: () => void | Promise<void>
   commentPosted: boolean
 }) {
   const [rows, setRows] = useState<CveRow[]>([])
@@ -855,17 +859,17 @@ function ResultsPanel({
               >
                 Filters
               </button>
-              <button
-                type="button"
-                className="resultsRefreshBtn"
-                onClick={() => void onRefreshJob()}
-                disabled={loading}
-                title="Refresh results from server"
-              >
-                ↻
-              </button>
             </div>
             <div className="resultsFindingsToolbarActions">
+              <button
+                type="button"
+                className="btnReprocessTicket"
+                disabled={loading || platBulkBusy}
+                title="Re-run full analysis: Jira, attachments, NVD, and PLAT lookup"
+                onClick={() => void onReprocessTicket()}
+              >
+                ⟳ Re-process ticket
+              </button>
               <button
                 type="button"
                 className="btnCreateAllPlat"
@@ -936,7 +940,32 @@ function ResultsPanel({
 
 // ─── dashboard ───────────────────────────────────────────────────────────────
 
-const PAGE_SIZE = 10
+const DASH_PAGE_SIZE = 8
+
+function dashCveStatePillClass(state: string): string {
+  if (state === 'plat_complete') return 'dashCveState dashCveStateOk'
+  if (state === 'needs_plat_cve') return 'dashCveState dashCveStateAction'
+  if (state === 'needs_version' || state === 'no_image') return 'dashCveState dashCveStateWarn'
+  if (state === 'nvd_error' || state === 'pipeline_failed') return 'dashCveState dashCveStateBad'
+  if (state === 'pipeline_running') return 'dashCveState dashCveStateRun'
+  return 'dashCveState'
+}
+
+function dashTicketWorkflowPillClass(status: DashboardTicketStatus): string {
+  if (status === 'done') return 'dashTicketWorkflow dashTicketWorkflowDone'
+  if (status === 'in_progress') return 'dashTicketWorkflow dashTicketWorkflowProgress'
+  if (status === 'processing') return 'dashTicketWorkflow dashTicketWorkflowProcessing'
+  return 'dashTicketWorkflow dashTicketWorkflowFailed'
+}
+
+/** Normalize dashboard search: lowercase, extract key from pasted Jira /browse/ URL. */
+function normalizeDashboardSearchQuery(raw: string): string {
+  const t = raw.trim().toLowerCase()
+  if (!t) return ''
+  const m = t.match(/\/browse\/([a-z][a-z0-9]*-\d+)/i)
+  if (m) return m[1].toLowerCase()
+  return t
+}
 
 function DashboardView({
   onOpen,
@@ -945,19 +974,25 @@ function DashboardView({
   onOpen: (issueKey: string, runId: string) => void
   onNew: () => void
 }) {
-  const [runs, setRuns] = useState<HistoryRun[]>([])
+  const [summaries, setSummaries] = useState<IssueCveStatusSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
+  const [dashSearch, setDashSearch] = useState('')
+  const [dashStatusFilter, setDashStatusFilter] = useState<DashboardTicketStatus | ''>('')
 
   useEffect(() => {
     let alive = true
-    apiGet<HistoryRun[]>('/api/jobs')
-      .then((data) => { if (alive) setRuns(data) })
+    apiGet<IssueCveStatusSummary[]>('/api/jobs/cve-status')
+      .then((data) => { if (alive) setSummaries(data) })
       .catch((e) => { if (alive) setError(e?.message ?? String(e)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [])
+
+  useEffect(() => {
+    setPage(1)
+  }, [dashSearch, dashStatusFilter])
 
   function relativeTime(iso?: string | null) {
     if (!iso) return '—'
@@ -970,115 +1005,229 @@ function DashboardView({
     return `${Math.floor(h / 24)}d ago`
   }
 
-  const done      = runs.filter(r => r.status === 'done')
-  const failed    = runs.filter(r => r.status.startsWith('failed'))
-  const totalCves = done.reduce((s, r) => s + (r.cve_count ?? 0), 0)
+  const totalIssues = summaries.length
+  const totalCves = summaries.reduce((s, x) => s + (x.cve_count ?? x.cves.length ?? 0), 0)
+  const wfInProgress = summaries.filter((x) => ticketStatusForSummary(x) === 'in_progress').length
+  const wfDone = summaries.filter((x) => ticketStatusForSummary(x) === 'done').length
+  const wfProcessing = summaries.filter((x) => ticketStatusForSummary(x) === 'processing').length
+  const wfFailed = summaries.filter((x) => ticketStatusForSummary(x) === 'failed').length
 
-  const totalPages = Math.max(1, Math.ceil(runs.length / PAGE_SIZE))
-  const pageRuns   = runs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const filteredSummaries = useMemo(() => {
+    const q = normalizeDashboardSearchQuery(dashSearch)
+    return summaries.filter((s) => {
+      const ts = ticketStatusForSummary(s)
+      if (dashStatusFilter && ts !== dashStatusFilter) return false
+      if (!q) return true
+      const parent = (s.parent_issue_key ?? s.issue_key).toLowerCase()
+      const proj = (s.issue_project ?? '').toLowerCase()
+      if (parent.includes(q)) return true
+      if (proj && proj === q) return true
+      if (s.plat_keys?.some((k) => k.toLowerCase().includes(q))) return true
+      return s.cves.some((c) => c.cve_id.toLowerCase().includes(q))
+    })
+  }, [summaries, dashSearch, dashStatusFilter])
+
+  const totalPages = Math.max(1, Math.ceil(filteredSummaries.length / DASH_PAGE_SIZE))
+  const pageSlice = filteredSummaries.slice((page - 1) * DASH_PAGE_SIZE, page * DASH_PAGE_SIZE)
 
   return (
     <div className="dashboard">
-      {/* greeting */}
       <div className="dashGreeting">
         <div>
           <div className="dashTitle">CVE Security Dashboard</div>
-          <div className="dashSub">Monitor and process PlainID security tickets</div>
+          <div className="dashSub">Latest analysis per ticket and CVE state from the last run</div>
         </div>
         <button className="btn btnPrimary" onClick={onNew}>＋ Process new ticket</button>
       </div>
 
-      {/* stat cards */}
       {!loading && !error && (
-        <div className="dashStats">
+        <div className="dashStats dashStatsWorkflow">
           <div className="statCard">
-            <div className="statValue">{runs.length}</div>
-            <div className="statLabel">Tickets processed</div>
+            <div className="statValue">{totalIssues}</div>
+            <div className="statLabel">Issues</div>
           </div>
           <div className="statCard">
             <div className="statValue statValueGreen">{totalCves}</div>
-            <div className="statLabel">Total CVEs found</div>
+            <div className="statLabel">CVEs</div>
           </div>
           <div className="statCard">
-            <div className="statValue">{done.length}</div>
-            <div className="statLabel">Completed runs</div>
+            <div className="statValue statValueAmber">{wfInProgress}</div>
+            <div className="statLabel">In progress</div>
           </div>
           <div className="statCard">
-            <div className="statValue statValueRed">{failed.length}</div>
-            <div className="statLabel">Failed runs</div>
+            <div className="statValue statValueGreen">{wfDone}</div>
+            <div className="statLabel">Done</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue">{wfProcessing}</div>
+            <div className="statLabel">Processing</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueRed">{wfFailed}</div>
+            <div className="statLabel">Failed</div>
           </div>
         </div>
       )}
 
-      {/* recent runs */}
-      <div className="card" style={{ marginTop: 24 }}>
-        <div className="cardHeader">
-          <span className="cardTitle">Recent runs</span>
-          {!loading && <span className="muted small">{runs.length} total</span>}
+      <div className="card dashBoardCard">
+        <div className="cardHeader dashBoardCardHeader">
+          <span className="cardTitle">Tickets and CVE state</span>
+          {!loading && (
+            <span className="muted small">
+              {filteredSummaries.length === summaries.length
+                ? `${summaries.length} issues`
+                : `${filteredSummaries.length} of ${summaries.length} issues`}
+            </span>
+          )}
         </div>
+
+        {!loading && !error && summaries.length > 0 && (
+          <div className="dashToolbar">
+            <label className="dashSearchWrap">
+              <input
+                type="search"
+                className="dashSearchInput"
+                placeholder="Search PLATFORM parent, PLAT-…, CVE… (or paste Jira URL)"
+                value={dashSearch}
+                onChange={(e) => setDashSearch(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <select
+              className="dashFilterSelect"
+              value={dashStatusFilter}
+              onChange={(e) => setDashStatusFilter(e.target.value as DashboardTicketStatus | '')}
+              aria-label="Filter by ticket status"
+            >
+              <option value="">All statuses</option>
+              <option value="in_progress">In progress</option>
+              <option value="done">Done</option>
+              <option value="processing">Processing</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+        )}
 
         {loading && <div className="muted small">Loading…</div>}
         {error && <div className="errorBox">{error}</div>}
 
-        {!loading && !error && runs.length === 0 && (
+        {!loading && !error && summaries.length === 0 && (
           <div className="muted small">No runs yet — process your first ticket to get started.</div>
         )}
 
-        {!loading && runs.length > 0 && (
+        {!loading && !error && summaries.length > 0 && filteredSummaries.length === 0 && (
+          <div className="muted small dashFilterEmpty">
+            No issues match search or status filter.
+            {' '}
+            <button type="button" className="resultsClearFiltersLink" onClick={() => { setDashSearch(''); setDashStatusFilter('') }}>
+              Clear filters
+            </button>
+          </div>
+        )}
+
+        {!loading && summaries.length > 0 && filteredSummaries.length > 0 && (
           <>
-            <table className="historyTable">
-              <thead>
-                <tr>
-                  <th>Ticket</th>
-                  <th>Status</th>
-                  <th>CVEs found</th>
-                  <th>When</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageRuns.map((r) => (
-                  <tr key={r.run_id}>
-                    <td>
-                      <span className="mono" style={{ color: 'rgba(99,130,241,1)', fontWeight: 700 }}>
-                        {r.issue_key}
+            <div className="dashIssueList">
+              {pageSlice.map((s) => {
+                const wf = ticketStatusForSummary(s)
+                return (
+                <details key={s.issue_key} className="dashIssueDetails">
+                  <summary className="dashIssueSummary">
+                    <span className="dashIssueSummaryMain">
+                      <span className="dashIssueKey mono">{s.issue_key}</span>
+                      <span className={dashTicketWorkflowPillClass(wf)} title="PLAT ticket workflow (last run)">
+                        {dashboardTicketStatusLabel(wf)}
                       </span>
-                    </td>
-                    <td><StatusBadge status={r.status} /></td>
-                    <td>
-                      {r.cve_count != null
-                        ? <span className="cvePill">{r.cve_count} CVE{r.cve_count !== 1 ? 's' : ''}</span>
-                        : <span className="dash">—</span>}
-                    </td>
-                    <td><span className="muted small">{relativeTime(r.created_at)}</span></td>
-                    <td>
-                      {r.status === 'done' && (
-                        <button
-                          className="btn btnSecondary"
-                          style={{ padding: '4px 12px', fontSize: 12 }}
-                          onClick={() => onOpen(r.issue_key, r.run_id)}
-                        >
-                          Open
-                        </button>
+                      {wf === 'processing' && (
+                        <StatusBadge status={s.run_status} />
                       )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      {s.cve_count != null && (
+                        <span className="cvePill">{s.cve_count} CVE{s.cve_count !== 1 ? 's' : ''}</span>
+                      )}
+                      {(s.needs_plat_cve_count ?? 0) > 0 && (
+                        <span className="dashNeedsPlatPill">{s.needs_plat_cve_count} need PLAT</span>
+                      )}
+                    </span>
+                    <span className="dashIssueSummaryAside">
+                      <span className="muted small">{relativeTime(s.created_at)}</span>
+                      <button
+                        type="button"
+                        className="btn btnSecondary dashIssueOpenBtn"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          onOpen(s.issue_key, s.run_id)
+                        }}
+                      >
+                        Open
+                      </button>
+                    </span>
+                  </summary>
+                  <div className="dashIssueBody">
+                    {s.run_status !== 'done' && !s.run_status.startsWith('failed') && (
+                      <p className="muted small">Pipeline still running — open the ticket to watch progress.</p>
+                    )}
+                    {s.cves.length > 0 ? (
+                      <table className="dashCveTable">
+                        <thead>
+                          <tr>
+                            <th>CVE</th>
+                            <th>Severity</th>
+                            <th>State</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {s.cves.map((c) => (
+                            <tr key={c.cve_id}>
+                              <td>
+                                <a
+                                  className="cveId"
+                                  href={`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(c.cve_id)}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {c.cve_id}
+                                </a>
+                              </td>
+                              <td>
+                                {c.severity
+                                  ? <span className="mono">{c.severity}</span>
+                                  : <span className="dash">—</span>}
+                              </td>
+                              <td>
+                                <span className={dashCveStatePillClass(String(c.cve_state))}>
+                                  {dashboardCveStateLabel(String(c.cve_state))}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      s.run_status === 'done' && (
+                        <p className="muted small">No CVE rows in the saved result.</p>
+                      )
+                    )}
+                  </div>
+                </details>
+                )
+              })}
+            </div>
 
             {totalPages > 1 && (
               <div className="pagination">
                 <button
+                  type="button"
                   className="pageBtn"
                   disabled={page === 1}
-                  onClick={() => setPage(p => p - 1)}
+                  onClick={() => setPage((p) => p - 1)}
                 >
                   ← Prev
                 </button>
-                {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
                   <button
                     key={p}
+                    type="button"
                     className={`pageBtn ${p === page ? 'pageBtnActive' : ''}`}
                     onClick={() => setPage(p)}
                   >
@@ -1086,9 +1235,10 @@ function DashboardView({
                   </button>
                 ))}
                 <button
+                  type="button"
                   className="pageBtn"
                   disabled={page === totalPages}
-                  onClick={() => setPage(p => p + 1)}
+                  onClick={() => setPage((p) => p + 1)}
                 >
                   Next →
                 </button>
@@ -1175,8 +1325,7 @@ function App() {
     }
   }
 
-  async function startProcessing() {
-    if (!issue) return
+  async function startProcessingForIssue(issueRow: IssueResponse) {
     setError(null)
     setLoading(true)
     setRunId(null)
@@ -1184,13 +1333,27 @@ function App() {
     setViewMode('ticket')
     setCommentPosted(false)
     try {
-      const res = await apiPost<ProcessResponse>(`/api/issues/${issue.key}/process`, {})
+      const res = await apiPost<ProcessResponse>(`/api/issues/${issueRow.key}/process`, {})
       setRunId(res.run_id)
     } catch (e: any) {
       setError(e?.message ?? String(e))
     } finally {
       setLoading(false)
     }
+  }
+
+  async function startProcessing() {
+    if (!issue) return
+    await startProcessingForIssue(issue)
+  }
+
+  async function reprocessTicket() {
+    if (!issue) return
+    const ok = window.confirm(
+      'Start a full analysis run again? This re-fetches the Jira issue, attachments, NVD, and PLAT data. In-memory changes in the results table are replaced when the run finishes.',
+    )
+    if (!ok) return
+    await startProcessingForIssue(issue)
   }
 
   async function pushComment() {
@@ -1200,20 +1363,6 @@ function App() {
     try {
       await apiPost(`/api/issues/${issue.key}/comment`, { body: commentBody, internal: true })
       setCommentPosted(true)
-    } catch (e: any) {
-      setError(e?.message ?? String(e))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function refreshJob() {
-    if (!runId) return
-    setError(null)
-    setLoading(true)
-    try {
-      const j = await apiGet<JobResponse>(`/api/jobs/${runId}`)
-      setJob(j)
     } catch (e: any) {
       setError(e?.message ?? String(e))
     } finally {
@@ -1341,7 +1490,7 @@ function App() {
                 onCommentChange={setCommentBody}
                 onPushComment={pushComment}
                 onBack={() => setViewMode('ticket')}
-                onRefreshJob={refreshJob}
+                onReprocessTicket={reprocessTicket}
                 commentPosted={commentPosted}
               />
             )}

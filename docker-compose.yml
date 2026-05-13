@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      POSTGRES_DSN: postgresql+psycopg://cve_portal:cve_portal@postgres:5432/cve_portal
+      POSTGRES_DSN: postgresql+psycopg://${POSTGRES_USER:-cve_portal}:${POSTGRES_PASSWORD:-cve_portal}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-cve_portal}
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
@@ -23,7 +23,7 @@ services:
     env_file:
       - .env
     environment:
-      POSTGRES_DSN: postgresql+psycopg://cve_portal:cve_portal@postgres:5432/cve_portal
+      POSTGRES_DSN: postgresql+psycopg://${POSTGRES_USER:-cve_portal}:${POSTGRES_PASSWORD:-cve_portal}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-cve_portal}
       REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
@@ -43,13 +43,13 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: cve_portal
-      POSTGRES_USER: cve_portal
-      POSTGRES_PASSWORD: cve_portal
+      POSTGRES_DB: ${POSTGRES_DB:-cve_portal}
+      POSTGRES_USER: ${POSTGRES_USER:-cve_portal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cve_portal}
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cve_portal -d cve_portal"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 3s
       retries: 20

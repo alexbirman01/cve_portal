@@ -1106,6 +1106,31 @@ button.platCreatePill:disabled:hover {
   gap: 8px;
 }
 
+.btnReprocessTicket {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: rgba(251, 191, 36, 0.08);
+  color: #fcd34d;
+  border: 2px solid rgba(251, 191, 36, 0.55);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btnReprocessTicket:hover:not(:disabled) {
+  background: rgba(251, 191, 36, 0.16);
+  border-color: #fbbf24;
+  color: #fde68a;
+}
+.btnReprocessTicket:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .btnCreateAllPlat {
   display: inline-flex;
   align-items: center;
@@ -1320,6 +1345,10 @@ button.platCreatePill:disabled:hover {
   margin-bottom: 4px;
 }
 
+.dashStatsWorkflow {
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+
 @media (max-width: 700px) {
   .dashStats { grid-template-columns: repeat(2, 1fr); }
 }
@@ -1343,6 +1372,7 @@ button.platCreatePill:disabled:hover {
 
 .statValueGreen { color: #4ade80; }
 .statValueRed   { color: #f87171; }
+.statValueAmber { color: #fbbf24; }
 
 .statLabel {
   font-size: 12px;
@@ -1350,6 +1380,222 @@ button.platCreatePill:disabled:hover {
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.dashBoardCard {
+  margin-top: 24px;
+}
+
+.dashBoardCardHeader {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dashToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.dashSearchWrap {
+  flex: 1 1 200px;
+  min-width: 160px;
+  max-width: 360px;
+}
+
+.dashSearchInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 12.5px;
+}
+
+.dashFilterSelect {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 12px;
+  min-width: 160px;
+}
+
+.dashFilterEmpty {
+  padding: 12px 16px 16px;
+}
+
+.dashTicketWorkflow {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dashTicketWorkflowDone {
+  background: rgba(74, 222, 128, 0.15);
+  color: #86efac;
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+
+.dashTicketWorkflowProgress {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.dashTicketWorkflowProcessing {
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+}
+
+.dashTicketWorkflowFailed {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.dashIssueList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 12px 14px;
+}
+
+.dashIssueDetails {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.dashIssueSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+.dashIssueSummary::-webkit-details-marker { display: none; }
+
+.dashIssueSummaryMain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dashIssueSummaryAside {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.dashIssueKey {
+  color: rgba(129, 140, 248, 1);
+  font-weight: 700;
+}
+
+.dashIssueOpenBtn {
+  padding: 4px 12px !important;
+  font-size: 12px !important;
+}
+
+.dashNeedsPlatPill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.dashIssueBody {
+  padding: 0 14px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.dashCveTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 10px;
+}
+
+.dashCveTable th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.45;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dashCveTable td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
+}
+
+.dashCveTable tbody tr:last-child td { border-bottom: none; }
+
+.dashCveState {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dashCveStateOk {
+  background: rgba(74, 222, 128, 0.12);
+  color: #86efac;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+}
+
+.dashCveStateAction {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.dashCveStateWarn {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.dashCveStateBad {
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.dashCveStateRun {
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.35);
 }
 
 /* ─── history ────────────────────────────────────────────────────────────── */
