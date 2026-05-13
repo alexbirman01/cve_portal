@@ -87,6 +87,10 @@ class CreatePlatIn(BaseModel):
     organizations: list[OrgRefIn] | None = None
     # When organizations is empty, server copies org IDs from this issue (portal parent ticket).
     source_issue_key: str | None = None
+    # Bug create only: description / display lines (optional; server falls back).
+    image_display: str | None = None
+    resource_label: str | None = None
+    vendor_fix_version: str | None = None
 
     @field_validator("organizations", mode="before")
     @classmethod
@@ -135,6 +139,41 @@ def create_plat_ticket(payload: CreatePlatIn):
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
         return {"exists": False, "key": key}
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(status_code=400, detail=detail) from e
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        jira.close()
+
+
+@app.post("/api/plat/bug")
+def create_plat_bug_ticket(payload: CreatePlatIn):
+    jira = JiraClient()
+    try:
+        cve_id = payload.cve_id.strip()
+        image_basename = payload.image_basename.strip()
+        existing = jira.find_plat_bug_for_image(cve_id, image_basename)
+        if existing:
+            return {"exists": True, "keys": existing}
+        org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
+        key = jira.create_plat_bug(
+            cve_id,
+            image_basename,
+            payload.package_name.strip(),
+            payload.package_version.strip(),
+            priority_name=_jira_priority_name(payload.severity),
+            organization_refs=org_refs or None,
+            source_issue_key=payload.source_issue_key,
+            image_display=payload.image_display,
+            resource_label=payload.resource_label,
+            vendor_fix_version=payload.vendor_fix_version,
+        )
+        if not key:
+            raise HTTPException(status_code=502, detail="Jira did not return issue key")
+        summary = f"[{cve_id}] - [{image_basename}]"
+        return {"exists": False, "key": key, "summary": summary}
     except httpx.HTTPStatusError as e:
         detail = e.response.text if e.response is not None else str(e)
         raise HTTPException(status_code=400, detail=detail) from e

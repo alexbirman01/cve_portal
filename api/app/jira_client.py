@@ -158,6 +158,70 @@ def _text_to_adf(text: str) -> dict[str, Any]:
     return {"type": "doc", "version": 1, "content": content}
 
 
+def _plat_bug_description_text(
+    *,
+    image_display: str,
+    resource: str,
+    vendor_affected_version: str,
+    vendor_fix_version: str,
+) -> str:
+    """Plain-text body for PLAT Bug description (Jira ADF via `_text_to_adf`)."""
+    img = image_display.strip() or "—"
+    res = resource.strip() or "—"
+    va = vendor_affected_version.strip() or "—"
+    vf = vendor_fix_version.strip() or "—"
+    return (
+        f" Image:    {img}\n"
+        f"Resource: {res}\n"
+        f"Vendor Affected version: {va}\n"
+        f"Vendor Fix version: {vf}"
+    )
+
+
+def _jira_select_like_value_for_create(raw: Any) -> dict[str, Any] | None:
+    """Map a Jira GET field value (select / option) to a minimal POST shape."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        v = raw.get("value")
+        if v is not None and str(v).strip():
+            return {"value": str(v).strip()}
+        n = raw.get("name")
+        if n is not None and str(n).strip():
+            return {"value": str(n).strip()}
+        oid = raw.get("id")
+        if oid is not None and str(oid).strip():
+            s = str(oid).strip()
+            if s.isdigit():
+                return {"id": int(s)}
+            return {"id": s}
+    return None
+
+
+def _plat_bug_dev_group_value_list_for_create(raw: Any, fallback_csv: str) -> list[dict[str, Any]] | None:
+    """
+    Dev Group (customfield_10712) is a multi-select: REST create uses a list, e.g. [{"value":"BE"}].
+    `fallback_csv` may be one label or comma-separated labels.
+    """
+    if raw is not None:
+        if isinstance(raw, list):
+            out: list[dict[str, Any]] = []
+            for item in raw:
+                x = _jira_select_like_value_for_create(item)
+                if x:
+                    out.append(x)
+            if out:
+                return out
+        else:
+            x = _jira_select_like_value_for_create(raw)
+            if x:
+                return [x]
+    parts = [p.strip() for p in (fallback_csv or "").split(",") if p.strip()]
+    if parts:
+        return [{"value": p} for p in parts]
+    return None
+
+
 def _coerce_jira_organization_id(raw: Any) -> int | None:
     """Parse a strictly numeric org id (e.g. for JQL); use `_jsm_org_id_token` for REST values."""
     if raw is None:
@@ -664,6 +728,52 @@ class JiraClient:
             if (item.get("image_basename") or "").strip().casefold() == want
         ]
 
+    def search_plat_bugs_for_cve(self, cve_id: str) -> list[dict[str, str]]:
+        """
+        Bug PLAT rows for this CVE (summary ~ cve_id). Each item: {"key", "image_basename"}.
+        image_basename from correlation custom field (if present) or summary [CVE] - [image].
+        """
+        url = f"{self._base}/rest/api/3/search/jql"
+        headers = {**self._headers, "Content-Type": "application/json"}
+        jql = (
+            f'project = {settings.jira_plat_project_key} AND issuetype = Bug '
+            f'AND summary ~ "{cve_id}"'
+        )
+        fields = ["key", "summary"]
+        fid = settings.jira_plat_cf_internal_id
+        if fid:
+            fields.append(fid)
+        try:
+            r = self._client.post(
+                url,
+                json={"jql": jql, "fields": fields, "maxResults": 100},
+                headers=headers,
+            )
+            r.raise_for_status()
+            out: list[dict[str, str]] = []
+            for issue in r.json().get("issues") or []:
+                key = issue.get("key", "")
+                f = issue.get("fields") or {}
+                img: str | None = None
+                if fid:
+                    img = _image_basename_from_correlation(_normalize_cf_value(f.get(fid)), cve_id)
+                if not img:
+                    img = _image_basename_from_summary(f.get("summary"), cve_id)
+                out.append({"key": key, "image_basename": (img or "").strip()})
+            return out
+        except Exception:
+            return []
+
+    def find_plat_bug_for_image(self, cve_id: str, image_basename: str) -> list[str]:
+        want = image_basename.strip().casefold()
+        if not want:
+            return []
+        return [
+            item["key"]
+            for item in self.search_plat_bugs_for_cve(cve_id)
+            if (item.get("image_basename") or "").strip().casefold() == want
+        ]
+
     def search_plat_tickets(self, cve_id: str) -> list[PlatTicket]:
         """Return PLAT tickets related to this CVE — Security Vulnerability (by cf field) and Bug (by summary)."""
         url = f"{self._base}/rest/api/3/search/jql"
@@ -831,27 +941,21 @@ class JiraClient:
         r = self._client.delete(url, headers=self._headers)
         r.raise_for_status()
 
-    def create_plat_security_vulnerability(
+    def _create_plat_issue_with_organization(
         self,
-        cve_id: str,
-        image_basename: str,
-        package_name: str,
-        package_vulnerable_version: str,
+        base_fields: dict[str, Any],
         *,
-        priority_name: str | None = None,
         organization_refs: list[dict[str, Any]] | None = None,
         source_issue_key: str | None = None,
     ) -> str:
         """
-        Create PLAT Security Vulnerability (issuetype name or id from settings).
-        When Organization ids/names are present, the issue is only kept if Organization is set
-        (on create or immediately after via edit). Otherwise the draft issue is deleted and an error is raised.
+        POST a PLAT issue: same Organization resolution and create/edit fallback as Security Vulnerability.
+        `base_fields` must include project, summary, issuetype, and any non-org custom fields.
         """
         create_urls = (
             f"{self._base}/rest/api/3/issue",
             f"{self._base}/rest/api/2/issue",
         )
-        summary = f"[{cve_id}] - [{image_basename}]"
         org_tokens = self._organization_ids_for_plat_create(
             organization_refs,
             source_issue_key=source_issue_key,
@@ -860,31 +964,7 @@ class JiraClient:
             organization_refs,
             source_issue_key=source_issue_key,
         )
-        internal = f"{image_basename}_{cve_id}"
-        pkg = (package_name or "").strip() or cve_id
-
-        base_fields: dict[str, Any] = {
-            "project": {"key": settings.jira_plat_project_key},
-            "summary": summary,
-            settings.jira_plat_cf_cve_id: cve_id,
-        }
-        if settings.jira_plat_issuetype_id and str(settings.jira_plat_issuetype_id).strip():
-            base_fields["issuetype"] = {"id": str(settings.jira_plat_issuetype_id).strip()}
-        else:
-            base_fields["issuetype"] = {"name": settings.jira_plat_issuetype_name}
-
-        if priority_name:
-            base_fields["priority"] = {"name": priority_name}
         org_fids = _plat_organization_field_ids()
-        int_f = (settings.jira_plat_cf_internal_id or "").strip()
-        org_id_set = _plat_organization_field_id_set()
-        if int_f and int_f.casefold() not in org_id_set:
-            base_fields[int_f] = internal
-        if settings.jira_plat_cf_package_name:
-            base_fields[settings.jira_plat_cf_package_name] = pkg
-        if settings.jira_plat_cf_package_vuln_version:
-            base_fields[settings.jira_plat_cf_package_vuln_version] = package_vulnerable_version
-
         headers = {**self._headers, "Content-Type": "application/json"}
 
         def post_create(fields_payload: dict[str, Any]) -> httpx.Response:
@@ -994,6 +1074,135 @@ class JiraClient:
             + (last_org_error or "Jira rejected all organization payloads on create and on edit.")
         )
         raise RuntimeError(detail)
+
+    def create_plat_security_vulnerability(
+        self,
+        cve_id: str,
+        image_basename: str,
+        package_name: str,
+        package_vulnerable_version: str,
+        *,
+        priority_name: str | None = None,
+        organization_refs: list[dict[str, Any]] | None = None,
+        source_issue_key: str | None = None,
+    ) -> str:
+        """
+        Create PLAT Security Vulnerability (issuetype name or id from settings).
+        When Organization ids/names are present, the issue is only kept if Organization is set
+        (on create or immediately after via edit). Otherwise the draft issue is deleted and an error is raised.
+        """
+        summary = f"[{cve_id}] - [{image_basename}]"
+        internal = f"{image_basename}_{cve_id}"
+        pkg = (package_name or "").strip() or cve_id
+
+        base_fields: dict[str, Any] = {
+            "project": {"key": settings.jira_plat_project_key},
+            "summary": summary,
+            settings.jira_plat_cf_cve_id: cve_id,
+        }
+        if settings.jira_plat_issuetype_id and str(settings.jira_plat_issuetype_id).strip():
+            base_fields["issuetype"] = {"id": str(settings.jira_plat_issuetype_id).strip()}
+        else:
+            base_fields["issuetype"] = {"name": settings.jira_plat_issuetype_name}
+
+        if priority_name:
+            base_fields["priority"] = {"name": priority_name}
+        int_f = (settings.jira_plat_cf_internal_id or "").strip()
+        org_id_set = _plat_organization_field_id_set()
+        if int_f and int_f.casefold() not in org_id_set:
+            base_fields[int_f] = internal
+        if settings.jira_plat_cf_package_name:
+            base_fields[settings.jira_plat_cf_package_name] = pkg
+        if settings.jira_plat_cf_package_vuln_version:
+            base_fields[settings.jira_plat_cf_package_vuln_version] = package_vulnerable_version
+
+        return self._create_plat_issue_with_organization(
+            base_fields,
+            organization_refs=organization_refs,
+            source_issue_key=source_issue_key,
+        )
+
+    def _resolve_plat_bug_dev_group(self, source_issue_key: str | None) -> list[dict[str, Any]] | None:
+        """Dev Group multi-select: copy list from source issue, else env default(s)."""
+        fid = (settings.jira_plat_bug_dev_group_field_id or "").strip()
+        if not fid:
+            return None
+        raw: Any = None
+        if settings.jira_plat_bug_dev_group_copy_from_source and (source_issue_key or "").strip():
+            try:
+                url = f"{self._base}/rest/api/3/issue/{source_issue_key.strip()}"
+                r = self._client.get(url, params={"fields": fid})
+                r.raise_for_status()
+                raw = (r.json().get("fields") or {}).get(fid)
+            except Exception:
+                raw = None
+        return _plat_bug_dev_group_value_list_for_create(
+            raw,
+            (settings.jira_plat_bug_dev_group_option_value or "").strip(),
+        )
+
+    def create_plat_bug(
+        self,
+        cve_id: str,
+        image_basename: str,
+        package_name: str,
+        package_vulnerable_version: str,
+        *,
+        priority_name: str | None = None,
+        organization_refs: list[dict[str, Any]] | None = None,
+        source_issue_key: str | None = None,
+        image_display: str | None = None,
+        resource_label: str | None = None,
+        vendor_fix_version: str | None = None,
+    ) -> str:
+        """
+        Create PLAT Bug: no CVE/package custom fields (per PlainID Bug workflow).
+        Description carries image, resource, and vendor version lines.
+        """
+        summary = f"[{cve_id}] - [{image_basename}]"
+        internal = f"{image_basename}_{cve_id}"
+
+        img_line = (image_display or "").strip() or image_basename
+        res_line = (resource_label or "").strip() or (package_name or "").strip() or "—"
+        desc_plain = _plat_bug_description_text(
+            image_display=img_line,
+            resource=res_line,
+            vendor_affected_version=package_vulnerable_version,
+            vendor_fix_version=(vendor_fix_version or "").strip() or "—",
+        )
+
+        base_fields: dict[str, Any] = {
+            "project": {"key": settings.jira_plat_project_key},
+            "summary": summary,
+            "description": _text_to_adf(desc_plain),
+        }
+        if settings.jira_plat_bug_issuetype_id and str(settings.jira_plat_bug_issuetype_id).strip():
+            base_fields["issuetype"] = {"id": str(settings.jira_plat_bug_issuetype_id).strip()}
+        else:
+            base_fields["issuetype"] = {"name": settings.jira_plat_bug_issuetype_name}
+
+        if priority_name:
+            base_fields["priority"] = {"name": priority_name}
+        int_f = (settings.jira_plat_cf_internal_id or "").strip()
+        org_id_set = _plat_organization_field_id_set()
+        if int_f and int_f.casefold() not in org_id_set:
+            base_fields[int_f] = internal
+
+        dg_fid = (settings.jira_plat_bug_dev_group_field_id or "").strip()
+        if dg_fid:
+            dg_val = self._resolve_plat_bug_dev_group(source_issue_key)
+            if not dg_val:
+                raise RuntimeError(
+                    "PLAT Bug requires Dev Group. Set it on the portal source Jira issue, "
+                    "or set JIRA_PLAT_BUG_DEV_GROUP_OPTION_VALUE (comma-separated labels allowed)."
+                )
+            base_fields[dg_fid] = dg_val
+
+        return self._create_plat_issue_with_organization(
+            base_fields,
+            organization_refs=organization_refs,
+            source_issue_key=source_issue_key,
+        )
 
     def download_attachment(self, content_url: str) -> bytes:
         r = self._client.get(content_url)

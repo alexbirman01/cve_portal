@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     # If set (e.g. "10034"), `issuetype` is sent as {"id": ...} instead of by name (use when names are ambiguous).
     jira_plat_issuetype_id: str | None = None
 
+    # PLAT Bug create — same project/fields pattern as Security Vulnerability where Jira allows.
+    jira_plat_bug_issuetype_name: str = "Bug"
+    jira_plat_bug_issuetype_id: str | None = None
+    # Bug screen often requires "Dev Group" (PlainID: customfield_10712).
+    jira_plat_bug_dev_group_field_id: str = "customfield_10712"
+    jira_plat_bug_dev_group_copy_from_source: bool = True
+    # When source issue has no Dev Group, use these Jira option label(s) as [{"value": "..."}, ...] (comma-separated for multi).
+    jira_plat_bug_dev_group_option_value: str = "BE"
+
     jira_plat_cf_cve_id: str = "customfield_11245"
     jira_plat_cve_cf_number: int = 11245
 

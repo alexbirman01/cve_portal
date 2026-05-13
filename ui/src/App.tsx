@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   apiCreatePlat,
+  apiCreatePlatBug,
   apiGet,
   apiPost,
   buildSuggestedComment,
   exportCvesToExcel,
   formatStatus,
   imageBasenamesForCveRow,
+  mergePlatBugCreateIntoRows,
   mergePlatCreateIntoRows,
   platBugTicketsForImage,
   platMissingCveCreateSlots,
@@ -157,6 +159,7 @@ function CveTable({
   issueKey,
   platOrganizationRefs,
   onPlatCreated,
+  onPlatBugCreated,
   hideBuiltInToolbar,
   sourceRowCount,
   onClearFilters,
@@ -165,6 +168,7 @@ function CveTable({
   issueKey?: string
   platOrganizationRefs?: OrgRef[] | null
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
+  onPlatBugCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   hideBuiltInToolbar?: boolean
   /** When filters hide all rows but source had rows, show clear action */
   sourceRowCount?: number
@@ -256,11 +260,17 @@ function CveTable({
                           {perImages.map((imgBasename) => {
                             const bugsForImg = platBugTicketsForImage(r, imgBasename)
                             const secKeys = platSecKeysForImage(r, imgBasename)
-                            const busyKey = `${r.cve_id}|${imgBasename}`
+                            const busyKeyCve = `${r.cve_id}|${imgBasename}|cve`
+                            const busyKeyBug = `${r.cve_id}|${imgBasename}|bug`
                             const canCreateThis =
                               onPlatCreated && verOk && secKeys.length === 0
+                            const canCreateBug =
+                              onPlatBugCreated && verOk && bugsForImg.length === 0
                             const showDash =
-                              !bugsForImg.length && !secKeys.length && !canCreateThis
+                              !bugsForImg.length &&
+                              !secKeys.length &&
+                              !canCreateThis &&
+                              !canCreateBug
                             return (
                               <div key={imgBasename} className="platPerImage">
                                 <span
@@ -269,69 +279,121 @@ function CveTable({
                                 >
                                   {platDisplayLabelForImage(r, imgBasename)}
                                 </span>
-                                <div className="platPerImageActions platSketchActions">
-                                  {bugsForImg.map((t) => (
-                                    <a
-                                      key={t.key}
-                                      className="platTicketPill platTicketFound"
-                                      href={`https://plainid.atlassian.net/browse/${t.key}`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      title={t.issue_type}
-                                    >
-                                      {t.key}
-                                      <span className="platTicketType">bug</span>
-                                    </a>
-                                  ))}
-                                  {secKeys.map((pk) => (
-                                    <a
-                                      key={pk}
-                                      className="platTicketPill platTicketFound"
-                                      href={`https://plainid.atlassian.net/browse/${pk}`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      title="Security Vulnerability"
-                                    >
-                                      {pk}
-                                      <span className="platTicketType">cve</span>
-                                    </a>
-                                  ))}
-                                  {!secKeys.length && canCreateThis && (
-                                    <button
-                                      type="button"
-                                      className="platTicketPill platTicketCreate platCreatePill"
-                                      disabled={platBusy === busyKey}
-                                      title={`Create Security Vulnerability (CVE) PLAT for ${imgBasename}`}
-                                      onClick={async () => {
-                                        const ver = (r.affected_version ?? '').trim()
-                                        if (!ver || !onPlatCreated) return
-                                        setPlatBusy(busyKey)
-                                        setPlatErrRow(null)
-                                        setPlatErrMsg(null)
-                                        try {
-                                          const out = await apiCreatePlat({
-                                            cve_id: r.cve_id,
-                                            image_basename: imgBasename,
-                                            package_name: platPackageNameForRow(r),
-                                            package_version: ver,
-                                            severity: r.severity,
-                                            organizations: platOrganizationRefs ?? [],
-                                            source_issue_key: issueKey,
-                                          })
-                                          onPlatCreated(r.cve_id, imgBasename, out)
-                                        } catch (e) {
-                                          setPlatErrRow(r.cve_id)
-                                          setPlatErrMsg(e instanceof Error ? e.message : String(e))
-                                        } finally {
-                                          setPlatBusy(null)
-                                        }
-                                      }}
-                                    >
-                                      {platBusy === busyKey ? 'Creating…' : 'Create CVE'}
-                                    </button>
-                                  )}
-                                  {showDash && (
+                                <div
+                                  className={
+                                    showDash
+                                      ? 'platPerImageActions platSketchActions platSketchActionsEmpty'
+                                      : 'platPerImageActions platSketchActions'
+                                  }
+                                >
+                                  {showDash ? (
                                     <span className="muted small platPerImageNA">—</span>
+                                  ) : (
+                                    <>
+                                      <div className="platPerImageBugSide">
+                                        {bugsForImg.map((t) => (
+                                          <a
+                                            key={t.key}
+                                            className="platTicketPill platTicketFound"
+                                            href={`https://plainid.atlassian.net/browse/${t.key}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            title={t.issue_type}
+                                          >
+                                            {t.key}
+                                            <span className="platTicketType">bug</span>
+                                          </a>
+                                        ))}
+                                        {canCreateBug && (
+                                          <button
+                                            type="button"
+                                            className="platTicketPill platTicketCreate platTicketCreateBug platCreatePill platCreateBugPill"
+                                            disabled={platBusy === busyKeyBug}
+                                            title={`Create Bug PLAT for ${imgBasename}`}
+                                            onClick={async () => {
+                                              const ver = (r.affected_version ?? '').trim()
+                                              if (!ver || !onPlatBugCreated) return
+                                              setPlatBusy(busyKeyBug)
+                                              setPlatErrRow(null)
+                                              setPlatErrMsg(null)
+                                              try {
+                                                const out = await apiCreatePlatBug({
+                                                  cve_id: r.cve_id,
+                                                  image_basename: imgBasename,
+                                                  package_name: platPackageNameForRow(r),
+                                                  package_version: ver,
+                                                  severity: r.severity,
+                                                  organizations: platOrganizationRefs ?? [],
+                                                  source_issue_key: issueKey,
+                                                  image_display: platDisplayLabelForImage(r, imgBasename),
+                                                  resource_label:
+                                                    (r.affected_resource ?? '').trim() ||
+                                                    platPackageNameForRow(r),
+                                                  vendor_fix_version: (r.fixed_version ?? '').trim() || null,
+                                                })
+                                                onPlatBugCreated(r.cve_id, imgBasename, out)
+                                              } catch (e) {
+                                                setPlatErrRow(r.cve_id)
+                                                setPlatErrMsg(e instanceof Error ? e.message : String(e))
+                                              } finally {
+                                                setPlatBusy(null)
+                                              }
+                                            }}
+                                          >
+                                            {platBusy === busyKeyBug ? 'Creating…' : 'Create BUG'}
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div className="platPerImageCveSide">
+                                        {secKeys.map((pk) => (
+                                          <a
+                                            key={pk}
+                                            className="platTicketPill platTicketFound"
+                                            href={`https://plainid.atlassian.net/browse/${pk}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            title="Security Vulnerability"
+                                          >
+                                            {pk}
+                                            <span className="platTicketType">cve</span>
+                                          </a>
+                                        ))}
+                                        {!secKeys.length && canCreateThis && (
+                                          <button
+                                            type="button"
+                                            className="platTicketPill platTicketCreate platCreatePill"
+                                            disabled={platBusy === busyKeyCve}
+                                            title={`Create Security Vulnerability (CVE) PLAT for ${imgBasename}`}
+                                            onClick={async () => {
+                                              const ver = (r.affected_version ?? '').trim()
+                                              if (!ver || !onPlatCreated) return
+                                              setPlatBusy(busyKeyCve)
+                                              setPlatErrRow(null)
+                                              setPlatErrMsg(null)
+                                              try {
+                                                const out = await apiCreatePlat({
+                                                  cve_id: r.cve_id,
+                                                  image_basename: imgBasename,
+                                                  package_name: platPackageNameForRow(r),
+                                                  package_version: ver,
+                                                  severity: r.severity,
+                                                  organizations: platOrganizationRefs ?? [],
+                                                  source_issue_key: issueKey,
+                                                })
+                                                onPlatCreated(r.cve_id, imgBasename, out)
+                                              } catch (e) {
+                                                setPlatErrRow(r.cve_id)
+                                                setPlatErrMsg(e instanceof Error ? e.message : String(e))
+                                              } finally {
+                                                setPlatBusy(null)
+                                              }
+                                            }}
+                                          >
+                                            {platBusy === busyKeyCve ? 'Creating…' : 'Create CVE'}
+                                          </button>
+                                        )}
+                                      </div>
+                                    </>
                                   )}
                                 </div>
                               </div>
@@ -346,19 +408,21 @@ function CveTable({
                                 Unmapped Sec
                               </span>
                               <div className="platPerImageActions platSketchActions">
-                                {orphanSec.map((pk) => (
-                                  <a
-                                    key={pk}
-                                    className="platTicketPill platTicketFound"
-                                    href={`https://plainid.atlassian.net/browse/${pk}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    title="Security Vulnerability—unmapped to image"
-                                  >
-                                    {pk}
-                                    <span className="platTicketType">cve</span>
-                                  </a>
-                                ))}
+                                <div className="platPerImageCveSide">
+                                  {orphanSec.map((pk) => (
+                                    <a
+                                      key={pk}
+                                      className="platTicketPill platTicketFound"
+                                      href={`https://plainid.atlassian.net/browse/${pk}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title="Security Vulnerability—unmapped to image"
+                                    >
+                                      {pk}
+                                      <span className="platTicketType">cve</span>
+                                    </a>
+                                  ))}
+                                </div>
                               </div>
                             </div>
                           )}
@@ -382,37 +446,49 @@ function CveTable({
                                   platDisplayFullImagesSummary(r) ||
                                   '—'}
                               </span>
-                              <div className="platPerImageActions platSketchActions">
-                                {bugTickets.map((t) => (
-                                  <a
-                                    key={t.key}
-                                    className="platTicketPill platTicketFound"
-                                    href={`https://plainid.atlassian.net/browse/${t.key}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    title={t.issue_type}
-                                  >
-                                    {t.key}
-                                    <span className="platTicketType">bug</span>
-                                  </a>
-                                ))}
-                                {allSecKeys.map((pk) => (
-                                  <a
-                                    key={pk}
-                                    className="platTicketPill platTicketFound"
-                                    href={`https://plainid.atlassian.net/browse/${pk}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    title="Security Vulnerability"
-                                  >
-                                    {pk}
-                                    <span className="platTicketType">cve</span>
-                                  </a>
-                                ))}
-                                {bugTickets.length === 0 &&
-                                  allSecKeys.length === 0 && (
-                                    <span className="muted small platPerImageNA">—</span>
-                                  )}
+                              <div
+                                className={
+                                  bugTickets.length === 0 && allSecKeys.length === 0
+                                    ? 'platPerImageActions platSketchActions platSketchActionsEmpty'
+                                    : 'platPerImageActions platSketchActions'
+                                }
+                              >
+                                {bugTickets.length === 0 && allSecKeys.length === 0 ? (
+                                  <span className="muted small platPerImageNA">—</span>
+                                ) : (
+                                  <>
+                                    <div className="platPerImageBugSide">
+                                      {bugTickets.map((t) => (
+                                        <a
+                                          key={t.key}
+                                          className="platTicketPill platTicketFound"
+                                          href={`https://plainid.atlassian.net/browse/${t.key}`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          title={t.issue_type}
+                                        >
+                                          {t.key}
+                                          <span className="platTicketType">bug</span>
+                                        </a>
+                                      ))}
+                                    </div>
+                                    <div className="platPerImageCveSide">
+                                      {allSecKeys.map((pk) => (
+                                        <a
+                                          key={pk}
+                                          className="platTicketPill platTicketFound"
+                                          href={`https://plainid.atlassian.net/browse/${pk}`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          title="Security Vulnerability"
+                                        >
+                                          {pk}
+                                          <span className="platTicketType">cve</span>
+                                        </a>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             </div>
                           )}
@@ -668,6 +744,10 @@ function ResultsPanel({
     setRows((prev) => mergePlatCreateIntoRows(prev, cveId, imageBasename, out))
   }
 
+  const onPlatBugCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
+    setRows((prev) => mergePlatBugCreateIntoRows(prev, cveId, imageBasename, out))
+  }
+
   const severityOptions = useMemo(() => {
     const s = new Set<string>()
     for (const r of rows) {
@@ -906,6 +986,7 @@ function ResultsPanel({
           issueKey={issue.key}
           platOrganizationRefs={platOrgRefsFromIssue(issue)}
           onPlatCreated={onPlatCreated}
+          onPlatBugCreated={onPlatBugCreated}
           hideBuiltInToolbar={findingsDone}
           sourceRowCount={rows.length}
           onClearFilters={findingsDone && rows.length > 0 ? clearAllFilters : undefined}

@@ -164,7 +164,7 @@ export function ticketStatusForSummary(s: IssueCveStatusSummary): DashboardTicke
 
 export type CreatePlatResponse =
   | { exists: true; keys: string[] }
-  | { exists: false; key: string }
+  | { exists: false; key: string; summary?: string }
 
 export function formatStatus(status?: string | null): string {
   if (!status) return ''
@@ -244,6 +244,30 @@ export async function apiCreatePlat(body: {
   source_issue_key?: string | null
 }): Promise<CreatePlatResponse> {
   const res = await fetch('/api/plat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(text || res.statusText)
+  return JSON.parse(text) as CreatePlatResponse
+}
+
+export async function apiCreatePlatBug(body: {
+  cve_id: string
+  image_basename: string
+  package_name: string
+  package_version: string
+  severity?: string | null
+  organizations?: OrgRef[] | null
+  source_issue_key?: string | null
+  /** Label shown in UI / Jira description Image line (e.g. pip-operator:tag) */
+  image_display?: string | null
+  /** Resource column — component/package name */
+  resource_label?: string | null
+  vendor_fix_version?: string | null
+}): Promise<CreatePlatResponse> {
+  const res = await fetch('/api/plat/bug', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -505,6 +529,37 @@ export function platSecKeysForImage(r: CveRow, imageBasename: string): string[] 
 export function imageBasenameForPlat(r: CveRow): string | null {
   const all = imageBasenamesForCveRow(r)
   return all[0] ?? null
+}
+
+/** Apply a PLAT Bug create (new or already-existing) onto the CVE table row list. */
+export function mergePlatBugCreateIntoRows(
+  rows: CveRow[],
+  cveId: string,
+  imageBasename: string,
+  out: CreatePlatResponse,
+): CveRow[] {
+  const fallbackSummary = `[${cveId}] - [${imageBasename}]`
+  const summaryTemplate =
+    !out.exists && out.summary != null && out.summary.trim() !== ''
+      ? out.summary
+      : fallbackSummary
+  return rows.map((r) => {
+    if (r.cve_id !== cveId) return r
+    const mergeKeys = out.exists ? out.keys : [out.key]
+    const byKey = new Map((r.plat_tickets ?? []).map((t) => [t.key, t]))
+    for (const k of mergeKeys) {
+      const prev = byKey.get(k)
+      const summary =
+        prev?.issue_type === 'Bug' && prev.summary?.trim()
+          ? prev.summary
+          : summaryTemplate
+      byKey.set(k, { key: k, issue_type: 'Bug', summary })
+    }
+    return {
+      ...r,
+      plat_tickets: [...byKey.values()],
+    }
+  })
 }
 
 /** Apply a PLAT create (new or already-existing) response onto the CVE table row list. */
