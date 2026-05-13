@@ -3,7 +3,7 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, field_validator
 
 from api.app.cve_row_derived import (
@@ -13,7 +13,8 @@ from api.app.cve_row_derived import (
 )
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
-from api.app.models import Base, ProcessingRun
+from api.app.models import Base, CustomerSla, ProcessingRun
+from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
 from worker.app.tasks import process_issue
 
@@ -47,6 +48,7 @@ def get_issue(issue_key: str):
             "description_raw": issue.description_raw,
             "description_text": normalize_description(issue.description_raw),
             "attachments": issue.attachments,
+            "created": issue.created.isoformat() if issue.created else None,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -321,6 +323,142 @@ def list_jobs_cve_status(limit: int = 50):
             }
         )
     return out
+
+
+class CustomerSlaCreateIn(BaseModel):
+    customer_name: str
+    sla_critical: str | None = None
+    sla_high: str | None = None
+    sla_medium: str | None = None
+    sla_low: str | None = None
+
+    @field_validator("customer_name", mode="before")
+    @classmethod
+    def _strip_name(cls, v: object) -> object:
+        return v.strip() if isinstance(v, str) else v
+
+
+class CustomerSlaUpdateIn(BaseModel):
+    customer_name: str | None = None
+    sla_critical: str | None = None
+    sla_high: str | None = None
+    sla_medium: str | None = None
+    sla_low: str | None = None
+
+
+def _sla_row_to_api(row: CustomerSla) -> dict:
+    return {
+        "id": str(row.id),
+        "customer_name": row.customer_name,
+        "sla_critical": row.sla_critical,
+        "sla_high": row.sla_high,
+        "sla_medium": row.sla_medium,
+        "sla_low": row.sla_low,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.get("/api/sla/customers")
+def list_customer_slas():
+    with db_session() as db:
+        rows = db.query(CustomerSla).order_by(CustomerSla.customer_name.asc()).all()
+        return [_sla_row_to_api(r) for r in rows]
+
+
+@app.post("/api/sla/customers", status_code=201)
+def create_customer_sla(payload: CustomerSlaCreateIn):
+    name = payload.customer_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="customer_name required")
+    with db_session() as db:
+        exists = db.query(CustomerSla).filter(CustomerSla.customer_name == name).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="customer_name already exists")
+        row = CustomerSla(
+            customer_name=name,
+            sla_critical=payload.sla_critical,
+            sla_high=payload.sla_high,
+            sla_medium=payload.sla_medium,
+            sla_low=payload.sla_low,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _sla_row_to_api(row)
+
+
+@app.put("/api/sla/customers/{sla_id}")
+def update_customer_sla(sla_id: str, payload: CustomerSlaUpdateIn):
+    try:
+        uid = uuid.UUID(sla_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid id") from e
+    data = payload.model_dump(exclude_unset=True)
+    with db_session() as db:
+        row = db.get(CustomerSla, uid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        if "customer_name" in data:
+            new_name = (data["customer_name"] or "").strip()
+            if not new_name:
+                raise HTTPException(status_code=400, detail="customer_name cannot be empty")
+            conflict = (
+                db.query(CustomerSla)
+                .filter(CustomerSla.customer_name == new_name, CustomerSla.id != uid)
+                .first()
+            )
+            if conflict:
+                raise HTTPException(status_code=409, detail="customer_name already exists")
+            row.customer_name = new_name
+        for key in ("sla_critical", "sla_high", "sla_medium", "sla_low"):
+            if key in data:
+                setattr(row, key, data[key])
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _sla_row_to_api(row)
+
+
+@app.delete("/api/sla/customers/{sla_id}")
+def delete_customer_sla(sla_id: str):
+    try:
+        uid = uuid.UUID(sla_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid id") from e
+    with db_session() as db:
+        row = db.get(CustomerSla, uid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        db.delete(row)
+        db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/sla/due-date-preview")
+def sla_due_date_preview(
+    anchor: str = Query(..., description="ISO-8601 anchor datetime (e.g. Jira created)"),
+    organizations: str = Query("", description="Comma-separated organization names"),
+    severity: str = Query("HIGH"),
+):
+    dt_anchor = parse_jira_created(anchor)
+    if not dt_anchor:
+        raise HTTPException(status_code=400, detail="invalid anchor datetime")
+    orgs = [o.strip() for o in organizations.split(",") if o.strip()]
+    rows_by_customer_lower: dict[str, dict] = {}
+    with db_session() as db:
+        for r in db.query(CustomerSla).all():
+            nm = (r.customer_name or "").strip()
+            if not nm:
+                continue
+            rows_by_customer_lower[nm.casefold()] = {
+                "sla_critical": r.sla_critical,
+                "sla_high": r.sla_high,
+                "sla_medium": r.sla_medium,
+                "sla_low": r.sla_low,
+            }
+    due = due_date_from_anchor(dt_anchor, orgs, severity, rows_by_customer_lower)
+    return {"due_date": due, "anchor": dt_anchor.isoformat(), "organizations": orgs, "severity": severity}
 
 
 @app.get("/api/jobs/{run_id}")

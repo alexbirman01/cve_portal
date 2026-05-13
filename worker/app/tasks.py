@@ -7,7 +7,8 @@ from typing import Any
 from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient, PlatTicket
-from api.app.models import CveCache, ProcessingRun
+from api.app.models import CveCache, CustomerSla, ProcessingRun
+from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
 from worker.app.celery_app import celery_app
@@ -359,8 +360,33 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 }
             )
 
+        rows_by_customer_lower: dict[str, dict[str, Any]] = {}
+        with db_session() as db:
+            for row in db.query(CustomerSla).all():
+                nm = (row.customer_name or "").strip()
+                if not nm:
+                    continue
+                rows_by_customer_lower[nm.casefold()] = {
+                    "sla_critical": row.sla_critical,
+                    "sla_high": row.sla_high,
+                    "sla_medium": row.sla_medium,
+                    "sla_low": row.sla_low,
+                }
+
+        anchor = issue.created
+        org_names = list(issue.organizations or [])
+        for row in cve_rows:
+            row["sla_due_date"] = due_date_from_anchor(
+                anchor,
+                org_names,
+                row.get("severity"),
+                rows_by_customer_lower,
+            )
+
         result = {
             "issue_key": issue.key,
+            "sla_anchor_issue_key": issue.key,
+            "sla_anchor_created": anchor.isoformat() if anchor else None,
             "cves": cve_ids,
             "cve_rows": cve_rows,
             "nvd": enriched,

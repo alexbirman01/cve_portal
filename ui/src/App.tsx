@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
+  apiCreateCustomerSla,
   apiCreatePlat,
   apiCreatePlatBug,
+  apiDeleteCustomerSla,
   apiGet,
+  apiListCustomerSlas,
   apiPost,
+  apiUpdateCustomerSla,
   buildSuggestedComment,
   exportCvesToExcel,
   formatStatus,
@@ -28,6 +32,7 @@ import {
   dashboardTicketStatusLabel,
   ticketStatusForSummary,
   type CreatePlatResponse,
+  type CustomerSlaRecord,
   type CveRow,
   type DashboardTicketStatus,
   type IssueCveStatusSummary,
@@ -98,6 +103,7 @@ function cveRowSearchText(r: CveRow): string {
     r.fixed_version,
     platDisplaySketchSummary(r),
     platDisplayFullImagesSummary(r),
+    r.sla_due_date,
     keys,
   ]
     .filter(Boolean)
@@ -105,24 +111,10 @@ function cveRowSearchText(r: CveRow): string {
     .toLowerCase()
 }
 
-function rowMatchesCveFilters(
-  r: CveRow,
-  q: string,
-  sev: string,
-  res: string,
-): boolean {
+function rowMatchesCveSearch(r: CveRow, q: string): boolean {
   const needle = q.trim().toLowerCase()
-  if (needle && !cveRowSearchText(r).includes(needle)) return false
-  if (sev && (r.severity ?? '').toUpperCase() !== sev.toUpperCase()) return false
-  if (res && (r.affected_resource ?? '') !== res) return false
-  return true
-}
-
-function severitySortKey(s: string): number {
-  const u = s.toUpperCase()
-  const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
-  const i = order.indexOf(u)
-  return i >= 0 ? i : 99
+  if (!needle) return true
+  return cveRowSearchText(r).includes(needle)
 }
 
 /** Worst (highest) severity among findings for ticket-level summary chip */
@@ -152,6 +144,41 @@ function formatSeverityTitleCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase()
 }
 
+const CVE_TABLE_COLUMN_KEYS = ['cve', 'plat', 'severity', 'resource', 'affectedVer', 'vendorFix', 'dueDate'] as const
+type CveTableColumnKey = (typeof CVE_TABLE_COLUMN_KEYS)[number]
+
+const CVE_TABLE_COLUMN_LABELS: Record<CveTableColumnKey, string> = {
+  cve: 'CVE ID',
+  plat: 'Affected image PLAT ticket',
+  severity: 'Severity',
+  resource: 'Resource',
+  affectedVer: 'Affected Ver.',
+  vendorFix: 'Vendor Fix',
+  dueDate: 'Due Date',
+}
+
+const CVE_TABLE_COL_CLASS: Record<CveTableColumnKey, string> = {
+  cve: 'cveColCve',
+  plat: 'cveColPlat',
+  severity: 'cveColSev',
+  resource: 'cveColRes',
+  affectedVer: 'cveColVer',
+  vendorFix: 'cveColFix',
+  dueDate: 'cveColDue',
+}
+
+const DEFAULT_CVE_TABLE_COLUMN_VISIBILITY: Record<CveTableColumnKey, boolean> = {
+  cve: true,
+  plat: true,
+  severity: true,
+  resource: true,
+  affectedVer: true,
+  vendorFix: true,
+  dueDate: true,
+}
+
+type CveTableColumnVisibility = Record<CveTableColumnKey, boolean>
+
 // ─── CVE table ───────────────────────────────────────────────────────────────
 
 function CveTable({
@@ -162,7 +189,8 @@ function CveTable({
   onPlatBugCreated,
   hideBuiltInToolbar,
   sourceRowCount,
-  onClearFilters,
+  onClearSearch,
+  columnVisibility: columnVisibilityProp,
 }: {
   rows: CveRow[]
   issueKey?: string
@@ -170,23 +198,29 @@ function CveTable({
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   onPlatBugCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   hideBuiltInToolbar?: boolean
-  /** When filters hide all rows but source had rows, show clear action */
+  /** When search hides all rows but source had rows, show clear action */
   sourceRowCount?: number
-  onClearFilters?: () => void
+  onClearSearch?: () => void
+  columnVisibility?: CveTableColumnVisibility
 }) {
   const sorted = useMemo(() => sortCveRows(rows), [rows])
   const [platBusy, setPlatBusy] = useState<string | null>(null)
   const [platErrRow, setPlatErrRow] = useState<string | null>(null)
   const [platErrMsg, setPlatErrMsg] = useState<string | null>(null)
+  const vis = useMemo(() => {
+    const m: CveTableColumnVisibility = { ...DEFAULT_CVE_TABLE_COLUMN_VISIBILITY, ...columnVisibilityProp }
+    m.cve = true
+    return m
+  }, [columnVisibilityProp])
   if (!sorted.length) {
     const hadSource = (sourceRowCount ?? 0) > 0
-    if (hadSource && onClearFilters) {
+    if (hadSource && onClearSearch) {
       return (
         <div className="cveTableWrap cveTableWrapEmpty">
           <p className="muted small cveTableEmptyMsg">
-            No CVEs match filters.{' '}
-            <button type="button" className="resultsClearFiltersLink" onClick={onClearFilters}>
-              Clear filters
+            No CVEs match search.{' '}
+            <button type="button" className="resultsClearFiltersLink" onClick={onClearSearch}>
+              Clear search
             </button>
           </p>
         </div>
@@ -210,26 +244,21 @@ function CveTable({
       )}
       <table className="cveTable">
         <colgroup>
-          <col className="cveColCve" />
-          <col className="cveColPlat" />
-          <col className="cveColSev" />
-          <col className="cveColRes" />
-          <col className="cveColVer" />
-          <col className="cveColFix" />
+          {CVE_TABLE_COLUMN_KEYS.filter((k) => vis[k]).map((k) => (
+            <col key={k} className={CVE_TABLE_COL_CLASS[k]} />
+          ))}
         </colgroup>
         <thead>
           <tr>
-            <th>CVE ID</th>
-            <th>Affected image PLAT ticket</th>
-            <th>Severity</th>
-            <th>Resource</th>
-            <th>Affected Ver.</th>
-            <th>Vendor Fix</th>
+            {CVE_TABLE_COLUMN_KEYS.filter((k) => vis[k]).map((k) => (
+              <th key={k}>{CVE_TABLE_COLUMN_LABELS[k]}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {sorted.map((r) => (
             <tr key={r.cve_id}>
+              {vis.cve ? (
               <td>
                 <a
                   className="cveId"
@@ -240,6 +269,8 @@ function CveTable({
                   {r.cve_id}
                 </a>
               </td>
+              ) : null}
+              {vis.plat ? (
               <td className="platTicketCell">
                 {(() => {
                   const tickets = [
@@ -510,28 +541,308 @@ function CveTable({
                   )
                 })()}
               </td>
+              ) : null}
+              {vis.severity ? (
               <td>
                 <SevBadge sev={r.severity} score={r.score} />
               </td>
+              ) : null}
+              {vis.resource ? (
               <td>
                 {r.affected_resource
                   ? <span className="mono">{r.affected_resource}</span>
                   : <Dash />}
               </td>
+              ) : null}
+              {vis.affectedVer ? (
               <td>
                 {r.affected_version
                   ? <span className="mono">{r.affected_version}</span>
                   : <Dash />}
               </td>
+              ) : null}
+              {vis.vendorFix ? (
               <td>
                 {r.fixed_version
                   ? <span className="mono fixedVer">{r.fixed_version}</span>
                   : <Dash />}
               </td>
+              ) : null}
+              {vis.dueDate ? (
+              <td>
+                {r.sla_due_date
+                  ? (
+                    <span className="mono slaDueDate" title="Strictest SLA due (orgs on ticket + severity; anchor = ticket created)">
+                      {r.sla_due_date}
+                    </span>
+                  )
+                  : <Dash />}
+              </td>
+              ) : null}
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ─── customer SLA admin ─────────────────────────────────────────────────────
+
+function SlaAdminPanelBody() {
+  const [rows, setRows] = useState<CustomerSlaRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [createBusy, setCreateBusy] = useState(false)
+  const [draft, setDraft] = useState({
+    customer_name: '',
+    sla_critical: '',
+    sla_high: '',
+    sla_medium: '',
+    sla_low: '',
+  })
+
+  const load = useCallback(async () => {
+    setErr(null)
+    setLoading(true)
+    try {
+      const list = await apiListCustomerSlas()
+      setRows([...list].sort((a, b) => a.customer_name.localeCompare(b.customer_name)))
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  function patchRow(id: string, patch: Partial<CustomerSlaRecord>) {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+  }
+
+  async function saveRow(r: CustomerSlaRecord) {
+    setErr(null)
+    setSavingId(r.id)
+    try {
+      const updated = await apiUpdateCustomerSla(r.id, {
+        customer_name: r.customer_name,
+        sla_critical: r.sla_critical ?? null,
+        sla_high: r.sla_high ?? null,
+        sla_medium: r.sla_medium ?? null,
+        sla_low: r.sla_low ?? null,
+      })
+      setRows((prev) =>
+        [...prev.map((x) => (x.id === r.id ? updated : x))].sort((a, b) =>
+          a.customer_name.localeCompare(b.customer_name)),
+      )
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function removeRow(r: CustomerSlaRecord) {
+    const ok = window.confirm(`Delete SLA row for “${r.customer_name}”?`)
+    if (!ok) return
+    setErr(null)
+    setSavingId(r.id)
+    try {
+      await apiDeleteCustomerSla(r.id)
+      setRows((prev) => prev.filter((x) => x.id !== r.id))
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function createRow() {
+    const name = draft.customer_name.trim()
+    if (!name) {
+      setErr('Customer name is required.')
+      return
+    }
+    setErr(null)
+    setCreateBusy(true)
+    try {
+      const created = await apiCreateCustomerSla({
+        customer_name: name,
+        sla_critical: draft.sla_critical.trim() || undefined,
+        sla_high: draft.sla_high.trim() || undefined,
+        sla_medium: draft.sla_medium.trim() || undefined,
+        sla_low: draft.sla_low.trim() || undefined,
+      })
+      setRows((prev) =>
+        [...prev, created].sort((a, b) => a.customer_name.localeCompare(b.customer_name)),
+      )
+      setDraft({ customer_name: '', sla_critical: '', sla_high: '', sla_medium: '', sla_low: '' })
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
+  if (loading) return <p className="muted small">Loading customer SLA table…</p>
+
+  return (
+    <div className="slaAdminBody">
+      <p className="muted small slaAdminHint">
+        Values are free text parsed by the worker (e.g. <code>14 days</code>,{' '}
+        <code>30 business days</code>, <code>N/A</code>). Due dates use the Jira ticket{' '}
+        <strong>created</strong> timestamp as anchor.
+      </p>
+      {err && <div className="errorBox slaAdminErr">{err}</div>}
+      <div className="slaAdminToolbar">
+        <button type="button" className="btn btnSecondary btnSm" onClick={() => void load()} disabled={!!savingId || createBusy}>
+          Refresh
+        </button>
+      </div>
+      <div className="slaTableWrap">
+        <table className="slaTable">
+          <thead>
+            <tr>
+              <th>Customer</th>
+              <th>Critical</th>
+              <th>High</th>
+              <th>Medium</th>
+              <th>Low</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>
+                  <input
+                    className="slaInput"
+                    value={r.customer_name}
+                    onChange={(e) => patchRow(r.id, { customer_name: e.target.value })}
+                    aria-label={`Customer name for ${r.id}`}
+                  />
+                </td>
+                {(['sla_critical', 'sla_high', 'sla_medium', 'sla_low'] as const).map((field) => (
+                  <td key={field}>
+                    <input
+                      className="slaInput"
+                      value={r[field] ?? ''}
+                      onChange={(e) => patchRow(r.id, { [field]: e.target.value })}
+                      aria-label={`${field} for ${r.customer_name}`}
+                    />
+                  </td>
+                ))}
+                <td className="slaRowActions">
+                  <button
+                    type="button"
+                    className="btn btnSm"
+                    disabled={savingId === r.id || createBusy}
+                    onClick={() => void saveRow(r)}
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btnSm btnDangerGhost"
+                    disabled={savingId === r.id || createBusy}
+                    onClick={() => void removeRow(r)}
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+            <tr className="slaTableAddRow">
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="New customer"
+                  value={draft.customer_name}
+                  onChange={(e) => setDraft((d) => ({ ...d, customer_name: e.target.value }))}
+                />
+              </td>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="Critical"
+                  value={draft.sla_critical}
+                  onChange={(e) => setDraft((d) => ({ ...d, sla_critical: e.target.value }))}
+                />
+              </td>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="High"
+                  value={draft.sla_high}
+                  onChange={(e) => setDraft((d) => ({ ...d, sla_high: e.target.value }))}
+                />
+              </td>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="Medium"
+                  value={draft.sla_medium}
+                  onChange={(e) => setDraft((d) => ({ ...d, sla_medium: e.target.value }))}
+                />
+              </td>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="Low"
+                  value={draft.sla_low}
+                  onChange={(e) => setDraft((d) => ({ ...d, sla_low: e.target.value }))}
+                />
+              </td>
+              <td className="slaRowActions">
+                <button
+                  type="button"
+                  className="btn btnSm btnPrimary"
+                  disabled={createBusy || !!savingId}
+                  onClick={() => void createRow()}
+                >
+                  Add
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ToolbarSlaModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+  return (
+    <div className="slaModalBackdrop" role="presentation" onClick={onClose}>
+      <div
+        className="slaModalPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="slaModalTitle"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="slaModalHeader">
+          <h2 id="slaModalTitle">Customer SLA</h2>
+          <button type="button" className="slaModalClose" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div className="slaModalBody">
+          <SlaAdminPanelBody />
+        </div>
+      </div>
     </div>
   )
 }
@@ -701,6 +1012,59 @@ function ResultsOverflowMenu({ issueKey }: { issueKey: string }) {
   )
 }
 
+function FindingsColumnsMenu({
+  visibility,
+  onChange,
+}: {
+  visibility: CveTableColumnVisibility
+  onChange: (v: CveTableColumnVisibility) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const fn = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', fn)
+    return () => document.removeEventListener('mousedown', fn)
+  }, [open])
+
+  function toggle(key: CveTableColumnKey) {
+    if (key === 'cve') return
+    onChange({ ...visibility, [key]: !visibility[key] })
+  }
+
+  return (
+    <div className="findingsColumnsWrap" ref={ref}>
+      <button
+        type="button"
+        className="findingsColumnsBtn"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => setOpen(!open)}
+      >
+        Columns <span className="findingsColumnsChev" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="findingsColumnsPopover" role="menu" aria-label="Visible columns">
+          {CVE_TABLE_COLUMN_KEYS.map((key) => (
+            <label key={key} className="findingsColumnsRow">
+              <input
+                type="checkbox"
+                checked={visibility[key]}
+                disabled={key === 'cve'}
+                onChange={() => toggle(key)}
+              />
+              <span>{CVE_TABLE_COLUMN_LABELS[key]}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── results panel ───────────────────────────────────────────────────────────
 
 function ResultsPanel({
@@ -726,8 +1090,9 @@ function ResultsPanel({
 }) {
   const [rows, setRows] = useState<CveRow[]>([])
   const [filterText, setFilterText] = useState('')
-  const [severityFilter, setSeverityFilter] = useState('')
-  const [resourceFilter, setResourceFilter] = useState('')
+  const [columnVisibility, setColumnVisibility] = useState<CveTableColumnVisibility>(() => ({
+    ...DEFAULT_CVE_TABLE_COLUMN_VISIBILITY,
+  }))
   const [platBulkBusy, setPlatBulkBusy] = useState(false)
   const [platBulkProgress, setPlatBulkProgress] = useState<{ done: number; total: number } | null>(null)
   const [platBulkErr, setPlatBulkErr] = useState<string | null>(null)
@@ -748,27 +1113,11 @@ function ResultsPanel({
     setRows((prev) => mergePlatBugCreateIntoRows(prev, cveId, imageBasename, out))
   }
 
-  const severityOptions = useMemo(() => {
-    const s = new Set<string>()
-    for (const r of rows) {
-      if (r.severity?.trim()) s.add(r.severity.trim().toUpperCase())
-    }
-    return [...s].sort((a, b) => severitySortKey(a) - severitySortKey(b) || a.localeCompare(b))
-  }, [rows])
-
-  const resourceOptions = useMemo(() => {
-    const s = new Set<string>()
-    for (const r of rows) {
-      if (r.affected_resource?.trim()) s.add(r.affected_resource.trim())
-    }
-    return [...s].sort((a, b) => a.localeCompare(b))
-  }, [rows])
-
   const findingsSeveritySummary = useMemo(() => aggregateSeverityLabel(rows), [rows])
 
   const filteredRows = useMemo(
-    () => rows.filter((r) => rowMatchesCveFilters(r, filterText, severityFilter, resourceFilter)),
-    [rows, filterText, severityFilter, resourceFilter],
+    () => rows.filter((r) => rowMatchesCveSearch(r, filterText)),
+    [rows, filterText],
   )
 
   const missingCveSlots = useMemo(
@@ -823,10 +1172,8 @@ function ResultsPanel({
     }
   }
 
-  function clearAllFilters() {
+  function clearCveSearch() {
     setFilterText('')
-    setSeverityFilter('')
-    setResourceFilter('')
   }
 
   const findingsDone = job.status === 'done'
@@ -903,42 +1250,13 @@ function ResultsPanel({
                 <input
                   type="search"
                   className="resultsFilterSearch"
-                  placeholder="Filter by CVE ID, resource, image, etc…"
+                  placeholder="Search CVE ID, resource, image, etc…"
                   value={filterText}
                   onChange={(e) => setFilterText(e.target.value)}
                   autoComplete="off"
                 />
               </label>
-              <select
-                className="resultsFilterSelect"
-                value={severityFilter}
-                onChange={(e) => setSeverityFilter(e.target.value)}
-                aria-label="Severity filter"
-              >
-                <option value="">Severity</option>
-                {severityOptions.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-              <select
-                className="resultsFilterSelect"
-                value={resourceFilter}
-                onChange={(e) => setResourceFilter(e.target.value)}
-                aria-label="Resource filter"
-              >
-                <option value="">Resource</option>
-                {resourceOptions.map((res) => (
-                  <option key={res} value={res}>{res}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="resultsFiltersResetBtn"
-                onClick={clearAllFilters}
-                title="Reset all filters"
-              >
-                Filters
-              </button>
+              <FindingsColumnsMenu visibility={columnVisibility} onChange={setColumnVisibility} />
             </div>
             <div className="resultsFindingsToolbarActions">
               <button
@@ -969,7 +1287,7 @@ function ResultsPanel({
                 type="button"
                 className="btnExport"
                 onClick={() => exportCvesToExcel(filteredRows, exportFilename)}
-                title="Export filtered rows to Excel"
+                title="Export rows matching search to Excel"
               >
                 ↓ Export Excel
               </button>
@@ -989,7 +1307,8 @@ function ResultsPanel({
           onPlatBugCreated={onPlatBugCreated}
           hideBuiltInToolbar={findingsDone}
           sourceRowCount={rows.length}
-          onClearFilters={findingsDone && rows.length > 0 ? clearAllFilters : undefined}
+          onClearSearch={findingsDone && rows.length > 0 ? clearCveSearch : undefined}
+          columnVisibility={columnVisibility}
         />
       </div>
 
@@ -1347,6 +1666,9 @@ function App() {
   const [commentBody, setCommentBody] = useState('')
   const [commentPosted, setCommentPosted] = useState(false)
   const [viewMode, setViewMode]       = useState<'ticket' | 'results'>('ticket')
+  const [slaToolbarOpen, setSlaToolbarOpen] = useState(false)
+
+  const closeSlaModal = useCallback(() => setSlaToolbarOpen(false), [])
 
   const suggested = useMemo(
     () => (job?.result ? buildSuggestedComment(job.result) : ''),
@@ -1493,6 +1815,13 @@ function App() {
             ⊞ Dashboard
           </button>
           <button
+            type="button"
+            className="topNavItem"
+            onClick={() => setSlaToolbarOpen(true)}
+          >
+            Customer SLA
+          </button>
+          <button
             className={`topNavItem ${page === 'new' ? 'topNavItemActive' : ''}`}
             onClick={() => {
               setPage('new')
@@ -1515,6 +1844,8 @@ function App() {
           <a className="topNavLink" href="https://plainid.atlassian.net/jira/projects" target="_blank" rel="noreferrer">Jira ↗</a>
         </div>
       </header>
+
+      <ToolbarSlaModal open={slaToolbarOpen} onClose={closeSlaModal} />
 
       {/* ── Main content ── */}
       <main className="mainContent">

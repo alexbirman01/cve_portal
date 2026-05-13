@@ -28,6 +28,23 @@ class ProcessingRun(Base):
     )
 
 
+class CustomerSla(Base):
+    __tablename__ = "customer_slas"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_name: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    sla_critical: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sla_high: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sla_medium: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sla_low: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+
 class CveCache(Base):
     __tablename__ = "cves"
 

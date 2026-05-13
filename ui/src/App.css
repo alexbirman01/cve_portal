@@ -342,6 +342,22 @@
   background: rgba(255,255,255,0.11);
 }
 
+.btnSm {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
+.btnDangerGhost {
+  background: transparent;
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.btnDangerGhost:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.1);
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -427,12 +443,13 @@
 }
 
 /* Laptop-friendly column slice — slightly tighter padding below on td/th */
-.cveColCve { width: 11%; }
-.cveColPlat { width: 34%; }
-.cveColSev { width: 10%; }
-.cveColRes { width: 19%; }
-.cveColVer { width: 13%; }
-.cveColFix { width: 13%; }
+.cveColCve { width: 10%; }
+.cveColPlat { width: 30%; }
+.cveColSev { width: 9%; }
+.cveColRes { width: 17%; }
+.cveColVer { width: 11%; }
+.cveColFix { width: 11%; }
+.cveColDue { width: 12%; }
 
 .cveTable thead tr { border-bottom: 1px solid rgba(255,255,255,0.1); }
 
@@ -463,6 +480,134 @@
 
 .cveTable tbody tr:last-child td { border-bottom: none; }
 .cveTable tbody tr:hover td { background: rgba(255,255,255,0.03); }
+
+/* Customer SLA admin modal */
+.slaModalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow-y: auto;
+}
+
+.slaModalPanel {
+  width: min(960px, 100%);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.slaModalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.slaModalHeader h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.slaModalClose {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.slaModalClose:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.slaModalBody {
+  padding: 16px 20px 20px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.slaAdminBody { display: flex; flex-direction: column; gap: 12px; }
+.slaAdminHint { margin: 0; line-height: 1.45; }
+.slaAdminHint code {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.slaAdminErr { margin: 0; }
+.slaAdminToolbar { display: flex; justify-content: flex-end; }
+
+.slaTableWrap {
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+
+.slaTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.slaTable th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.5;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+}
+
+.slaTable td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  vertical-align: middle;
+}
+
+.slaTable tbody tr:last-child td { border-bottom: none; }
+.slaTableAddRow td { background: rgba(99, 102, 241, 0.06); }
+
+.slaInput {
+  width: 100%;
+  min-width: 72px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  font-size: 12px;
+}
+.slaInput:focus {
+  outline: none;
+  border-color: rgba(165, 180, 252, 0.55);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+.slaRowActions {
+  white-space: nowrap;
+  text-align: right;
+}
+.slaRowActions .btn + .btn { margin-left: 6px; }
 
 .cveId {
   font-family: ui-monospace, monospace;
@@ -554,6 +699,7 @@ button.platCreateBugPill:disabled:hover {
 }
 
 .fixedVer { color: #4ade80; }
+.slaDueDate { color: #a5b4fc; }
 
 .cveTable td.platTicketCell {
   vertical-align: top;
@@ -1233,33 +1379,67 @@ button.platCreateBugPill:disabled:hover {
   color: rgba(255, 255, 255, 0.32);
 }
 
-.resultsFilterSelect {
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(0, 0, 0, 0.28);
-  color: inherit;
-  font-size: 12px;
-  max-width: 130px;
+.findingsColumnsWrap {
+  position: relative;
+  flex-shrink: 0;
 }
 
-.resultsFiltersResetBtn {
+.findingsColumnsBtn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
+  gap: 4px;
+  padding: 8px 12px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
+  white-space: nowrap;
 }
 
-.resultsFiltersResetBtn:hover {
-  background: rgba(255, 255, 255, 0.09);
+.findingsColumnsBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.findingsColumnsChev {
+  opacity: 0.55;
+  font-size: 10px;
+}
+
+.findingsColumnsPopover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  min-width: 260px;
+  padding: 10px 12px;
+  background: #12151c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.findingsColumnsRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  user-select: none;
+}
+
+.findingsColumnsRow input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: #6366f1;
+  flex-shrink: 0;
 }
 
 .resultsRefreshBtn {

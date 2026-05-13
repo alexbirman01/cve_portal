@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import json
 import re
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ import httpx
 
 from api.app.config import settings
 from api.app.plat_organization_labels import plat_organization_name_allowed
+from api.app.sla_commitment import parse_jira_created
 
 
 def _plat_organization_field_ids() -> list[str]:
@@ -439,6 +441,7 @@ class JiraIssueSummary:
     reporter: str | None
     organizations: list[str]
     organization_refs: list[dict[str, Any]]
+    created: dt.datetime | None = None
 
 
 class JiraClient:
@@ -616,6 +619,7 @@ class JiraClient:
                     "issuetype",
                     "project",
                     "reporter",
+                    "created",
                     *org_ids,
                 ]
             )
@@ -657,6 +661,10 @@ class JiraClient:
                     org_names.append(entry["name"])
                 elif entry.get("id"):
                     org_names.append(str(entry["id"]))
+        created_val = fields.get("created")
+        created_dt: dt.datetime | None = None
+        if isinstance(created_val, str):
+            created_dt = parse_jira_created(created_val)
         return JiraIssueSummary(
             key=data.get("key", issue_key),
             summary=fields.get("summary"),
@@ -676,6 +684,7 @@ class JiraClient:
             reporter=(fields.get("reporter") or {}).get("displayName"),
             organizations=org_names,
             organization_refs=org_refs,
+            created=created_dt,
         )
 
     def search_plat_security_for_cve(self, cve_id: str) -> list[dict[str, str]]:

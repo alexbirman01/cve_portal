@@ -23,6 +23,7 @@ export type IssueResponse = {
   description_raw?: unknown
   description_text?: string | null
   attachments: JiraAttachment[]
+  created?: string | null
 }
 
 export type ProcessResponse = {
@@ -66,6 +67,7 @@ export type CveRow = {
   plat_tickets?: PlatTicket[]   // new: typed list
   plat_ticket?: string | null   // legacy: backward compat with old cached runs
   sources?: string[]
+  sla_due_date?: string | null
 }
 
 export type JobResult = {
@@ -75,6 +77,8 @@ export type JobResult = {
   nvd: any[]
   attachments: any[]
   images: any[]
+  sla_anchor_created?: string | null
+  sla_anchor_issue_key?: string | null
 }
 
 export type JobResponse = {
@@ -83,6 +87,48 @@ export type JobResponse = {
   status: string
   task_id?: string | null
   result?: JobResult | null
+}
+
+export type CustomerSlaRecord = {
+  id: string
+  customer_name: string
+  sla_critical?: string | null
+  sla_high?: string | null
+  sla_medium?: string | null
+  sla_low?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export async function apiListCustomerSlas(): Promise<CustomerSlaRecord[]> {
+  return apiGet('/api/sla/customers')
+}
+
+export async function apiCreateCustomerSla(body: {
+  customer_name: string
+  sla_critical?: string | null
+  sla_high?: string | null
+  sla_medium?: string | null
+  sla_low?: string | null
+}): Promise<CustomerSlaRecord> {
+  return apiPost('/api/sla/customers', body)
+}
+
+export async function apiUpdateCustomerSla(
+  id: string,
+  body: Partial<{
+    customer_name: string
+    sla_critical: string | null
+    sla_high: string | null
+    sla_medium: string | null
+    sla_low: string | null
+  }>,
+): Promise<CustomerSlaRecord> {
+  return apiPut(`/api/sla/customers/${encodeURIComponent(id)}`, body)
+}
+
+export async function apiDeleteCustomerSla(id: string): Promise<void> {
+  return apiDelete(`/api/sla/customers/${encodeURIComponent(id)}`)
 }
 
 export type HistoryRun = {
@@ -221,6 +267,21 @@ export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(path)
   if (!res.ok) throw new Error(await res.text())
   return (await res.json()) as T
+}
+
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as T
+}
+
+export async function apiDelete(path: string): Promise<void> {
+  const res = await fetch(path, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
 }
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
@@ -683,6 +744,7 @@ export function exportCvesToExcel(rows: CveRow[], filename = 'cve-findings.xlsx'
         'Resource':        r.affected_resource ?? '—',
         'Affected Ver.':   r.affected_version ?? '—',
         'Vendor Fix':      r.fixed_version ?? '—',
+        'Due Date':        r.sla_due_date ?? '—',
         'NVD URL':         `https://nvd.nist.gov/vuln/detail/${r.cve_id}`,
       }
     })
