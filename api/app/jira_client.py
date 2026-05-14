@@ -14,6 +14,52 @@ from api.app.plat_organization_labels import plat_organization_name_allowed
 from api.app.sla_commitment import parse_jira_created
 
 
+def _jira_fix_versions_display(raw: Any) -> str:
+    if not raw or not isinstance(raw, list):
+        return ""
+    names: list[str] = []
+    for x in raw:
+        if isinstance(x, dict):
+            n = x.get("name")
+            if n is not None and str(n).strip():
+                names.append(str(n).strip())
+        elif x is not None and str(x).strip():
+            names.append(str(x).strip())
+    return ", ".join(names)
+
+
+def _jira_tag_numbers_display(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, (str, int, float)):
+        return str(raw).strip()
+    if isinstance(raw, dict):
+        v = raw.get("value")
+        if v is None:
+            v = raw.get("name")
+        return str(v).strip() if v is not None else ""
+    if isinstance(raw, list):
+        parts = [_jira_tag_numbers_display(x) for x in raw]
+        return ", ".join(p for p in parts if p)
+    return str(raw).strip()
+
+
+def _jira_duedate_str(raw: str | None) -> str | None:
+    """Normalize SLA/API date to Jira system field `duedate` (YYYY-MM-DD)."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if len(s) >= 10:
+        s = s[:10]
+    if len(s) != 10:
+        return None
+    try:
+        dt.datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return s
+
+
 def _plat_organization_field_ids() -> list[str]:
     """`JIRA_PLAT_ORGANIZATION_FIELD_ID` may be comma-separated; order preserved, duplicates dropped."""
     raw = (settings.jira_plat_organization_field_id or "").strip()
@@ -1084,6 +1130,93 @@ class JiraClient:
         )
         raise RuntimeError(detail)
 
+    def _issue_add_labels_via_update(self, issue_key: str, labels: list[str]) -> None:
+        """
+        Add labels using Jira REST issue edit:
+        PUT .../issue/{key} with {"update": {"labels": [{"add": "..."}, ...]}}.
+        """
+        key = (issue_key or "").strip()
+        adds = [{"add": lab.strip()} for lab in labels if lab and str(lab).strip()]
+        if not key or not adds:
+            return
+        body: dict[str, Any] = {"update": {"labels": adds}}
+        headers = {**self._headers, "Content-Type": "application/json"}
+        put_urls = [
+            f"{self._base}/rest/api/3/issue/{key}",
+            f"{self._base}/rest/api/2/issue/{key}",
+        ]
+        last: httpx.Response | None = None
+        for put_url in put_urls:
+            last = self._client.put(put_url, json=body, headers=headers)
+            if last.is_success:
+                return
+        err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
+        raise RuntimeError(f"Jira could not add labels to {key}: {err}")
+
+    def get_issue_platsync_fields(self, issue_key: str) -> dict[str, Any]:
+        """Read fixVersions, tag CF, labels, duedate, issuetype for PLAT↔portal sync."""
+        key = (issue_key or "").strip()
+        if not key:
+            return {}
+        tag_fid = (settings.jira_plat_tag_numbers_field_id or "").strip()
+        field_list = ["fixVersions", "labels", "duedate", "issuetype"]
+        if tag_fid:
+            field_list.append(tag_fid)
+        params = {"fields": ",".join(field_list)}
+        for path in (f"/rest/api/3/issue/{key}", f"/rest/api/2/issue/{key}"):
+            try:
+                r = self._client.get(f"{self._base}{path}", params=params)
+                if not r.is_success:
+                    continue
+                fields = r.json().get("fields") or {}
+                tag_raw = fields.get(tag_fid) if tag_fid else None
+                return {
+                    "fix_versions": _jira_fix_versions_display(fields.get("fixVersions")),
+                    "tag_numbers": _jira_tag_numbers_display(tag_raw) if tag_fid else "",
+                    "labels": [str(x) for x in (fields.get("labels") or [])],
+                    "duedate": fields.get("duedate"),
+                    "issuetype": (fields.get("issuetype") or {}).get("name"),
+                }
+            except Exception:
+                continue
+        return {}
+
+    def ensure_plat_security_issue_sync(self, issue_key: str, desired_duedate_iso: str | None) -> None:
+        """For PLAT Security Vulnerability: add CVE label; set or tighten SLA duedate (never relax)."""
+        meta = self.get_issue_platsync_fields(issue_key)
+        if not meta:
+            return
+        it = (meta.get("issuetype") or "").strip()
+        want_type = (settings.jira_plat_issuetype_name or "").strip()
+        if want_type and it.casefold() != want_type.casefold():
+            return
+        labels = [str(x) for x in (meta.get("labels") or [])]
+        if "CVE" not in labels:
+            self._issue_add_labels_via_update(issue_key, ["CVE"])
+        dd = _jira_duedate_str(desired_duedate_iso)
+        if not dd:
+            return
+        cur_raw = meta.get("duedate")
+        cur_norm = (
+            _jira_duedate_str(str(cur_raw).strip())
+            if cur_raw is not None and str(cur_raw).strip()
+            else None
+        )
+        if cur_norm is not None and dd >= cur_norm:
+            return
+        headers = {**self._headers, "Content-Type": "application/json"}
+        body = {"fields": {"duedate": dd}}
+        last: httpx.Response | None = None
+        for put_url in (
+            f"{self._base}/rest/api/3/issue/{issue_key.strip()}",
+            f"{self._base}/rest/api/2/issue/{issue_key.strip()}",
+        ):
+            last = self._client.put(put_url, json=body, headers=headers)
+            if last.is_success:
+                return
+        err = (last.text if last is not None else "") or "unknown error"
+        raise RuntimeError(f"Jira could not set duedate on {issue_key}: {err}")
+
     def create_plat_security_vulnerability(
         self,
         cve_id: str,
@@ -1094,6 +1227,7 @@ class JiraClient:
         priority_name: str | None = None,
         organization_refs: list[dict[str, Any]] | None = None,
         source_issue_key: str | None = None,
+        due_date: str | None = None,
     ) -> str:
         """
         Create PLAT Security Vulnerability (issuetype name or id from settings).
@@ -1125,11 +1259,17 @@ class JiraClient:
         if settings.jira_plat_cf_package_vuln_version:
             base_fields[settings.jira_plat_cf_package_vuln_version] = package_vulnerable_version
 
-        return self._create_plat_issue_with_organization(
+        dd = _jira_duedate_str(due_date)
+        if dd:
+            base_fields["duedate"] = dd
+
+        key = self._create_plat_issue_with_organization(
             base_fields,
             organization_refs=organization_refs,
             source_issue_key=source_issue_key,
         )
+        self._issue_add_labels_via_update(key, ["CVE"])
+        return key
 
     def _resolve_plat_bug_dev_group(self, source_issue_key: str | None) -> list[dict[str, Any]] | None:
         """Dev Group multi-select: copy list from source issue, else env default(s)."""
@@ -1163,6 +1303,7 @@ class JiraClient:
         image_display: str | None = None,
         resource_label: str | None = None,
         vendor_fix_version: str | None = None,
+        due_date: str | None = None,
     ) -> str:
         """
         Create PLAT Bug: no CVE/package custom fields (per PlainID Bug workflow).
@@ -1190,6 +1331,8 @@ class JiraClient:
         else:
             base_fields["issuetype"] = {"name": settings.jira_plat_bug_issuetype_name}
 
+        base_fields["labels"] = ["CVE"]
+
         if priority_name:
             base_fields["priority"] = {"name": priority_name}
         int_f = (settings.jira_plat_cf_internal_id or "").strip()
@@ -1206,6 +1349,10 @@ class JiraClient:
                     "or set JIRA_PLAT_BUG_DEV_GROUP_OPTION_VALUE (comma-separated labels allowed)."
                 )
             base_fields[dg_fid] = dg_val
+
+        dd = _jira_duedate_str(due_date)
+        if dd:
+            base_fields["duedate"] = dd
 
         return self._create_plat_issue_with_organization(
             base_fields,

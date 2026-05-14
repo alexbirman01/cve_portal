@@ -49,6 +49,11 @@ export type AffectedImage = {
   tag?: string | null
 }
 
+export type PlatSecurityFieldSyncEntry = {
+  fix_versions: string
+  tag_numbers: string
+}
+
 export type CveRow = {
   cve_id: string
   severity?: string | null
@@ -68,6 +73,19 @@ export type CveRow = {
   plat_ticket?: string | null   // legacy: backward compat with old cached runs
   sources?: string[]
   sla_due_date?: string | null
+  /**
+   * Per Security PLAT key (uppercase): Jira fixVersions + tag numbers field after last Sync.
+   * Empty Jira values stored as "None". Only keys with a successful GET are present.
+   */
+  plat_security_field_sync?: Record<string, PlatSecurityFieldSyncEntry>
+  /**
+   * @deprecated Legacy rollup from older sync — prefer plat_security_field_sync.
+   */
+  plat_app_fix_versions?: string | null
+  /**
+   * @deprecated Legacy rollup from older sync — prefer plat_security_field_sync.
+   */
+  plat_tag_numbers?: string | null
 }
 
 export type JobResult = {
@@ -79,6 +97,8 @@ export type JobResult = {
   images: any[]
   sla_anchor_created?: string | null
   sla_anchor_issue_key?: string | null
+  /** Set when some Jira writes during PLAT sync fail (partial success). */
+  _plat_sync_errors?: string[] | null
 }
 
 export type JobResponse = {
@@ -224,6 +244,7 @@ export function formatStatus(status?: string | null): string {
     looking_up_plat_tickets: 'Looking up PLAT tickets',
     building_results: 'Building results',
     done: 'Done',
+    syncing_plat: 'Syncing PLAT with Jira',
     // Legacy (removed Aqua phase)
     querying_aqua: 'Building results',
   }
@@ -235,6 +256,7 @@ export function formatStatus(status?: string | null): string {
 function normalizeStatusForSteps(status?: string | null): string | undefined | null {
   if (!status) return status
   if (status === 'querying_aqua') return 'building_results'
+  if (status === 'syncing_plat') return 'syncing_plat'
   return status
 }
 
@@ -247,6 +269,7 @@ export function statusSteps(status?: string | null) {
     { id: 'enriching_nvd', label: 'NVD enrichment' },
     { id: 'looking_up_plat_tickets', label: 'Look up PLAT tickets' },
     { id: 'building_results', label: 'Build results' },
+    { id: 'syncing_plat', label: 'Sync PLAT (Jira)' },
     { id: 'done', label: 'Done' },
   ]
   const norm = normalizeStatusForSteps(status)
@@ -303,6 +326,8 @@ export async function apiCreatePlat(body: {
   organizations?: OrgRef[] | null
   /** Jira parent issue key — used to copy organization IDs when the payload has no numeric ids */
   source_issue_key?: string | null
+  /** SLA due date YYYY-MM-DD; sent as Jira `duedate` on create */
+  sla_due_date?: string | null
 }): Promise<CreatePlatResponse> {
   const res = await fetch('/api/plat', {
     method: 'POST',
@@ -327,6 +352,8 @@ export async function apiCreatePlatBug(body: {
   /** Resource column — component/package name */
   resource_label?: string | null
   vendor_fix_version?: string | null
+  /** SLA due date YYYY-MM-DD; sent as Jira `duedate` on create */
+  sla_due_date?: string | null
 }): Promise<CreatePlatResponse> {
   const res = await fetch('/api/plat/bug', {
     method: 'POST',
@@ -373,6 +400,65 @@ export function platSecurityKeys(r: CveRow): string[] {
   return (r.plat_tickets ?? [])
     .filter((t) => t.issue_type === 'Security Vulnerability')
     .map((t) => t.key)
+}
+
+/** Jira app fields for one Security PLAT key after Sync (keys stored uppercase). */
+export function platSecuritySyncForKey(r: CveRow, issueKey: string): PlatSecurityFieldSyncEntry | null {
+  const m = r.plat_security_field_sync
+  if (!m) return null
+  const k = issueKey.trim().toUpperCase()
+  return m[k] ?? null
+}
+
+/** Multiline text for PLAT fix column (one line per key: `KEY · fix`). */
+export function platSecuritySyncFixColumnText(r: CveRow): string {
+  const m = r.plat_security_field_sync
+  if (m && Object.keys(m).length > 0) {
+    return [...Object.keys(m)]
+      .sort()
+      .map((k) => `${k} · ${m[k].fix_versions}`)
+      .join('\n')
+  }
+  return (r.plat_app_fix_versions ?? '').trim()
+}
+
+/** `fix_versions` for these Security PLAT keys (single value if one key; else KEY · lines). */
+export function platSecuritySyncFixForKeys(r: CveRow, keys: string[]): string {
+  const upper = [...new Set(keys.map((k) => k.trim().toUpperCase()).filter(Boolean))].sort()
+  if (!upper.length) return ''
+  const m = r.plat_security_field_sync
+  if (!m || !Object.keys(m).length) return ''
+  if (upper.length === 1) return m[upper[0]]?.fix_versions ?? ''
+  return upper.map((k) => `${k} · ${m[k]?.fix_versions ?? '—'}`).join('\n')
+}
+
+/** `tag_numbers` for these Security PLAT keys. */
+export function platSecuritySyncTagForKeys(r: CveRow, keys: string[]): string {
+  const upper = [...new Set(keys.map((k) => k.trim().toUpperCase()).filter(Boolean))].sort()
+  if (!upper.length) return ''
+  const m = r.plat_security_field_sync
+  if (!m || !Object.keys(m).length) return ''
+  if (upper.length === 1) return m[upper[0]]?.tag_numbers ?? ''
+  return upper.map((k) => `${k} · ${m[k]?.tag_numbers ?? '—'}`).join('\n')
+}
+
+/** Multiline text for Tag numbers column (one line per key: `KEY · tag`). */
+export function platSecuritySyncTagColumnText(r: CveRow): string {
+  const m = r.plat_security_field_sync
+  if (m && Object.keys(m).length > 0) {
+    return [...Object.keys(m)]
+      .sort()
+      .map((k) => `${k} · ${m[k].tag_numbers}`)
+      .join('\n')
+  }
+  return (r.plat_tag_numbers ?? '').trim()
+}
+
+/** Lowercase search fragment for per-key PLAT sync fields. */
+export function platSecuritySyncSearchBlob(r: CveRow): string {
+  const a = platSecuritySyncFixColumnText(r)
+  const b = platSecuritySyncTagColumnText(r)
+  return [a, b].filter(Boolean).join('\n')
 }
 
 export function imagePathBasename(imagePath: string): string {
@@ -623,7 +709,7 @@ export function mergePlatBugCreateIntoRows(
   })
 }
 
-/** Apply a PLAT create (new or already-existing) response onto the CVE table row list. */
+/** Apply a PLAT Security create (new or already-existing) onto the CVE table row list. */
 export function mergePlatCreateIntoRows(
   rows: CveRow[],
   cveId: string,
@@ -652,6 +738,10 @@ export function mergePlatCreateIntoRows(
   })
 }
 
+export async function apiEnqueuePlatSync(runId: string): Promise<{ task_id: string }> {
+  return apiPost<{ task_id: string }>(`/api/jobs/${encodeURIComponent(runId)}/sync-plat`, {})
+}
+
 export type PlatMissingCveSlot = { cve_id: string; image_basename: string }
 
 /** Row/image pairs that show “Create CVE” (version present, image known, no Sec-Vuln PLAT yet). */
@@ -669,36 +759,113 @@ export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
   return out
 }
 
+export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
+  const out: PlatMissingCveSlot[] = []
+  for (const r of rows) {
+    const verOk = !!(r.affected_version && String(r.affected_version).trim())
+    if (!verOk) continue
+    for (const imageBasename of imageBasenamesForCveRow(r)) {
+      if (platBugTicketsForImage(r, imageBasename).length === 0) {
+        out.push({ cve_id: r.cve_id, image_basename: imageBasename })
+      }
+    }
+  }
+  return out
+}
+
+/** PLAT fix / tag text for suggested Jira comment (per-image Security keys or row rollup). */
+function commentPlatMetaForKeys(r: CveRow, secKeys: string[]): { fix: string; tag: string } {
+  const hasMap = !!(r.plat_security_field_sync && Object.keys(r.plat_security_field_sync).length > 0)
+  let fix = platSecuritySyncFixForKeys(r, secKeys).trim()
+  let tag = platSecuritySyncTagForKeys(r, secKeys).trim()
+  if (!hasMap && secKeys.length === 0) {
+    const lf = (r.plat_app_fix_versions ?? '').trim()
+    const lt = (r.plat_tag_numbers ?? '').trim()
+    if (!fix && lf) fix = lf
+    if (!tag && lt) tag = lt
+  }
+  const pendingHint = '— (sync PLAT in CVE portal)'
+  if (!fix) fix = secKeys.length > 0 && !hasMap ? pendingHint : '—'
+  if (!tag) tag = secKeys.length > 0 && !hasMap ? pendingHint : '—'
+  return { fix, tag }
+}
+
+function pushSuggestedPackageLines(lines: string[], r: CveRow): void {
+  const pkgs = r.all_packages ?? []
+  if (pkgs.length > 0) {
+    for (const p of pkgs) {
+      const product = (p.product ?? '').trim() || '—'
+      const affected = (p.version_start ?? '').trim() || '—'
+      const fv = (p.fixed_version ?? '').trim()
+      lines.push(
+        fv
+          ? `Package:  ${product} affected: ${affected} → fix: ${fv}`
+          : `Package:  ${product} affected: ${affected}`,
+      )
+    }
+    return
+  }
+  const res = (r.affected_resource ?? '').trim()
+  if (res) {
+    const av = (r.affected_version ?? '').trim() || '—'
+    const fv = (r.fixed_version ?? '').trim()
+    lines.push(
+      fv ? `Package:  ${res} affected: ${av} → fix: ${fv}` : `Package:  ${res} affected: ${av}`,
+    )
+  }
+}
+
 export function buildSuggestedComment(result: JobResult): string {
-  const lines: string[] = [
-    'CVE Enrichment Summary (auto-generated)',
-    '='.repeat(44),
-    '',
-  ]
+  const lines: string[] = []
+  const key = (result.issue_key ?? '').trim()
+  if (key) {
+    lines.push(`${key} — CVE review (auto-generated draft)`)
+    lines.push('—'.repeat(56))
+    lines.push('')
+  }
 
   const rows = sortCveRows(result.cve_rows ?? [])
   for (const r of rows) {
-    const sev = r.severity ? `${r.severity}${r.score ? ` (${r.score})` : ''}` : 'Unknown'
-    const platList = (r.plat_tickets ?? (r.plat_ticket ? [{ key: r.plat_ticket, issue_type: 'Security Vulnerability' }] : []))
-    const platStr = platList.length ? `  [${platList.map(t => `${t.key} (${t.issue_type})`).join(', ')}]` : ''
-    lines.push(`▸ ${r.cve_id}  [${sev}]${platStr}`)
-    const imgs = (r.affected_images ?? []).filter(i => i.image && i.image !== 'NA')
-    if (imgs.length) {
-      for (const i of imgs) lines.push(`  Image:    ${i.image.replace(/^plainid\//i, '')}${i.tag ? `:${i.tag}` : ''}`)
-    } else if (r.affected_image && r.affected_image !== 'NA') {
-      lines.push(`  Image:    ${r.affected_image}${r.affected_tag ? `:${r.affected_tag}` : ''}`)
+    const sevRaw = (r.severity ?? '').trim()
+    const sev = sevRaw
+      ? `${sevRaw.toUpperCase()}${r.score != null && String(r.score).trim() !== '' ? ` (${String(r.score).trim()})` : ''}`
+      : 'Unknown'
+    lines.push(`${r.cve_id}  [${sev}]`)
+    pushSuggestedPackageLines(lines, r)
+
+    const basenames = imageBasenamesForCveRow(r)
+    for (const bn of basenames) {
+      const label = platDisplayLabelForImage(r, bn)
+      const keys = platSecKeysForImage(r, bn)
+      const { fix, tag } = commentPlatMetaForKeys(r, keys)
+      lines.push(
+        `  Image:    ${label} -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+      )
     }
-    // List all affected packages from NVD
-    const pkgs = r.all_packages ?? []
-    if (pkgs.length) {
-      for (const p of pkgs) {
-        const fix = p.fixed_version ? ` → fix: ${p.fixed_version}` : ''
-        lines.push(`  Package:  ${p.product}${fix}`)
+
+    const orphan = platOrphanSecKeys(r)
+    if (orphan.length) {
+      const { fix, tag } = commentPlatMetaForKeys(r, orphan)
+      lines.push(
+        `  Image:    Unmapped Security PLAT -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+      )
+    }
+
+    if (!basenames.length) {
+      const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
+      const legacyPath =
+        !imgs.length && r.affected_image && r.affected_image !== 'NA'
+          ? `${r.affected_image.replace(/^plainid\//i, '')}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
+          : ''
+      if (legacyPath) {
+        const keys = platSecurityKeys(r)
+        const { fix, tag } = commentPlatMetaForKeys(r, keys)
+        lines.push(
+          `  Image:    ${legacyPath} -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+        )
       }
-    } else if (r.affected_resource) {
-      lines.push(`  Resource: ${r.affected_resource}${r.affected_version ? ` >= ${r.affected_version}` : ''}`)
-      if (r.fixed_version) lines.push(`  Fix:      ${r.fixed_version}`)
     }
+
     lines.push('')
   }
 
@@ -745,6 +912,8 @@ export function exportCvesToExcel(rows: CveRow[], filename = 'cve-findings.xlsx'
         'Affected Ver.':   r.affected_version ?? '—',
         'Vendor Fix':      r.fixed_version ?? '—',
         'Due Date':        r.sla_due_date ?? '—',
+        'PLAT fix version': platSecuritySyncFixColumnText(r) || '—',
+        'Tag numbers':      platSecuritySyncTagColumnText(r) || '—',
         'NVD URL':         `https://nvd.nist.gov/vuln/detail/${r.cve_id}`,
       }
     })

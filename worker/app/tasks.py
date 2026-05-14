@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 
 from api.app.config import settings
@@ -21,6 +22,57 @@ def _set_run_status(run_id: str, status: str) -> None:
             run.status = status
             db.add(run)
             db.commit()
+
+
+def _img_tokens(img_name: str) -> list[str]:
+    """Return searchable substrings for an image name, e.g. 'plainid/pip-operator' → ['pip-operator','pip','operator']."""
+    name = re.sub(r"^plainid/", "", img_name, flags=re.IGNORECASE).lower()
+    parts = re.split(r"[-_]", name)
+    tokens = [name] + parts
+    if ":" in name:
+        stem = name.split(":", 1)[0].strip()
+        if stem and stem not in tokens:
+            tokens.append(stem)
+    return [t for t in tokens if t]
+
+
+def _token_in_summary(tok: str, summary_lower: str) -> bool:
+    """Match token as a complete segment — not as a prefix/suffix of a longer hyphenated word.
+    e.g. 'pip' matches 'pip' and '[pip]' but NOT 'pip-mgmt' or 'pip-operator'."""
+    return bool(re.search(r"(?<![a-zA-Z0-9\-_])" + re.escape(tok) + r"(?![a-zA-Z0-9\-_])", summary_lower))
+
+
+def _filter_plat_tickets(tickets: list[dict], imgs: list[dict]) -> list[dict]:
+    """Keep Security Vulnerability tickets as-is; filter Bug tickets to those matching an affected image."""
+    img_token_set = {tok for i in imgs for tok in _img_tokens(i["image"]) if len(tok) > 2}
+    result = []
+    for t in tickets:
+        if t["issue_type"] == "Bug" and img_token_set:
+            summary_lower = (t.get("summary") or "").lower()
+            if not any(_token_in_summary(tok, summary_lower) for tok in img_token_set):
+                continue  # no image match — skip this Bug ticket
+        result.append(t)
+    return result
+
+
+def _affected_imgs_for_cve_row(row: dict[str, Any]) -> list[dict]:
+    """Normalize row `affected_images` (and legacy fields) to list of {image, tag} dicts for PLAT filtering."""
+    ai = row.get("affected_images")
+    if isinstance(ai, list) and ai:
+        out: list[dict] = []
+        for x in ai:
+            if not isinstance(x, dict):
+                continue
+            im = (x.get("image") or "").strip()
+            if not im:
+                continue
+            out.append({"image": im, "tag": (x.get("tag") or "")})
+        if out:
+            return out
+    img = row.get("affected_image")
+    if img and str(img).strip() and str(img).strip().upper() != "NA":
+        return [{"image": str(img).strip(), "tag": row.get("affected_tag") or ""}]
+    return []
 
 
 @celery_app.task(name="process_issue", bind=True)
@@ -266,29 +318,6 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             for ep in p.get("packages", []):
                 cve_to_excel_pkgs.setdefault(ep["cve_id"], []).append(ep)
 
-        def _img_tokens(img_name: str) -> list[str]:
-            """Return searchable substrings for an image name, e.g. 'plainid/pip-operator' → ['pip-operator','pip','operator']."""
-            name = re.sub(r"^plainid/", "", img_name, flags=re.IGNORECASE).lower()
-            parts = re.split(r"[-_]", name)
-            return [name] + parts
-
-        def _token_in_summary(tok: str, summary_lower: str) -> bool:
-            """Match token as a complete segment — not as a prefix/suffix of a longer hyphenated word.
-            e.g. 'pip' matches 'pip' and '[pip]' but NOT 'pip-mgmt' or 'pip-operator'."""
-            return bool(re.search(r"(?<![a-zA-Z0-9\-_])" + re.escape(tok) + r"(?![a-zA-Z0-9\-_])", summary_lower))
-
-        def _filter_plat_tickets(tickets: list[dict], imgs: list[dict]) -> list[dict]:
-            """Keep Security Vulnerability tickets as-is; filter Bug tickets to those matching an affected image."""
-            img_token_set = {tok for i in imgs for tok in _img_tokens(i["image"]) if len(tok) > 2}
-            result = []
-            for t in tickets:
-                if t["issue_type"] == "Bug" and img_token_set:
-                    summary_lower = (t.get("summary") or "").lower()
-                    if not any(_token_in_summary(tok, summary_lower) for tok in img_token_set):
-                        continue  # no image match — skip this Bug ticket
-                result.append(t)
-            return result
-
         _set_run_status(run_id, "building_results")
 
         cve_rows = []
@@ -408,4 +437,138 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             db.commit()
 
     return result
+
+
+def _plat_sec_keys_for_row(row: dict[str, Any]) -> set[str]:
+    s: set[str] = set()
+    for k in row.get("plat_security_keys") or []:
+        if isinstance(k, str) and k.strip():
+            s.add(k.strip().upper())
+    for vs in (row.get("plat_security_for_images") or {}).values():
+        for k in vs or []:
+            if isinstance(k, str) and k.strip():
+                s.add(k.strip().upper())
+    for t in row.get("plat_tickets") or []:
+        if t.get("issue_type") == "Security Vulnerability" and t.get("key"):
+            s.add(str(t["key"]).strip().upper())
+    return s
+
+
+@celery_app.task(name="sync_plat_for_run")
+def sync_plat_for_run(run_id: str) -> dict[str, Any]:
+    """Re-fetch PLAT Security issue fields into cve_rows; push missing CVE label / duedate to Jira."""
+    rid = uuid.UUID(run_id)
+    _set_run_status(run_id, "syncing_plat")
+    try:
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if not run or not run.result_json:
+                raise ValueError("run has no stored result")
+            result = json.loads(run.result_json)
+        cve_rows: list[dict[str, Any]] = result.get("cve_rows") or []
+        if not cve_rows:
+            with db_session() as db:
+                run = db.get(ProcessingRun, rid)
+                if run:
+                    run.status = "done"
+                    db.add(run)
+                    db.commit()
+            return result
+
+        jira = JiraClient()
+        plat_meta: dict[str, dict[str, Any]] = {}
+        sync_errors: list[str] = []
+        try:
+            # Re-query Jira for PLAT links. Stored result_json does not include tickets created from the UI
+            # until we refresh — otherwise "Sync PLAT" would drop them when saving.
+            for row in cve_rows:
+                cve_id = row.get("cve_id")
+                if not cve_id:
+                    continue
+                imgs = _affected_imgs_for_cve_row(row)
+                try:
+                    tickets: list[PlatTicket] = jira.search_plat_tickets(str(cve_id))
+                    raw_plat = [
+                        {"key": t.key, "issue_type": t.issue_type, "summary": t.summary}
+                        for t in tickets
+                    ]
+                    by_img: dict[str, list[str]] = {}
+                    for item in jira.search_plat_security_for_cve(str(cve_id)):
+                        img = (item.get("image_basename") or "").strip()
+                        if not img:
+                            continue
+                        by_img.setdefault(img, []).append(item["key"])
+                    row["plat_security_keys"] = [
+                        t["key"] for t in raw_plat if t["issue_type"] == "Security Vulnerability"
+                    ]
+                    row["plat_security_for_images"] = by_img
+                    row["plat_tickets"] = _filter_plat_tickets(raw_plat, imgs)
+                except Exception as ex:
+                    sync_errors.append(f"{cve_id} plat refresh: {ex}")
+
+            all_keys: set[str] = set()
+            for row in cve_rows:
+                all_keys |= _plat_sec_keys_for_row(row)
+
+            key_to_rows: dict[str, list[dict[str, Any]]] = {}
+            for row in cve_rows:
+                for pk in _plat_sec_keys_for_row(row):
+                    key_to_rows.setdefault(pk, []).append(row)
+
+            for pk in sorted(all_keys):
+                m = jira.get_issue_platsync_fields(pk)
+                if m:
+                    plat_meta[pk] = m
+
+            for pk in sorted(all_keys):
+                rows_for = key_to_rows.get(pk) or []
+                sla_dates = [r.get("sla_due_date") for r in rows_for if r.get("sla_due_date")]
+                best: str | None = None
+                for sd in sla_dates:
+                    if sd and str(sd).strip():
+                        s = str(sd).strip()
+                        if best is None or s < best:
+                            best = s
+                try:
+                    jira.ensure_plat_security_issue_sync(pk, best)
+                except Exception as ex:
+                    sync_errors.append(f"{pk}: {ex}")
+
+            for row in cve_rows:
+                row.pop("plat_app_fix_versions", None)
+                row.pop("plat_tag_numbers", None)
+                sync_map: dict[str, dict[str, str]] = {}
+                for pk in _plat_sec_keys_for_row(row):
+                    m = plat_meta.get(pk)
+                    if not m:
+                        continue
+                    fix_s = (m.get("fix_versions") or "").strip()
+                    tag_s = (m.get("tag_numbers") or "").strip()
+                    sync_map[pk] = {
+                        "fix_versions": fix_s if fix_s else "None",
+                        "tag_numbers": tag_s if tag_s else "None",
+                    }
+                if sync_map:
+                    row["plat_security_field_sync"] = sync_map
+                else:
+                    row.pop("plat_security_field_sync", None)
+        finally:
+            jira.close()
+
+        if sync_errors:
+            result["_plat_sync_errors"] = sync_errors
+        else:
+            result.pop("_plat_sync_errors", None)
+        result["cve_rows"] = cve_rows
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if run:
+                run.status = "done"
+                run.result_json = json.dumps(result)
+                db.add(run)
+                db.commit()
+        return result
+    except Exception as e:
+        _set_run_status(run_id, f"failed: {type(e).__name__}")
+        raise
 

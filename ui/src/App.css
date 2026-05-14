@@ -208,6 +208,18 @@
   opacity: 0.5;
 }
 
+.suggestedCommentCardHeader {
+  align-items: center;
+}
+
+.suggestedCommentHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 /* ─── ticket header ──────────────────────────────────────────────────────── */
 .ticketHeader { margin-bottom: 6px; }
 
@@ -444,12 +456,74 @@
 
 /* Laptop-friendly column slice — slightly tighter padding below on td/th */
 .cveColCve { width: 10%; }
-.cveColPlat { width: 30%; }
-.cveColSev { width: 9%; }
-.cveColRes { width: 17%; }
-.cveColVer { width: 11%; }
-.cveColFix { width: 11%; }
-.cveColDue { width: 12%; }
+/* Split PLAT: image | bug tickets | CVE tickets (was single 32% col) */
+.cveColPlatImg { width: 13%; }
+.cveColPlatBug { width: 9.5%; }
+.cveColPlatCve { width: 9.5%; }
+.cveColPlatFix { width: 8%; }
+.cveColPlatTag { width: 8%; }
+.cveColSev { width: 6%; }
+.cveColRes { width: 12%; }
+.cveColVer { width: 8%; }
+.cveColFix { width: 8%; }
+.cveColDue { width: 8%; }
+
+.platAppMeta { color: rgba(226, 232, 240, 0.92); }
+
+/* Fix/tag columns: one strip per row (same rhythm as .platColStrip). */
+.platSyncStackCell {
+  vertical-align: top;
+}
+
+.cveTable td.platSyncStackCell {
+  vertical-align: top;
+  padding: 12px 10px;
+}
+
+.platSyncStack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.platSyncStrip {
+  border-top: 1px solid rgba(255, 255, 255, 0.11);
+  padding: 0.55rem 0.55rem 0.55rem 0.6rem;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 2.35rem;
+  display: flex;
+  align-items: center;
+}
+
+.platSyncStrip:first-child {
+  border-top: none;
+  padding-top: 0.55rem;
+}
+
+.platSyncStack .platSyncStrip:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.platSyncStripMetaRow {
+  min-width: 0;
+  width: 100%;
+}
+
+.platSyncStripText {
+  white-space: pre-line;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+  display: block;
+  max-height: 5rem;
+  overflow: auto;
+}
+
+.platSyncPendingHint {
+  font-style: italic;
+  line-height: 1.35;
+}
 
 .cveTable thead tr { border-bottom: 1px solid rgba(255,255,255,0.1); }
 
@@ -469,6 +543,7 @@
 .cveTable td {
   padding: 8px 6px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
+  /* Center CVE-level cells in tall rows; PLAT columns override with top (see .plat*Cell) */
   vertical-align: middle;
   min-width: 0;
   word-break: break-word;
@@ -619,6 +694,26 @@
 }
 .cveId:hover { text-decoration: underline; }
 
+/* CVE findings: PLAT pills in bug/CVE columns */
+.platColStack .platTicketPill {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.platColStack button.platCreatePill {
+  font-size: 10px;
+  padding: 2px 6px;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.platColStack .platPerImageNA {
+  font-size: 11px;
+}
+
 .platTicketPill {
   display: inline-block;
   font-family: ui-monospace, monospace;
@@ -631,7 +726,6 @@
   line-height: 1.35;
   border: 1px solid transparent;
 }
-
 /* Existing PLAT in Jira (Bug or Sec) — green */
 .platTicketFound {
   color: rgba(74, 222, 128, 0.98) !important;
@@ -688,21 +782,12 @@ button.platCreateBugPill:disabled:hover {
   background: rgba(59, 130, 246, 0.14) !important;
 }
 
-.platTicketType {
-  margin-left: 5px;
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  opacity: 0.88;
-  letter-spacing: 0.04em;
-  text-transform: lowercase;
-}
-
 .fixedVer { color: #4ade80; }
 .slaDueDate { color: #a5b4fc; }
 
 .cveTable td.platTicketCell {
   vertical-align: top;
+  padding: 12px 10px;
 }
 
 .platTicketCell {
@@ -721,71 +806,69 @@ button.platCreateBugPill:disabled:hover {
   box-sizing: border-box;
 }
 
-/* ── Sketch layout: boxed rows, image:tag left, PLAT keys + Create CVE in a row ── */
-.platCellSketchBoard {
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 4px;
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
-    0 0 0 1px rgba(0, 0, 0, 0.25);
-  background: rgba(0, 0, 0, 0.22);
+.cveTable td.platColCell {
+  vertical-align: top;
+  /* Match PLAT fix/tag cells so strip rhythm lines up across columns */
+  padding: 12px 10px;
 }
 
-.platCellSketchBoard .platPerImage {
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
-  /* Label uses free space; actions column only as wide as pills (avoids huge gap bug |/cve) */
-  grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 0.45rem;
-  padding: 0.35rem 0.45rem;
-  align-items: center;
-}
-
-.platCellSketchBoard .platPerImage:first-of-type {
-  padding-top: 0.4rem;
-  border-top: none;
-}
-
-.platSketchActions {
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: 4px 6px;
-}
-
-/* Bug pills/actions left, CVE pills/actions right (overrides .platPerImageActions flex-end) */
-.platPerImageActions.platSketchActions {
-  justify-content: flex-start;
-  min-width: 0;
-}
-
-.platSketchActionsEmpty {
-  justify-content: center;
-}
-
-.platPerImageBugSide,
-.platPerImageCveSide {
+/* Plain vertical stack (same idea as .platSyncStack — no inner table/card chrome) */
+.platColStack {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.platColStrip {
+  border-top: 1px solid rgba(255, 255, 255, 0.11);
+  /* Match .platSyncStrip padding for strip-to-strip alignment with fix/tag */
+  padding: 0.55rem 0.55rem 0.55rem 0.6rem;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 2.35rem;
+  display: flex;
   align-items: center;
-  gap: 4px 6px;
+}
+
+.platColStrip:first-of-type {
+  border-top: none;
+  padding-top: 0.55rem;
+}
+
+.platColStrip:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.platColStrip > .platColPills {
+  flex: 1 1 0%;
   min-width: 0;
 }
 
-.platPerImageCveSide {
-  margin-left: auto;
-  justify-content: flex-end;
-}
-
-.platCellSketchBoard .platPerImage:not(.platPerImageAggregated) .platPerImageLabel {
-  min-width: 0;
+.platColImageLabel {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f8fafc;
+  line-height: 1.35;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.platCellSketchBoard .platPerImageAggregated .platPerImageLabel {
-  white-space: normal;
-  word-break: break-word;
-  line-height: 1.35;
+.platColPills {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+  min-width: 0;
+}
+
+.platColPillsEmpty {
+  justify-content: center;
+  min-height: 1.5rem;
 }
 
 .platPerImage {
@@ -851,10 +934,6 @@ button.platCreateBugPill:disabled:hover {
 
 .platFallbackRow {
   padding: 0.65rem 0.85rem;
-}
-
-.platCellSketchBoard .platFallbackRow {
-  padding: 0.4rem 0.55rem;
 }
 
 .platFallbackRow .platPerImageActions {
@@ -1440,6 +1519,83 @@ button.platCreateBugPill:disabled:hover {
   height: 15px;
   accent-color: #6366f1;
   flex-shrink: 0;
+}
+
+.resultsActionsWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.resultsActionsBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 2px solid rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.1);
+  color: #fcd34d;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.resultsActionsBtn:hover:not(:disabled) {
+  background: rgba(251, 191, 36, 0.18);
+  border-color: #fbbf24;
+}
+
+.resultsActionsBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.resultsActionsChev {
+  opacity: 0.65;
+  font-size: 10px;
+}
+
+.resultsActionsMenu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 240px;
+  padding: 6px 0;
+  margin: 0;
+  list-style: none;
+  background: #12151c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+}
+
+.resultsActionsMenu li {
+  margin: 0;
+  padding: 0;
+}
+
+.resultsActionsMenuItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.resultsActionsMenuItem:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.resultsActionsMenuItem:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .resultsRefreshBtn {

@@ -16,7 +16,7 @@ from api.app.db import engine, db_session
 from api.app.models import Base, CustomerSla, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
-from worker.app.tasks import process_issue
+from worker.app.tasks import process_issue, sync_plat_for_run
 
 
 app = FastAPI(title="CVE Portal API", version="0.1.0")
@@ -93,6 +93,8 @@ class CreatePlatIn(BaseModel):
     image_display: str | None = None
     resource_label: str | None = None
     vendor_fix_version: str | None = None
+    # ISO YYYY-MM-DD from portal SLA row; sets Jira system field duedate when valid.
+    sla_due_date: str | None = None
 
     @field_validator("organizations", mode="before")
     @classmethod
@@ -137,6 +139,7 @@ def create_plat_ticket(payload: CreatePlatIn):
             priority_name=_jira_priority_name(payload.severity),
             organization_refs=org_refs or None,
             source_issue_key=payload.source_issue_key,
+            due_date=payload.sla_due_date,
         )
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
@@ -171,6 +174,7 @@ def create_plat_bug_ticket(payload: CreatePlatIn):
             image_display=payload.image_display,
             resource_label=payload.resource_label,
             vendor_fix_version=payload.vendor_fix_version,
+            due_date=payload.sla_due_date,
         )
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
@@ -459,6 +463,32 @@ def sla_due_date_preview(
             }
     due = due_date_from_anchor(dt_anchor, orgs, severity, rows_by_customer_lower)
     return {"due_date": due, "anchor": dt_anchor.isoformat(), "organizations": orgs, "severity": severity}
+
+
+@app.post("/api/jobs/{run_id}/sync-plat")
+def enqueue_sync_plat(run_id: str):
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid run id") from e
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status == "syncing_plat":
+            raise HTTPException(status_code=409, detail="PLAT sync already in progress")
+        if not run.result_json:
+            raise HTTPException(status_code=400, detail="no result to sync")
+        if run.status != "done":
+            raise HTTPException(status_code=400, detail="run must be finished before PLAT sync")
+    async_result = sync_plat_for_run.delay(str(rid))
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if run:
+            run.celery_task_id = async_result.id
+            db.add(run)
+            db.commit()
+    return {"task_id": async_result.id}
 
 
 @app.get("/api/jobs/{run_id}")
