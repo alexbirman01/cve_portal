@@ -307,6 +307,24 @@ export async function apiDelete(path: string): Promise<void> {
   if (!res.ok) throw new Error(await res.text())
 }
 
+/** Browser-safe config from the API (no secrets). */
+export type ClientConfig = {
+  jira_browse_url: string
+}
+
+export async function apiGetClientConfig(): Promise<ClientConfig> {
+  return apiGet<ClientConfig>('/api/config/client')
+}
+
+/** Remove all `processing_runs` rows for this Jira key from the database. */
+export async function apiDeleteProcessingRunsForIssue(
+  issueKey: string,
+): Promise<{ ok: boolean; deleted_count: number }> {
+  const res = await fetch(`/api/jobs/issue/${encodeURIComponent(issueKey.trim())}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as { ok: boolean; deleted_count: number }
+}
+
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
@@ -579,13 +597,20 @@ export function imagePathForBasename(r: CveRow, imageBasename: string): string |
 
 /**
  * Tokens from a registry image path (aligned with worker `_img_tokens`: strip plainid/, lower,
- * whole path plus segments split on - and _).
+ * whole path plus [-_] parts, optional tag stem, and `/` path segments e.g. rclone/rclone → rclone).
  */
 export function imageTokensForImagePath(imagePath: string): string[] {
   const name = imagePath.replace(/^plainid\//i, '').trim().toLowerCase()
   if (!name) return []
   const parts = name.split(/[-_]/g)
-  return _uniqueImageTokens([name, ...parts])
+  const raw: string[] = [name, ...parts]
+  const stem = name.includes(':') ? name.split(':', 1)[0].trim() : name
+  if (stem && !raw.includes(stem)) raw.push(stem)
+  for (const seg of stem.split('/')) {
+    const s = seg.trim()
+    if (s && !raw.includes(s)) raw.push(s)
+  }
+  return _uniqueImageTokens(raw)
 }
 
 function _uniqueImageTokens(raw: string[]): string[] {

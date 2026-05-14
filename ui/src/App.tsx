@@ -5,8 +5,10 @@ import {
   apiCreatePlat,
   apiCreatePlatBug,
   apiDeleteCustomerSla,
+  apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
   apiGet,
+  apiGetClientConfig,
   apiListCustomerSlas,
   apiPost,
   apiUpdateCustomerSla,
@@ -1852,14 +1854,40 @@ function DashboardView({
   const [page, setPage] = useState(1)
   const [dashSearch, setDashSearch] = useState('')
   const [dashStatusFilter, setDashStatusFilter] = useState<DashboardTicketStatus | ''>('')
+  const [jiraBrowseUrl, setJiraBrowseUrl] = useState('')
+  const [removeBusyKey, setRemoveBusyKey] = useState<string | null>(null)
+
+  const loadSummaries = useCallback(async () => {
+    setError(null)
+    setLoading(true)
+    try {
+      const data = await apiGet<IssueCveStatusSummary[]>('/api/jobs/cve-status')
+      setSummaries(data)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadSummaries()
+  }, [loadSummaries])
 
   useEffect(() => {
     let alive = true
-    apiGet<IssueCveStatusSummary[]>('/api/jobs/cve-status')
-      .then((data) => { if (alive) setSummaries(data) })
-      .catch((e) => { if (alive) setError(e?.message ?? String(e)) })
-      .finally(() => { if (alive) setLoading(false) })
-    return () => { alive = false }
+    apiGetClientConfig()
+      .then((c) => {
+        if (!alive) return
+        setJiraBrowseUrl((c.jira_browse_url ?? '').trim().replace(/\/$/, ''))
+      })
+      .catch(() => {
+        if (!alive) return
+        setJiraBrowseUrl('')
+      })
+    return () => {
+      alive = false
+    }
   }, [])
 
   useEffect(() => {
@@ -2022,17 +2050,64 @@ function DashboardView({
                     </span>
                     <span className="dashIssueSummaryAside">
                       <span className="muted small">{relativeTime(s.created_at)}</span>
-                      <button
-                        type="button"
-                        className="btn btnSecondary dashIssueOpenBtn"
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          onOpen(s.issue_key, s.run_id)
-                        }}
-                      >
-                        Open
-                      </button>
+                      <span className="dashIssueActionBtns">
+                        <button
+                          type="button"
+                          className="btn btnSecondary btnSm dashIssueOpenBtn"
+                          onClick={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            onOpen(s.issue_key, s.run_id)
+                          }}
+                        >
+                          Open
+                        </button>
+                        {jiraBrowseUrl ? (
+                          <a
+                            className="btn btnSecondary btnSm dashIssueOpenBtn"
+                            href={`${jiraBrowseUrl}/${encodeURIComponent(s.issue_key)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Open in Jira"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            Open on Jira
+                          </a>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btnSecondary btnSm dashIssueOpenBtn"
+                            disabled
+                            title="Jira URL not configured on server"
+                          >
+                            Open on Jira
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btnDangerGhost btnSm dashIssueOpenBtn"
+                          disabled={removeBusyKey !== null}
+                          title="Remove saved runs for this ticket from the CVE portal database"
+                          onClick={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            const msg =
+                              `Remove all saved analysis runs for ${s.issue_key} from the portal database? ` +
+                              'This does not change Jira. This cannot be undone.'
+                            if (!window.confirm(msg)) return
+                            setRemoveBusyKey(s.issue_key)
+                            setError(null)
+                            apiDeleteProcessingRunsForIssue(s.issue_key)
+                              .then(() => loadSummaries())
+                              .catch((err: unknown) =>
+                                setError(err instanceof Error ? err.message : String(err)),
+                              )
+                              .finally(() => setRemoveBusyKey(null))
+                          }}
+                        >
+                          {removeBusyKey === s.issue_key ? 'Removing…' : 'Remove'}
+                        </button>
+                      </span>
                     </span>
                   </summary>
                   <div className="dashIssueBody">

@@ -332,6 +332,11 @@
   white-space: nowrap;
 }
 
+a.btn {
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 .btnPrimary {
   background: #4f46e5;
   color: #fff;
@@ -1880,6 +1885,13 @@ button.platCreateBugPill:disabled:hover {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+}
+
+.dashIssueActionBtns {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .dashIssueKey {

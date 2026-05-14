@@ -5,7 +5,9 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, field_validator
+from sqlalchemy import func
 
+from api.app.config import settings
 from api.app.cve_row_derived import (
     cve_rows_from_result,
     derive_cve_state,
@@ -30,6 +32,13 @@ def _startup() -> None:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/config/client")
+def client_config():
+    """Non-secret values for the browser (e.g. Jira links)."""
+    base = (settings.jira_base_url or "").strip().rstrip("/")
+    return {"jira_browse_url": f"{base}/browse" if base else ""}
 
 
 @app.get("/api/issues/{issue_key}")
@@ -327,6 +336,23 @@ def list_jobs_cve_status(limit: int = 50):
             }
         )
     return out
+
+
+@app.delete("/api/jobs/issue/{issue_key}")
+def delete_processing_runs_for_issue(issue_key: str):
+    """Delete all processing runs for this Jira issue from Postgres (removes portal history for the ticket)."""
+    raw = (issue_key or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="issue_key required")
+    fold = raw.casefold()
+    with db_session() as db:
+        n = (
+            db.query(ProcessingRun)
+            .filter(func.lower(ProcessingRun.issue_key) == fold)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+    return {"ok": True, "deleted_count": n}
 
 
 class CustomerSlaCreateIn(BaseModel):

@@ -28,11 +28,15 @@ def _img_tokens(img_name: str) -> list[str]:
     """Return searchable substrings for an image name, e.g. 'plainid/pip-operator' → ['pip-operator','pip','operator']."""
     name = re.sub(r"^plainid/", "", img_name, flags=re.IGNORECASE).lower()
     parts = re.split(r"[-_]", name)
-    tokens = [name] + parts
-    if ":" in name:
-        stem = name.split(":", 1)[0].strip()
-        if stem and stem not in tokens:
-            tokens.append(stem)
+    tokens: list[str] = [name] + parts
+    stem = name.split(":", 1)[0].strip() if ":" in name else name
+    if stem and stem not in tokens:
+        tokens.append(stem)
+    # Path segments (e.g. rclone/rclone → bare "rclone") so Bug summaries like [CVE] - [rclone] match.
+    for seg in stem.split("/"):
+        s = seg.strip()
+        if s and s not in tokens:
+            tokens.append(s)
     return [t for t in tokens if t]
 
 

@@ -8,7 +8,7 @@
 - **Find work fast** — Search by **PLATFORM** parent key, **PLAT-** ticket, **CVE** id, or paste a Jira URL; filter the board by workflow status.
 - **Re-run when reality changes** — **Re-process ticket** from results kicks off a full analysis pass (with confirmation), not just a refresh of old JSON.
 
-**Configuration** — Set Jira + optional NVD/Aqua in `.env`. **Postgres** user, password, host, port, and database name are also read from `.env`; Compose wires the API/worker DSN from those values (defaults suit local Docker).
+**Configuration** — Set Jira + optional NVD/Aqua in `.env`. **Postgres** user, password, host, port, and database name are also read from `.env`; Compose wires the API/worker DSN from those values (defaults suit local Docker). For **Jira Service Management** parent tickets (e.g. `PLATFORM-*`), set **`JIRA_USE_JSM_INTERNAL_COMMENTS=true`** so “Push to Jira as comment” uses the Service Desk API with `public: false` (customer-internal). If this is unset, the portal uses the standard issue comment API, which does not apply that visibility and comments may appear public to the customer.
 
 ---
 
