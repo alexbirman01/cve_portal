@@ -107,6 +107,8 @@ class CreatePlatIn(BaseModel):
     vendor_fix_version: str | None = None
     # ISO YYYY-MM-DD from portal SLA row; sets Jira system field duedate when valid.
     sla_due_date: str | None = None
+    # If provided, the newly created/found key is persisted into this run's result_json.
+    run_id: str | None = None
 
     @field_validator("organizations", mode="before")
     @classmethod
@@ -130,6 +132,63 @@ class CreatePlatIn(BaseModel):
                 if d:
                     out.append(d)
         return out
+
+
+def _persist_plat_key_into_run(
+    run_id: str | None,
+    cve_id: str,
+    key: str,
+    issue_type: str,
+    *,
+    image_basename: str | None = None,
+    summary: str | None = None,
+) -> None:
+    """Write a newly created/found PLAT key back into the run's result_json so the UI stays consistent after remount."""
+    if not run_id or not key:
+        return
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        return
+    img = (image_basename or "").strip()
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return
+        data = json.loads(run.result_json)
+        for row in data.get("cve_rows") or []:
+            if row.get("cve_id") != cve_id:
+                continue
+            tickets: list[dict] = list(row.get("plat_tickets") or [])
+            existing = next((t for t in tickets if t.get("key") == key), None)
+            if issue_type == "Security Vulnerability":
+                if existing is None:
+                    tickets.append({"key": key, "issue_type": issue_type})
+                if img:
+                    by_img: dict[str, list[str]] = dict(row.get("plat_security_for_images") or {})
+                    cur = set(by_img.get(img) or [])
+                    cur.add(key)
+                    by_img[img] = sorted(cur)
+                    row["plat_security_for_images"] = by_img
+                sec_keys: set[str] = set(row.get("plat_security_keys") or [])
+                sec_keys.add(key)
+                row["plat_security_keys"] = sorted(sec_keys)
+            else:
+                bug_summary = (summary or "").strip() or (
+                    f"[{cve_id}] - [{img}]" if img else ""
+                )
+                if existing is None:
+                    entry: dict[str, str] = {"key": key, "issue_type": issue_type}
+                    if bug_summary:
+                        entry["summary"] = bug_summary
+                    tickets.append(entry)
+                elif bug_summary and not (existing.get("summary") or "").strip():
+                    existing["summary"] = bug_summary
+            row["plat_tickets"] = tickets
+            break
+        run.result_json = json.dumps(data)
+        db.add(run)
+        db.commit()
 
 
 def _link_plat_keys_to_parent(
@@ -161,6 +220,15 @@ def create_plat_ticket(payload: CreatePlatIn):
             out: dict = {"exists": True, "keys": existing}
             if warnings:
                 out["link_warnings"] = warnings
+            img_bn = payload.image_basename.strip()
+            for k in existing:
+                _persist_plat_key_into_run(
+                    payload.run_id,
+                    payload.cve_id.strip(),
+                    k,
+                    "Security Vulnerability",
+                    image_basename=img_bn,
+                )
             return out
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_security_vulnerability(
@@ -176,6 +244,13 @@ def create_plat_ticket(payload: CreatePlatIn):
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
         warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
+        _persist_plat_key_into_run(
+            payload.run_id,
+            payload.cve_id.strip(),
+            key,
+            "Security Vulnerability",
+            image_basename=payload.image_basename.strip(),
+        )
         out = {"exists": False, "key": key}
         if warnings:
             out["link_warnings"] = warnings
@@ -201,6 +276,16 @@ def create_plat_bug_ticket(payload: CreatePlatIn):
             out: dict = {"exists": True, "keys": existing}
             if warnings:
                 out["link_warnings"] = warnings
+            bug_summary = f"[{cve_id}] - [{image_basename}]"
+            for k in existing:
+                _persist_plat_key_into_run(
+                    payload.run_id,
+                    cve_id,
+                    k,
+                    "Bug",
+                    image_basename=image_basename,
+                    summary=bug_summary,
+                )
             return out
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_bug(
@@ -220,6 +305,14 @@ def create_plat_bug_ticket(payload: CreatePlatIn):
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
         summary = f"[{cve_id}] - [{image_basename}]"
         warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
+        _persist_plat_key_into_run(
+            payload.run_id,
+            cve_id,
+            key,
+            "Bug",
+            image_basename=image_basename,
+            summary=summary,
+        )
         out = {"exists": False, "key": key, "summary": summary}
         if warnings:
             out["link_warnings"] = warnings

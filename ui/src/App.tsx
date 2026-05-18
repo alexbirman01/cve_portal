@@ -301,6 +301,7 @@ type CveTableColumnVisibility = Record<CveTableColumnKey, boolean>
 function CveTable({
   rows,
   issueKey,
+  runId,
   platOrganizationRefs,
   onPlatCreated,
   onPlatBugCreated,
@@ -311,6 +312,7 @@ function CveTable({
 }: {
   rows: CveRow[]
   issueKey?: string
+  runId?: string | null
   platOrganizationRefs?: OrgRef[] | null
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   onPlatBugCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
@@ -542,6 +544,7 @@ function CveTable({
                                                   platPackageNameForRow(r),
                                                 vendor_fix_version: (r.fixed_version ?? '').trim() || null,
                                                 sla_due_date: r.sla_due_date ?? null,
+                                                run_id: runId,
                                               })
                                               if (out.link_warnings?.length) {
                                                 setPlatErrRow(r.cve_id)
@@ -677,6 +680,7 @@ function CveTable({
                                                 organizations: platOrganizationRefs ?? [],
                                                 source_issue_key: issueKey,
                                                 sla_due_date: r.sla_due_date ?? null,
+                                                run_id: runId,
                                               })
                                               if (out.link_warnings?.length) {
                                                 setPlatErrRow(r.cve_id)
@@ -1640,6 +1644,26 @@ function ResultsPanel({
     }
   }, [job])
 
+  // Re-load from DB when returning to findings (parent job state may be stale).
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const j = await onJobRefresh()
+        if (cancelled) return
+        const rs = j.result?.cve_rows
+        if (rs && Array.isArray(rs) && !j.status.startsWith('failed')) {
+          setRows(rs)
+        }
+      } catch {
+        /* keep rows from job prop */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [onJobRefresh])
+
   const onPlatCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
     setRows((prev) => mergePlatCreateIntoRows(prev, cveId, imageBasename, out))
   }
@@ -1691,6 +1715,7 @@ function ResultsPanel({
             organizations: orgRefs,
             source_issue_key: issue.key,
             sla_due_date: r.sla_due_date ?? null,
+            run_id: job.run_id,
           })
           acc = mergePlatCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
           setRows(acc)
@@ -1710,6 +1735,13 @@ function ResultsPanel({
     } finally {
       setPlatBulkBusy(false)
       setPlatBulkProgress(null)
+      try {
+        const j = await onJobRefresh()
+        const rs = j.result?.cve_rows
+        if (rs && Array.isArray(rs)) setRows(rs)
+      } catch {
+        /* local row state already updated */
+      }
     }
   }
 
@@ -1744,6 +1776,7 @@ function ResultsPanel({
               platPackageNameForRow(r),
             vendor_fix_version: (r.fixed_version ?? '').trim() || null,
             sla_due_date: r.sla_due_date ?? null,
+            run_id: job.run_id,
           })
           acc = mergePlatBugCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
           setRows(acc)
@@ -1763,6 +1796,13 @@ function ResultsPanel({
     } finally {
       setPlatBulkBusy(false)
       setPlatBulkProgress(null)
+      try {
+        const j = await onJobRefresh()
+        const rs = j.result?.cve_rows
+        if (rs && Array.isArray(rs)) setRows(rs)
+      } catch {
+        /* local row state already updated */
+      }
     }
   }
 
@@ -1967,6 +2007,7 @@ function ResultsPanel({
         <CveTable
           rows={filteredRows}
           issueKey={issue.key}
+          runId={job.run_id}
           platOrganizationRefs={platOrgRefsFromIssue(issue)}
           onPlatCreated={onPlatCreated}
           onPlatBugCreated={onPlatBugCreated}
@@ -2800,7 +2841,16 @@ function App() {
                 job={job}
                 loading={loading}
                 onStartProcessing={startProcessing}
-                onViewResults={() => setViewMode('results')}
+                onViewResults={async () => {
+                  if (runId) {
+                    try {
+                      await refreshJob()
+                    } catch {
+                      /* still show results from cached job */
+                    }
+                  }
+                  setViewMode('results')
+                }}
               />
             )}
           </>

@@ -392,6 +392,8 @@ export async function apiCreatePlat(body: {
   source_issue_key?: string | null
   /** SLA due date YYYY-MM-DD; sent as Jira `duedate` on create */
   sla_due_date?: string | null
+  /** Run whose result_json will be updated with the new key so it survives remount */
+  run_id?: string | null
 }): Promise<CreatePlatResponse> {
   const res = await fetch('/api/plat', {
     method: 'POST',
@@ -418,6 +420,8 @@ export async function apiCreatePlatBug(body: {
   vendor_fix_version?: string | null
   /** SLA due date YYYY-MM-DD; sent as Jira `duedate` on create */
   sla_due_date?: string | null
+  /** Run whose result_json will be updated with the new key so it survives remount */
+  run_id?: string | null
 }): Promise<CreatePlatResponse> {
   const res = await fetch('/api/plat/bug', {
     method: 'POST',
