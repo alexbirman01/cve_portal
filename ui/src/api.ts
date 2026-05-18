@@ -179,6 +179,36 @@ export async function apiDeleteCustomerSla(id: string): Promise<void> {
   return apiDelete(`/api/sla/customers/${encodeURIComponent(id)}`)
 }
 
+export type AllowedImageRecord = {
+  id: string
+  name: string
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export async function apiListAllowedImages(): Promise<AllowedImageRecord[]> {
+  return apiGet('/api/allowed-images')
+}
+
+export async function apiCreateAllowedImage(body: { name: string }): Promise<AllowedImageRecord> {
+  return apiPost('/api/allowed-images', body)
+}
+
+export async function apiUpdateAllowedImage(
+  id: string,
+  body: { name: string },
+): Promise<AllowedImageRecord> {
+  return apiPut(`/api/allowed-images/${encodeURIComponent(id)}`, body)
+}
+
+export async function apiDeleteAllowedImage(id: string): Promise<void> {
+  return apiDelete(`/api/allowed-images/${encodeURIComponent(id)}`)
+}
+
+export function isAllowedImageBasename(basename: string, allowed: Set<string>): boolean {
+  return allowed.has(basename.toLowerCase())
+}
+
 export type HistoryRun = {
   run_id: string
   issue_key: string

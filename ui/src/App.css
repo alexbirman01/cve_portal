@@ -2223,6 +2223,22 @@ button.platCreateBugPill:disabled:hover {
 .mono   { font-family: ui-monospace, monospace; font-size: 12.5px; }
 .small  { font-size: 12px; }
 
+/* Unknown image name warning badge */
+.imageNameWarn {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: middle;
+  letter-spacing: 0.01em;
+}
+
 /* ─── modal shared ───────────────────────────────────────────────────────── */
 .modalOverlay {
   position: fixed;

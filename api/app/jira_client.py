@@ -1426,6 +1426,8 @@ class JiraClient:
                 self.set_issue_components(key, [comp])
             except Exception:
                 pass
+        if key:
+            self._issue_add_labels_via_update(key, ["CVE"])
         return key
 
     def create_issue_link(

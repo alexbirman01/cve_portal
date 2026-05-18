@@ -11,6 +11,10 @@ import {
   apiGet,
   apiGetAbout,
   apiGetClientConfig,
+  apiListAllowedImages,
+  apiCreateAllowedImage,
+  apiUpdateAllowedImage,
+  apiDeleteAllowedImage,
   apiListCustomerSlas,
   apiPost,
   apiUpdateCustomerSla,
@@ -18,6 +22,7 @@ import {
   exportCvesToExcel,
   formatStatus,
   imageBasenamesForCveRow,
+  isAllowedImageBasename,
   mergePlatBugCreateIntoRows,
   mergePlatCreateIntoRows,
   platBugTicketsForImage,
@@ -41,6 +46,7 @@ import {
   dashboardTicketStatusLabel,
   ticketStatusForSummary,
   type AboutInfo,
+  type AllowedImageRecord,
   type CreatePlatResponse,
   type CustomerSlaRecord,
   type CveRow,
@@ -309,6 +315,7 @@ function CveTable({
   sourceRowCount,
   onClearSearch,
   columnVisibility: columnVisibilityProp,
+  allowedImageNames,
 }: {
   rows: CveRow[]
   issueKey?: string
@@ -321,6 +328,7 @@ function CveTable({
   sourceRowCount?: number
   onClearSearch?: () => void
   columnVisibility?: CveTableColumnVisibility
+  allowedImageNames?: Set<string>
 }) {
   const sorted = useMemo(() => sortCveRows(rows), [rows])
   const [platBusy, setPlatBusy] = useState<string | null>(null)
@@ -434,6 +442,11 @@ function CveTable({
                               >
                                 {platDisplayLabelForImage(r, imgBasename)}
                               </span>
+                              {allowedImageNames && allowedImageNames.size > 0 && !isAllowedImageBasename(imgBasename, allowedImageNames) && (
+                                <span className="imageNameWarn small" title="Not in allowed PlainID image catalog">
+                                  Unknown image
+                                </span>
+                              )}
                             </div>
                           ))}
                           {orphanSec.length > 0 && (
@@ -452,22 +465,29 @@ function CveTable({
                           {(bugTickets.length > 0 ||
                             allSecKeys.length > 0 ||
                             platDisplayFullImagesSummary(r) ||
-                            platDisplaySketchSummary(r)) && (
-                            <div className="platColStrip">
-                              <span
-                                className="platPerImageLabel mono platColImageLabel"
-                                title={
-                                  platDisplayFullImagesSummary(r) ||
-                                  platDisplaySketchSummary(r) ||
-                                  undefined
-                                }
-                              >
-                                {platDisplaySketchSummary(r) ||
-                                  platDisplayFullImagesSummary(r) ||
-                                  '—'}
-                              </span>
-                            </div>
-                          )}
+                            platDisplaySketchSummary(r)) && (() => {
+                            const legacyLabel = platDisplaySketchSummary(r) || platDisplayFullImagesSummary(r) || '—'
+                            const legacyBasename = platDisplaySketchSummary(r) || platDisplayFullImagesSummary(r) || ''
+                            return (
+                              <div className="platColStrip">
+                                <span
+                                  className="platPerImageLabel mono platColImageLabel"
+                                  title={
+                                    platDisplayFullImagesSummary(r) ||
+                                    platDisplaySketchSummary(r) ||
+                                    undefined
+                                  }
+                                >
+                                  {legacyLabel}
+                                </span>
+                                {allowedImageNames && allowedImageNames.size > 0 && legacyBasename && !isAllowedImageBasename(legacyBasename, allowedImageNames) && (
+                                  <span className="imageNameWarn small" title="Not in allowed PlainID image catalog">
+                                    Unknown image
+                                  </span>
+                                )}
+                              </div>
+                            )
+                          })()}
                           {bugTickets.length === 0 &&
                             allSecKeys.length === 0 &&
                             !platDisplayFullImagesSummary(r) &&
@@ -856,19 +876,24 @@ function CveTable({
 
 // ─── customer SLA admin ─────────────────────────────────────────────────────
 
+type SlaDraft = { customer_name: string; sla_critical: string; sla_high: string; sla_medium: string; sla_low: string }
+const SLA_DRAFT_EMPTY: SlaDraft = { customer_name: '', sla_critical: '', sla_high: '', sla_medium: '', sla_low: '' }
+const SLA_FIELDS = [
+  { key: 'sla_critical' as const, label: 'Critical', placeholder: 'e.g. 14 days' },
+  { key: 'sla_high' as const,     label: 'High',     placeholder: 'e.g. 30 days' },
+  { key: 'sla_medium' as const,   label: 'Medium',   placeholder: 'e.g. 60 days' },
+  { key: 'sla_low' as const,      label: 'Low',      placeholder: 'e.g. N/A'     },
+]
+
 function SlaAdminPanelBody() {
   const [rows, setRows] = useState<CustomerSlaRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [savingId, setSavingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<SlaDraft>(SLA_DRAFT_EMPTY)
   const [createBusy, setCreateBusy] = useState(false)
-  const [draft, setDraft] = useState({
-    customer_name: '',
-    sla_critical: '',
-    sla_high: '',
-    sla_medium: '',
-    sla_low: '',
-  })
+  const [draft, setDraft] = useState<SlaDraft>(SLA_DRAFT_EMPTY)
 
   const load = useCallback(async () => {
     setErr(null)
@@ -885,25 +910,24 @@ function SlaAdminPanelBody() {
 
   useEffect(() => { void load() }, [load])
 
-  function patchRow(id: string, patch: Partial<CustomerSlaRecord>) {
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
-  }
-
-  async function saveRow(r: CustomerSlaRecord) {
+  async function saveEdit(r: CustomerSlaRecord) {
+    const name = editDraft.customer_name.trim()
+    if (!name) { setErr('Customer name cannot be empty.'); return }
     setErr(null)
     setSavingId(r.id)
     try {
       const updated = await apiUpdateCustomerSla(r.id, {
-        customer_name: r.customer_name,
-        sla_critical: r.sla_critical ?? null,
-        sla_high: r.sla_high ?? null,
-        sla_medium: r.sla_medium ?? null,
-        sla_low: r.sla_low ?? null,
+        customer_name: name,
+        sla_critical: editDraft.sla_critical.trim() || null,
+        sla_high: editDraft.sla_high.trim() || null,
+        sla_medium: editDraft.sla_medium.trim() || null,
+        sla_low: editDraft.sla_low.trim() || null,
       })
       setRows((prev) =>
         [...prev.map((x) => (x.id === r.id ? updated : x))].sort((a, b) =>
           a.customer_name.localeCompare(b.customer_name)),
       )
+      setEditingId(null)
     } catch (e: any) {
       setErr(e?.message ?? String(e))
     } finally {
@@ -912,7 +936,7 @@ function SlaAdminPanelBody() {
   }
 
   async function removeRow(r: CustomerSlaRecord) {
-    const ok = window.confirm(`Delete SLA row for “${r.customer_name}”?`)
+    const ok = window.confirm(`Remove SLA row for "${r.customer_name}"?`)
     if (!ok) return
     setErr(null)
     setSavingId(r.id)
@@ -945,7 +969,7 @@ function SlaAdminPanelBody() {
       setRows((prev) =>
         [...prev, created].sort((a, b) => a.customer_name.localeCompare(b.customer_name)),
       )
-      setDraft({ customer_name: '', sla_critical: '', sla_high: '', sla_medium: '', sla_low: '' })
+      setDraft(SLA_DRAFT_EMPTY)
     } catch (e: any) {
       setErr(e?.message ?? String(e))
     } finally {
@@ -958,9 +982,8 @@ function SlaAdminPanelBody() {
   return (
     <div className="slaAdminBody">
       <p className="muted small slaAdminHint">
-        Values are free text parsed by the worker (e.g. <code>14 days</code>,{' '}
-        <code>30 business days</code>, <code>N/A</code>). Due dates use the Jira ticket{' '}
-        <strong>created</strong> timestamp as anchor.
+        Values are free text (e.g. <code>14 days</code>, <code>30 business days</code>,{' '}
+        <code>N/A</code>). Due dates use the Jira ticket <strong>created</strong> timestamp as anchor.
       </p>
       {err && <div className="errorBox slaAdminErr">{err}</div>}
       <div className="slaAdminToolbar">
@@ -973,102 +996,73 @@ function SlaAdminPanelBody() {
           <thead>
             <tr>
               <th>Customer</th>
-              <th>Critical</th>
-              <th>High</th>
-              <th>Medium</th>
-              <th>Low</th>
-              <th />
+              {SLA_FIELDS.map((f) => <th key={f.key}>{f.label}</th>)}
+              <th style={{ width: 130 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td>
-                  <input
-                    className="slaInput"
-                    value={r.customer_name}
-                    onChange={(e) => patchRow(r.id, { customer_name: e.target.value })}
-                    aria-label={`Customer name for ${r.id}`}
-                  />
-                </td>
-                {(['sla_critical', 'sla_high', 'sla_medium', 'sla_low'] as const).map((field) => (
-                  <td key={field}>
-                    <input
-                      className="slaInput"
-                      value={r[field] ?? ''}
-                      onChange={(e) => patchRow(r.id, { [field]: e.target.value })}
-                      aria-label={`${field} for ${r.customer_name}`}
-                    />
-                  </td>
-                ))}
-                <td className="slaRowActions">
-                  <button
-                    type="button"
-                    className="btn btnSm"
-                    disabled={savingId === r.id || createBusy}
-                    onClick={() => void saveRow(r)}
-                  >
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btnSm btnDangerGhost"
-                    disabled={savingId === r.id || createBusy}
-                    onClick={() => void removeRow(r)}
-                  >
-                    Delete
-                  </button>
-                </td>
+                {editingId === r.id ? (
+                  <>
+                    <td>
+                      <input className="slaInput" value={editDraft.customer_name}
+                        onChange={(e) => setEditDraft((d) => ({ ...d, customer_name: e.target.value }))}
+                        autoFocus />
+                    </td>
+                    {SLA_FIELDS.map((f) => (
+                      <td key={f.key}>
+                        <input className="slaInput" value={editDraft[f.key]}
+                          placeholder={f.placeholder}
+                          onChange={(e) => setEditDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === 'Enter') void saveEdit(r); if (e.key === 'Escape') setEditingId(null) }} />
+                      </td>
+                    ))}
+                    <td className="slaRowActions">
+                      <button type="button" className="btn btnSm btnPrimary" disabled={!!savingId} onClick={() => void saveEdit(r)}>Save</button>
+                      <button type="button" className="btn btnSm btnSecondary" onClick={() => setEditingId(null)}>Cancel</button>
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td style={{ fontSize: 12 }}>{r.customer_name}</td>
+                    {SLA_FIELDS.map((f) => (
+                      <td key={f.key} style={{ fontSize: 12 }} className="muted">{r[f.key] || '—'}</td>
+                    ))}
+                    <td className="slaRowActions">
+                      <button type="button" className="btn btnSm btnSecondary" disabled={!!savingId}
+                        onClick={() => {
+                          setEditingId(r.id)
+                          setEditDraft({
+                            customer_name: r.customer_name,
+                            sla_critical: r.sla_critical ?? '',
+                            sla_high: r.sla_high ?? '',
+                            sla_medium: r.sla_medium ?? '',
+                            sla_low: r.sla_low ?? '',
+                          })
+                        }}>Edit</button>
+                      <button type="button" className="btn btnSm btnDanger" disabled={!!savingId} onClick={() => void removeRow(r)}>Remove</button>
+                    </td>
+                  </>
+                )}
               </tr>
             ))}
-            <tr className="slaTableAddRow">
+            <tr>
               <td>
-                <input
-                  className="slaInput"
-                  placeholder="New customer"
+                <input className="slaInput" placeholder="New customer"
                   value={draft.customer_name}
                   onChange={(e) => setDraft((d) => ({ ...d, customer_name: e.target.value }))}
-                />
+                  onKeyDown={(e) => e.key === 'Enter' && !createBusy && void createRow()} />
               </td>
-              <td>
-                <input
-                  className="slaInput"
-                  placeholder="Critical"
-                  value={draft.sla_critical}
-                  onChange={(e) => setDraft((d) => ({ ...d, sla_critical: e.target.value }))}
-                />
-              </td>
-              <td>
-                <input
-                  className="slaInput"
-                  placeholder="High"
-                  value={draft.sla_high}
-                  onChange={(e) => setDraft((d) => ({ ...d, sla_high: e.target.value }))}
-                />
-              </td>
-              <td>
-                <input
-                  className="slaInput"
-                  placeholder="Medium"
-                  value={draft.sla_medium}
-                  onChange={(e) => setDraft((d) => ({ ...d, sla_medium: e.target.value }))}
-                />
-              </td>
-              <td>
-                <input
-                  className="slaInput"
-                  placeholder="Low"
-                  value={draft.sla_low}
-                  onChange={(e) => setDraft((d) => ({ ...d, sla_low: e.target.value }))}
-                />
-              </td>
+              {SLA_FIELDS.map((f) => (
+                <td key={f.key}>
+                  <input className="slaInput" placeholder={f.placeholder}
+                    value={draft[f.key]}
+                    onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))} />
+                </td>
+              ))}
               <td className="slaRowActions">
-                <button
-                  type="button"
-                  className="btn btnSm btnPrimary"
-                  disabled={createBusy || !!savingId}
-                  onClick={() => void createRow()}
-                >
+                <button type="button" className="btn btnSm btnPrimary" disabled={createBusy || !!savingId} onClick={() => void createRow()}>
                   Add
                 </button>
               </td>
@@ -1108,6 +1102,206 @@ function ToolbarSlaModal({ open, onClose }: { open: boolean; onClose: () => void
         </div>
         <div className="slaModalBody">
           <SlaAdminPanelBody />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── allowed images admin ────────────────────────────────────────────────────
+
+function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string>) => void }) {
+  const [rows, setRows] = useState<AllowedImageRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [createBusy, setCreateBusy] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  const load = useCallback(async () => {
+    setErr(null)
+    setLoading(true)
+    try {
+      const list = await apiListAllowedImages()
+      const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name))
+      setRows(sorted)
+      onSaved?.(new Set(sorted.map((r) => r.name.toLowerCase())))
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [onSaved])
+
+  useEffect(() => { void load() }, [load])
+
+  async function removeRow(r: AllowedImageRecord) {
+    const ok = window.confirm(`Remove "${r.name}" from the allowed image catalog?`)
+    if (!ok) return
+    setErr(null)
+    setSavingId(r.id)
+    try {
+      await apiDeleteAllowedImage(r.id)
+      const updated = rows.filter((x) => x.id !== r.id)
+      setRows(updated)
+      onSaved?.(new Set(updated.map((x) => x.name.toLowerCase())))
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function saveEdit(r: AllowedImageRecord) {
+    const name = editDraft.trim()
+    if (!name) { setErr('Name cannot be empty.'); return }
+    setErr(null)
+    setSavingId(r.id)
+    try {
+      const updated = await apiUpdateAllowedImage(r.id, { name })
+      const next = rows.map((x) => (x.id === r.id ? updated : x)).sort((a, b) => a.name.localeCompare(b.name))
+      setRows(next)
+      onSaved?.(new Set(next.map((x) => x.name.toLowerCase())))
+      setEditingId(null)
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function createRow() {
+    const name = draft.trim()
+    if (!name) { setErr('Name is required.'); return }
+    setErr(null)
+    setCreateBusy(true)
+    try {
+      const created = await apiCreateAllowedImage({ name })
+      const next = [...rows, created].sort((a, b) => a.name.localeCompare(b.name))
+      setRows(next)
+      onSaved?.(new Set(next.map((x) => x.name.toLowerCase())))
+      setDraft('')
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
+  if (loading) return <p className="muted small">Loading allowed images…</p>
+
+  return (
+    <div className="slaAdminBody">
+      <p className="muted small slaAdminHint">
+        Extracted image basenames are validated against this catalog (exact, case-insensitive).
+        Unknown names get a warning badge in the CVE table — PLAT actions are not blocked.
+      </p>
+      {err && <div className="errorBox slaAdminErr">{err}</div>}
+      <div className="slaAdminToolbar">
+        <button type="button" className="btn btnSecondary btnSm" onClick={() => void load()} disabled={!!savingId || createBusy}>
+          Refresh
+        </button>
+      </div>
+      <div className="slaTableWrap">
+        <table className="slaTable">
+          <thead>
+            <tr>
+              <th>Image basename</th>
+              <th style={{ width: 130 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>
+                  {editingId === r.id ? (
+                    <input
+                      className="slaInput"
+                      value={editDraft}
+                      onChange={(e) => setEditDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void saveEdit(r); if (e.key === 'Escape') setEditingId(null) }}
+                      autoFocus
+                    />
+                  ) : (
+                    <code style={{ fontSize: 12 }}>{r.name}</code>
+                  )}
+                </td>
+                <td className="slaRowActions">
+                  {editingId === r.id ? (
+                    <>
+                      <button type="button" className="btn btnSm btnPrimary" disabled={!!savingId} onClick={() => void saveEdit(r)}>Save</button>
+                      <button type="button" className="btn btnSm btnSecondary" onClick={() => setEditingId(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" className="btn btnSm btnSecondary" disabled={!!savingId} onClick={() => { setEditingId(r.id); setEditDraft(r.name) }}>Edit</button>
+                      <button type="button" className="btn btnSm btnDanger" disabled={!!savingId} onClick={() => void removeRow(r)}>Remove</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+            <tr>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="e.g. authz-access-file"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !createBusy && void createRow()}
+                />
+              </td>
+              <td className="slaRowActions">
+                <button type="button" className="btn btnSm btnPrimary" disabled={createBusy || !!savingId} onClick={() => void createRow()}>
+                  Add
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ToolbarAllowedImagesModal({
+  open,
+  onClose,
+  onSaved,
+}: {
+  open: boolean
+  onClose: () => void
+  onSaved?: (names: Set<string>) => void
+}) {
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+  return (
+    <div className="slaModalBackdrop" role="presentation" onClick={onClose}>
+      <div
+        className="slaModalPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="allowedImagesModalTitle"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="slaModalHeader">
+          <h2 id="allowedImagesModalTitle">Allowed images</h2>
+          <button type="button" className="slaModalClose" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div className="slaModalBody">
+          <AllowedImagesAdminPanelBody onSaved={onSaved} />
         </div>
       </div>
     </div>
@@ -1606,6 +1800,7 @@ function ResultsPanel({
   onJobRefresh,
   onRefreshSuggestedComment,
   commentPosted,
+  allowedImageNames,
 }: {
   issue: IssueResponse
   job: JobResponse
@@ -1619,6 +1814,7 @@ function ResultsPanel({
   /** Re-fetch saved run from the server and rebuild the suggested comment (e.g. after Sync PLAT). */
   onRefreshSuggestedComment: () => Promise<void>
   commentPosted: boolean
+  allowedImageNames?: Set<string>
 }) {
   const [rows, setRows] = useState<CveRow[]>([])
   const [filterText, setFilterText] = useState('')
@@ -2015,6 +2211,7 @@ function ResultsPanel({
           sourceRowCount={rows.length}
           onClearSearch={findingsReady && rows.length > 0 ? clearCveSearch : undefined}
           columnVisibility={columnVisibility}
+          allowedImageNames={allowedImageNames}
         />
       </div>
 
@@ -2556,9 +2753,17 @@ function App() {
   const [commentPosted, setCommentPosted] = useState(false)
   const [viewMode, setViewMode]       = useState<'ticket' | 'results'>('ticket')
   const [slaToolbarOpen, setSlaToolbarOpen] = useState(false)
+  const [allowedImagesOpen, setAllowedImagesOpen] = useState(false)
+  const [allowedImageNames, setAllowedImageNames] = useState<Set<string>>(new Set())
   const [aboutOpen, setAboutOpen]     = useState(false)
   const [aboutInfo, setAboutInfo]     = useState<AboutInfo | null>(null)
   const [aboutLoading, setAboutLoading] = useState(false)
+
+  useEffect(() => {
+    apiListAllowedImages().then((list) => {
+      setAllowedImageNames(new Set(list.map((r) => r.name.toLowerCase())))
+    }).catch(() => { /* non-fatal */ })
+  }, [])
 
   const openAbout = useCallback(async () => {
     setAboutOpen(true)
@@ -2746,6 +2951,13 @@ function App() {
             Customer SLA
           </button>
           <button
+            type="button"
+            className="topNavItem"
+            onClick={() => setAllowedImagesOpen(true)}
+          >
+            Allowed images
+          </button>
+          <button
             className={`topNavItem ${page === 'new' ? 'topNavItemActive' : ''}`}
             onClick={() => {
               setPage('new')
@@ -2771,6 +2983,11 @@ function App() {
       </header>
 
       <ToolbarSlaModal open={slaToolbarOpen} onClose={closeSlaModal} />
+      <ToolbarAllowedImagesModal
+        open={allowedImagesOpen}
+        onClose={() => setAllowedImagesOpen(false)}
+        onSaved={setAllowedImageNames}
+      />
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} info={aboutInfo} loading={aboutLoading} />
 
       {/* ── Main content ── */}
@@ -2832,6 +3049,7 @@ function App() {
                 onJobRefresh={refreshJob}
                 onRefreshSuggestedComment={refreshSuggestedComment}
                 commentPosted={commentPosted}
+                allowedImageNames={allowedImageNames}
               />
             )}
 

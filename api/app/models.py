@@ -45,6 +45,19 @@ class CustomerSla(Base):
     )
 
 
+class AllowedImage(Base):
+    __tablename__ = "allowed_images"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+
 class CveCache(Base):
     __tablename__ = "cves"
 

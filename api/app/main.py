@@ -18,7 +18,8 @@ from api.app.cve_row_derived import (
 )
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
-from api.app.models import Base, CustomerSla, ProcessingRun
+from api.app.allowed_images import normalize_image_basename
+from api.app.models import AllowedImage, Base, CustomerSla, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
 from worker.app.tasks import process_issue, sync_plat_for_run
@@ -696,6 +697,88 @@ def sla_due_date_preview(
             }
     due = due_date_from_anchor(dt_anchor, orgs, severity, rows_by_customer_lower)
     return {"due_date": due, "anchor": dt_anchor.isoformat(), "organizations": orgs, "severity": severity}
+
+
+class AllowedImageCreateIn(BaseModel):
+    name: str
+
+
+class AllowedImageUpdateIn(BaseModel):
+    name: str
+
+
+def _allowed_image_to_api(row: AllowedImage) -> dict:
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.get("/api/allowed-images")
+def list_allowed_images():
+    with db_session() as db:
+        rows = db.query(AllowedImage).order_by(AllowedImage.name.asc()).all()
+        return [_allowed_image_to_api(r) for r in rows]
+
+
+@app.post("/api/allowed-images", status_code=201)
+def create_allowed_image(payload: AllowedImageCreateIn):
+    name = normalize_image_basename(payload.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    with db_session() as db:
+        exists = db.query(AllowedImage).filter(AllowedImage.name == name).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="name already exists")
+        row = AllowedImage(name=name)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _allowed_image_to_api(row)
+
+
+@app.put("/api/allowed-images/{image_id}")
+def update_allowed_image(image_id: str, payload: AllowedImageUpdateIn):
+    try:
+        uid = uuid.UUID(image_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid id") from e
+    name = normalize_image_basename(payload.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="name cannot be empty")
+    with db_session() as db:
+        row = db.get(AllowedImage, uid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        conflict = (
+            db.query(AllowedImage)
+            .filter(AllowedImage.name == name, AllowedImage.id != uid)
+            .first()
+        )
+        if conflict:
+            raise HTTPException(status_code=409, detail="name already exists")
+        row.name = name
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _allowed_image_to_api(row)
+
+
+@app.delete("/api/allowed-images/{image_id}")
+def delete_allowed_image(image_id: str):
+    try:
+        uid = uuid.UUID(image_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid id") from e
+    with db_session() as db:
+        row = db.get(AllowedImage, uid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        db.delete(row)
+        db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/jobs/{run_id}/sync-plat")
