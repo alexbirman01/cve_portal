@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     jira_plat_bug_dev_group_copy_from_source: bool = True
     # When source issue has no Dev Group, use these Jira option label(s) as [{"value": "..."}, ...] (comma-separated for multi).
     jira_plat_bug_dev_group_option_value: str = "BE"
+    # Jira Components on PLAT Bug create (e.g. Security).
+    jira_plat_bug_component_name: str = "Security"
 
     jira_plat_cf_cve_id: str = "customfield_11245"
     jira_plat_cve_cf_number: int = 11245
@@ -71,6 +73,12 @@ class Settings(BaseSettings):
     # When no org is found on the payload, source issue, or JIRA_PLAT_EXTRA_ORGANIZATIONS, use these names for
     # `customfield_10727` as `[{"value": "<name>"}]` (comma-separated). Example: `Humana`
     jira_plat_default_organization_names: str = ""
+
+    # After creating (or reusing) a PLAT ticket, link it to the source PLATFORM issue via issueLink.
+    # Set to false to disable without code changes.
+    jira_plat_link_to_parent_on_create: bool = True
+    # Jira issue-link type name used for the PLATFORM → PLAT relationship.
+    jira_plat_parent_link_type_name: str = "Relates"
 
 
 settings = Settings()

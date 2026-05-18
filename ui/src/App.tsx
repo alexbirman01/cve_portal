@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import type { ComponentHealth } from './api'
 import {
   apiCreateCustomerSla,
   apiCreatePlat,
@@ -8,6 +9,7 @@ import {
   apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
   apiGet,
+  apiGetAbout,
   apiGetClientConfig,
   apiListCustomerSlas,
   apiPost,
@@ -38,6 +40,7 @@ import {
   dashboardCveStateLabel,
   dashboardTicketStatusLabel,
   ticketStatusForSummary,
+  type AboutInfo,
   type CreatePlatResponse,
   type CustomerSlaRecord,
   type CveRow,
@@ -45,6 +48,7 @@ import {
   type IssueCveStatusSummary,
   type IssueResponse,
   type JobResponse,
+  type JobResult,
   type OrgRef,
   type ProcessResponse,
 } from './api'
@@ -320,6 +324,7 @@ function CveTable({
   const [platBusy, setPlatBusy] = useState<string | null>(null)
   const [platErrRow, setPlatErrRow] = useState<string | null>(null)
   const [platErrMsg, setPlatErrMsg] = useState<string | null>(null)
+  const [platLinkWarnings, setPlatLinkWarnings] = useState<string[] | null>(null)
   const vis = useMemo(() => {
     const m: CveTableColumnVisibility = { ...DEFAULT_CVE_TABLE_COLUMN_VISIBILITY, ...columnVisibilityProp }
     m.cve = true
@@ -399,8 +404,13 @@ function CveTable({
                   const allSecKeys = platSecurityKeys(r)
 
                   const platErrBlock =
-                    platErrRow === r.cve_id && platErrMsg ? (
-                      <div className="platCreateErr small">{platErrMsg}</div>
+                    platErrRow === r.cve_id && (platErrMsg || platLinkWarnings?.length) ? (
+                      <div className="platCreateErr small">
+                        {platErrMsg && <div>{platErrMsg}</div>}
+                        {platLinkWarnings?.map((w, i) => (
+                          <div key={i} className="platLinkWarning">{w}</div>
+                        ))}
+                      </div>
                     ) : null
 
                   const errInImage = vis.platImage ? platErrBlock : null
@@ -516,6 +526,7 @@ function CveTable({
                                             setPlatBusy(busyKeyBug)
                                             setPlatErrRow(null)
                                             setPlatErrMsg(null)
+                                            setPlatLinkWarnings(null)
                                             try {
                                               const out = await apiCreatePlatBug({
                                                 cve_id: r.cve_id,
@@ -532,6 +543,10 @@ function CveTable({
                                                 vendor_fix_version: (r.fixed_version ?? '').trim() || null,
                                                 sla_due_date: r.sla_due_date ?? null,
                                               })
+                                              if (out.link_warnings?.length) {
+                                                setPlatErrRow(r.cve_id)
+                                                setPlatLinkWarnings(out.link_warnings)
+                                              }
                                               onPlatBugCreated(r.cve_id, imgBasename, out)
                                             } catch (e) {
                                               setPlatErrRow(r.cve_id)
@@ -651,6 +666,7 @@ function CveTable({
                                             setPlatBusy(busyKeyCve)
                                             setPlatErrRow(null)
                                             setPlatErrMsg(null)
+                                            setPlatLinkWarnings(null)
                                             try {
                                               const out = await apiCreatePlat({
                                                 cve_id: r.cve_id,
@@ -662,6 +678,10 @@ function CveTable({
                                                 source_issue_key: issueKey,
                                                 sla_due_date: r.sla_due_date ?? null,
                                               })
+                                              if (out.link_warnings?.length) {
+                                                setPlatErrRow(r.cve_id)
+                                                setPlatLinkWarnings(out.link_warnings)
+                                              }
                                               onPlatCreated(r.cve_id, imgBasename, out)
                                             } catch (e) {
                                               setPlatErrRow(r.cve_id)
@@ -1408,7 +1428,7 @@ function ResultsActionsMenu({
               role="menuitem"
               className="resultsActionsMenuItem"
               disabled={disabled}
-              title="Fetch PLAT Security fields into the table; add missing CVE label and SLA due date on Jira"
+              title="Sync PLAT Security fields into the table; add missing CVE label and SLA due date on Jira"
               onClick={() => {
                 setOpen(false)
                 onSync()
@@ -1419,6 +1439,151 @@ function ResultsActionsMenu({
           </li>
         </ul>
       )}
+    </div>
+  )
+}
+
+function platSyncProgressCounter(p: NonNullable<JobResult['_plat_sync_progress']>): string {
+  const cur = p.phase_current ?? p.current
+  const tot = p.phase_total ?? p.total
+  if (cur != null && tot != null) {
+    return `${cur}/${tot}`
+  }
+  return ''
+}
+
+function platSyncProgressPhaseLabel(p: NonNullable<JobResult['_plat_sync_progress']>): string {
+  const phase = p.phase || ''
+  if (phase.includes('Refreshing')) return 'Refreshing CVEs'
+  if (phase.includes('Reading fix')) return 'Reading fix/tag'
+  if (phase.includes('label')) return 'Label & due date'
+  if (phase.includes('Linking')) return 'Linking to PLATFORM'
+  return phase
+}
+
+function PlatSyncSummaryModal({
+  open,
+  stats,
+  issueKey,
+  warnings,
+  onClose,
+}: {
+  open: boolean
+  stats: NonNullable<JobResult['_plat_sync_stats']>
+  issueKey?: string
+  warnings?: string[]
+  onClose: () => void
+}) {
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  const ldChecked = stats.label_date_checked ?? stats.label_date_pushed ?? 0
+  const ldUpdated = stats.label_date_updated ?? 0
+  const labelsAdded = stats.labels_added ?? 0
+  const duedatesUpdated = stats.duedates_updated ?? 0
+  const lkChecked = stats.links_checked ?? 0
+  const lkCreated = stats.links_created ?? stats.linked ?? 0
+  const refreshed = stats.tickets_refreshed ?? 0
+  const fieldsRead = stats.fields_read ?? 0
+
+  const rows: { step: number; operation: string; checked: string; changed: string; details: string }[] = [
+    {
+      step: 1,
+      operation: 'Refresh CVEs from Jira',
+      checked: '—',
+      changed: `${refreshed}`,
+      details: 'PLAT tickets re-queried per CVE row',
+    },
+    {
+      step: 2,
+      operation: 'Read fix version & tag',
+      checked: `${fieldsRead}`,
+      changed: `${fieldsRead}`,
+      details: 'Security Vuln fields fetched',
+    },
+    {
+      step: 3,
+      operation: 'Sync CVE label & due date',
+      checked: `${ldChecked}`,
+      changed: `${ldUpdated}`,
+      details: `${labelsAdded} label${labelsAdded !== 1 ? 's' : ''} added · ${duedatesUpdated} due date${duedatesUpdated !== 1 ? 's' : ''} changed`,
+    },
+    {
+      step: 4,
+      operation: issueKey ? `Link to ${issueKey}` : 'Link to PLATFORM',
+      checked: `${lkChecked}`,
+      changed: `${lkCreated}`,
+      details: 'PLATFORM parent link ensured',
+    },
+  ]
+
+  return (
+    <div className="modalOverlay" onClick={onClose} role="presentation">
+      <div
+        className="modalBox platSyncModalBox"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="platSyncModalTitle"
+      >
+        <div className="modalHeader">
+          <span className="modalTitle" id="platSyncModalTitle">
+            PLAT sync complete
+            {issueKey ? <span className="platSyncModalIssueKey"> · {issueKey}</span> : null}
+          </span>
+          <button className="modalClose" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="platSyncModalBody">
+          <table className="platSyncModalTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Operation</th>
+                <th>Checked</th>
+                <th>Changed</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.step}>
+                  <td className="platSyncModalStep">{row.step}</td>
+                  <td className="platSyncModalOperation">{row.operation}</td>
+                  <td className="platSyncModalNum">{row.checked}</td>
+                  <td className={`platSyncModalNum${row.changed !== '0' && row.changed !== '—' ? ' platSyncModalChanged' : ''}`}>{row.changed}</td>
+                  <td className="platSyncModalDetails">{row.details}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {warnings && warnings.length > 0 && (
+            <div className="platSyncModalWarnings">
+              <span className="platSyncModalWarningsTitle">
+                {warnings.length} warning{warnings.length !== 1 ? 's' : ''}
+              </span>
+              <ul className="platSyncModalWarningsList">
+                {warnings.slice(0, 3).map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+                {warnings.length > 3 && (
+                  <li className="muted">…and {warnings.length - 3} more</li>
+                )}
+              </ul>
+            </div>
+          )}
+        </div>
+        <div className="platSyncModalFooter">
+          <button type="button" className="btn btnSecondary btnSm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1459,6 +1624,11 @@ function ResultsPanel({
   const [platBulkBusy, setPlatBulkBusy] = useState(false)
   const [platBulkProgress, setPlatBulkProgress] = useState<{ done: number; total: number } | null>(null)
   const [platBulkErr, setPlatBulkErr] = useState<string | null>(null)
+  const [platBulkErrIsWarn, setPlatBulkErrIsWarn] = useState(false)
+  const [platSyncSummary, setPlatSyncSummary] = useState<JobResult['_plat_sync_stats'] | null>(null)
+  const [platSyncModalOpen, setPlatSyncModalOpen] = useState(false)
+  const [platSyncWarnings, setPlatSyncWarnings] = useState<string[]>([])
+  const [platSyncProgress, setPlatSyncProgress] = useState<JobResult['_plat_sync_progress'] | null>(null)
   const [suggestedCommentRefreshing, setSuggestedCommentRefreshing] = useState(false)
 
   useEffect(() => {
@@ -1599,18 +1769,33 @@ function ResultsPanel({
   async function runPlatSync() {
     if (!job.run_id) return
     setPlatBulkErr(null)
+    setPlatBulkErrIsWarn(false)
+    setPlatSyncSummary(null)
+    setPlatSyncModalOpen(false)
+    setPlatSyncWarnings([])
+    setPlatSyncProgress(null)
     setPlatBulkBusy(true)
     try {
       await apiEnqueuePlatSync(job.run_id)
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise((r) => setTimeout(r, 1500))
         const j = await onJobRefresh()
+        if (j.status === 'syncing_plat') {
+          setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
+          continue
+        }
+        setPlatSyncProgress(null)
         if (j.status === 'done') {
           const pe = j.result?._plat_sync_errors
+          const ss = j.result?._plat_sync_stats
+          if (ss) {
+            setPlatSyncSummary(ss)
+            setPlatSyncWarnings(pe ?? [])
+            setPlatSyncModalOpen(true)
+          }
+          void onRefreshSuggestedComment()
           if (pe?.length) {
-            setPlatBulkErr(
-              `PLAT sync finished with ${pe.length} Jira warning(s): ${pe.slice(0, 3).join(' · ')}${pe.length > 3 ? ' …' : ''}`,
-            )
+            setPlatBulkErrIsWarn(true)
           }
           break
         }
@@ -1620,6 +1805,7 @@ function ResultsPanel({
       }
     } catch (e) {
       setPlatBulkErr(e instanceof Error ? e.message : String(e))
+      setPlatSyncProgress(null)
     } finally {
       setPlatBulkBusy(false)
     }
@@ -1645,6 +1831,15 @@ function ResultsPanel({
 
   return (
     <div className="resultsStack">
+      {platSyncSummary && (
+        <PlatSyncSummaryModal
+          open={platSyncModalOpen}
+          stats={platSyncSummary}
+          issueKey={issue.key}
+          warnings={platSyncWarnings}
+          onClose={() => setPlatSyncModalOpen(false)}
+        />
+      )}
       <div className="resultsBarWrap">
         <div className="resultsBarGrid">
           <div className="resultsBarLeft">
@@ -1737,6 +1932,22 @@ function ResultsPanel({
                   Creating… {platBulkProgress.done}/{platBulkProgress.total}
                 </span>
               )}
+              {(platBulkBusy || job.status === 'syncing_plat') && !platBulkProgress && (
+                <span className="platSyncProgressPill" role="status">
+                  Syncing PLAT
+                  {platSyncProgress ? (
+                    <>
+                      {' · '}
+                      {platSyncProgressPhaseLabel(platSyncProgress)}
+                      {platSyncProgressCounter(platSyncProgress)
+                        ? ` ${platSyncProgressCounter(platSyncProgress)}`
+                        : ''}
+                    </>
+                  ) : (
+                    ' in Jira…'
+                  )}
+                </span>
+              )}
               <button
                 type="button"
                 className="btnExport"
@@ -1749,7 +1960,7 @@ function ResultsPanel({
           </div>
         )}
         {findingsReady && platBulkErr && (
-          <div className="resultsPlatBulkErr small" role="alert">
+          <div className={`resultsPlatBulkErr small${platBulkErrIsWarn ? '' : ' resultsPlatBulkInfo'}`} role="status">
             {platBulkErr}
           </div>
         )}
@@ -2202,6 +2413,96 @@ function DashboardView({
 
 type Page = 'dashboard' | 'new'
 
+function HealthDot({ h }: { h: ComponentHealth }) {
+  const ok = h.status === 'ok'
+  const warn = h.status === 'no_workers'
+  const cls = ok ? 'healthDotOk' : warn ? 'healthDotWarn' : 'healthDotErr'
+  const label = ok ? 'OK' : warn ? 'No workers' : 'Error'
+  return (
+    <span className={`healthDot ${cls}`} title={h.detail ?? label}>
+      {label}
+      {h.workers && h.workers.length > 0 && (
+        <span className="healthWorkerCount"> ({h.workers.length})</span>
+      )}
+    </span>
+  )
+}
+
+function AboutModal({ open, onClose, info, loading }: {
+  open: boolean
+  onClose: () => void
+  info: AboutInfo | null
+  loading: boolean
+}) {
+  if (!open) return null
+  const backendPkgs = info?.packages ?? {}
+  const buildTime = __UI_BUILD_TIME__
+  const commitShort = info?.git_commit ? info.git_commit.slice(0, 8) : null
+  const components = info?.components
+  return (
+    <div className="modalOverlay" onClick={onClose}>
+      <div className="modalBox aboutModalBox" onClick={(e) => e.stopPropagation()}>
+        <div className="modalHeader">
+          <span className="modalTitle">About CVE Portal</span>
+          <button className="modalClose" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="aboutBody">
+          {loading && <p className="muted small">Loading…</p>}
+
+          {/* ── Version hero ── */}
+          <div className="aboutVersionHero">
+            <span className="aboutVersionNumber">v{info?.portal_version ?? __UI_VERSION__}</span>
+            {commitShort && (
+              <code className="aboutCommitBadge">{commitShort}</code>
+            )}
+          </div>
+
+          {/* ── Component health ── */}
+          {components && (
+            <section className="aboutSection">
+              <h4 className="aboutSectionTitle">Components</h4>
+              <table className="aboutTable">
+                <tbody>
+                  <tr><td>PostgreSQL</td><td><HealthDot h={components.postgres} /></td></tr>
+                  <tr><td>Redis</td><td><HealthDot h={components.redis} /></td></tr>
+                  <tr><td>Celery worker</td><td><HealthDot h={components.celery_worker} /></td></tr>
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {/* ── Frontend ── */}
+          <section className="aboutSection">
+            <h4 className="aboutSectionTitle">Frontend</h4>
+            <table className="aboutTable">
+              <tbody>
+                <tr><td>Build time</td><td>{new Date(buildTime).toLocaleString()}</td></tr>
+                <tr><td>React</td><td>{__REACT_VERSION__}</td></tr>
+                <tr><td>TypeScript</td><td>{__TS_VERSION__}</td></tr>
+                <tr><td>Vite</td><td>{__VITE_VERSION__}</td></tr>
+              </tbody>
+            </table>
+          </section>
+
+          {/* ── Backend packages ── */}
+          {info && (
+            <section className="aboutSection">
+              <h4 className="aboutSectionTitle">Backend (Python {info.python_version})</h4>
+              <table className="aboutTable">
+                <tbody>
+                  {Object.entries(backendPkgs).map(([name, ver]) => (
+                    <tr key={name}><td>{name}</td><td>{ver}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [page, setPage]               = useState<Page>('dashboard')
   const [issueKey, setIssueKey]       = useState('')
@@ -2214,6 +2515,22 @@ function App() {
   const [commentPosted, setCommentPosted] = useState(false)
   const [viewMode, setViewMode]       = useState<'ticket' | 'results'>('ticket')
   const [slaToolbarOpen, setSlaToolbarOpen] = useState(false)
+  const [aboutOpen, setAboutOpen]     = useState(false)
+  const [aboutInfo, setAboutInfo]     = useState<AboutInfo | null>(null)
+  const [aboutLoading, setAboutLoading] = useState(false)
+
+  const openAbout = useCallback(async () => {
+    setAboutOpen(true)
+    if (aboutInfo) return
+    setAboutLoading(true)
+    try {
+      setAboutInfo(await apiGetAbout())
+    } catch {
+      // non-fatal
+    } finally {
+      setAboutLoading(false)
+    }
+  }, [aboutInfo])
 
   const closeSlaModal = useCallback(() => setSlaToolbarOpen(false), [])
 
@@ -2408,10 +2725,12 @@ function App() {
         <div className="topNavLinks">
           <a className="topNavLink" href="https://nvd.nist.gov/" target="_blank" rel="noreferrer">NVD ↗</a>
           <a className="topNavLink" href="https://plainid.atlassian.net/jira/projects" target="_blank" rel="noreferrer">Jira ↗</a>
+          <button type="button" className="topNavLink topNavLinkBtn" onClick={() => void openAbout()}>About</button>
         </div>
       </header>
 
       <ToolbarSlaModal open={slaToolbarOpen} onClose={closeSlaModal} />
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} info={aboutInfo} loading={aboutLoading} />
 
       {/* ── Main content ── */}
       <main className="mainContent">
@@ -2440,7 +2759,7 @@ function App() {
               </div>
             )}
 
-            {issue && (
+            {issue && !showResults && (
               <div className="pageHeader">
                 <div className="lookupCard">
                   <input

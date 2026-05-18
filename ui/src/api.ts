@@ -99,6 +99,34 @@ export type JobResult = {
   sla_anchor_issue_key?: string | null
   /** Set when some Jira writes during PLAT sync fail (partial success). */
   _plat_sync_errors?: string[] | null
+  /** In-flight progress while status is syncing_plat (polled from result_json). */
+  _plat_sync_progress?: {
+    phase: string
+    phase_current?: number
+    phase_total?: number
+    phase_index?: number
+    phase_count?: number
+    /** @deprecated Legacy cumulative counter — prefer phase_current/phase_total */
+    current?: number
+    /** @deprecated Legacy cumulative counter — prefer phase_current/phase_total */
+    total?: number
+  } | null
+  /** Counters from the last Sync PLAT run. */
+  _plat_sync_stats?: {
+    tickets_refreshed: number
+    fields_read: number
+    label_date_checked?: number
+    label_date_updated?: number
+    labels_added?: number
+    duedates_updated?: number
+    links_checked?: number
+    links_created?: number
+    // legacy (pre-accurate-stats) — may be present on old stored runs
+    label_date_pushed?: number
+    linked?: number
+  } | null
+  /** Cumulative link counters from process_issue. */
+  _plat_link_counts?: { links_checked?: number; links_created?: number; errors: string[] } | null
 }
 
 export type JobResponse = {
@@ -229,8 +257,8 @@ export function ticketStatusForSummary(s: IssueCveStatusSummary): DashboardTicke
 }
 
 export type CreatePlatResponse =
-  | { exists: true; keys: string[] }
-  | { exists: false; key: string; summary?: string }
+  | { exists: true; keys: string[]; link_warnings?: string[] }
+  | { exists: false; key: string; summary?: string; link_warnings?: string[] }
 
 export function formatStatus(status?: string | null): string {
   if (!status) return ''
@@ -314,6 +342,24 @@ export type ClientConfig = {
 
 export async function apiGetClientConfig(): Promise<ClientConfig> {
   return apiGet<ClientConfig>('/api/config/client')
+}
+
+export type ComponentHealth = { status: 'ok' | 'error' | 'no_workers'; detail?: string; workers?: string[] }
+
+export type AboutInfo = {
+  portal_version: string
+  git_commit: string
+  python_version: string
+  packages: Record<string, string>
+  components: {
+    postgres: ComponentHealth
+    redis: ComponentHealth
+    celery_worker: ComponentHealth
+  }
+}
+
+export async function apiGetAbout(): Promise<AboutInfo> {
+  return apiGet<AboutInfo>('/api/about')
 }
 
 /** Remove all `processing_runs` rows for this Jira key from the database. */

@@ -1,4 +1,7 @@
+import importlib.metadata
 import json
+import os
+import sys
 import uuid
 from datetime import UTC, datetime
 
@@ -129,6 +132,22 @@ class CreatePlatIn(BaseModel):
         return out
 
 
+def _link_plat_keys_to_parent(
+    jira: "JiraClient",
+    plat_keys: list[str],
+    source_issue_key: str | None,
+) -> list[str]:
+    """Link each PLAT key to the source PLATFORM issue; return any non-fatal warnings."""
+    warnings: list[str] = []
+    if not source_issue_key or not plat_keys:
+        return warnings
+    for plat_key in plat_keys:
+        result = jira.ensure_plat_linked_to_parent(plat_key, source_issue_key)
+        if result.error_warning:
+            warnings.append(result.error_warning)
+    return warnings
+
+
 @app.post("/api/plat")
 def create_plat_ticket(payload: CreatePlatIn):
     jira = JiraClient()
@@ -138,7 +157,11 @@ def create_plat_ticket(payload: CreatePlatIn):
             payload.image_basename.strip(),
         )
         if existing:
-            return {"exists": True, "keys": existing}
+            warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
+            out: dict = {"exists": True, "keys": existing}
+            if warnings:
+                out["link_warnings"] = warnings
+            return out
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_security_vulnerability(
             payload.cve_id.strip(),
@@ -152,7 +175,11 @@ def create_plat_ticket(payload: CreatePlatIn):
         )
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
-        return {"exists": False, "key": key}
+        warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
+        out = {"exists": False, "key": key}
+        if warnings:
+            out["link_warnings"] = warnings
+        return out
     except httpx.HTTPStatusError as e:
         detail = e.response.text if e.response is not None else str(e)
         raise HTTPException(status_code=400, detail=detail) from e
@@ -170,7 +197,11 @@ def create_plat_bug_ticket(payload: CreatePlatIn):
         image_basename = payload.image_basename.strip()
         existing = jira.find_plat_bug_for_image(cve_id, image_basename)
         if existing:
-            return {"exists": True, "keys": existing}
+            warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
+            out: dict = {"exists": True, "keys": existing}
+            if warnings:
+                out["link_warnings"] = warnings
+            return out
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_bug(
             cve_id,
@@ -188,7 +219,11 @@ def create_plat_bug_ticket(payload: CreatePlatIn):
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
         summary = f"[{cve_id}] - [{image_basename}]"
-        return {"exists": False, "key": key, "summary": summary}
+        warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
+        out = {"exists": False, "key": key, "summary": summary}
+        if warnings:
+            out["link_warnings"] = warnings
+        return out
     except httpx.HTTPStatusError as e:
         detail = e.response.text if e.response is not None else str(e)
         raise HTTPException(status_code=400, detail=detail) from e
@@ -353,6 +388,85 @@ def delete_processing_runs_for_issue(issue_key: str):
         )
         db.commit()
     return {"ok": True, "deleted_count": n}
+
+
+def _pkg_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "n/a"
+
+
+def _read_version_file() -> str:
+    """Read VERSION file baked into the image, fallback to env, then 'dev'."""
+    for path in ["/app/VERSION", os.path.join(os.path.dirname(__file__), "..", "..", "VERSION")]:
+        try:
+            with open(path) as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        except OSError:
+            pass
+    return os.environ.get("APP_VERSION", "dev")
+
+
+def _probe_postgres() -> dict:
+    from sqlalchemy import text
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)[:200]}
+
+
+def _probe_redis() -> dict:
+    import redis as redis_lib
+    try:
+        r = redis_lib.Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+        r.ping()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)[:200]}
+
+
+def _probe_celery() -> dict:
+    from worker.app.celery_app import celery_app as _celery
+    try:
+        resp = _celery.control.inspect(timeout=2).ping()
+        if resp:
+            workers = list(resp.keys())
+            return {"status": "ok", "workers": workers}
+        return {"status": "no_workers"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)[:200]}
+
+
+@app.get("/api/about")
+def about():
+    """Return component versions, build info, and live health for the About dialog."""
+    app_version = os.environ.get("APP_VERSION", "") or _read_version_file()
+    git_commit = os.environ.get("GIT_COMMIT", "")
+    return {
+        "portal_version": app_version,
+        "git_commit": git_commit,
+        "python_version": sys.version.split()[0],
+        "packages": {
+            "fastapi": _pkg_version("fastapi"),
+            "uvicorn": _pkg_version("uvicorn"),
+            "pydantic": _pkg_version("pydantic"),
+            "sqlalchemy": _pkg_version("sqlalchemy"),
+            "celery": _pkg_version("celery"),
+            "redis": _pkg_version("redis"),
+            "httpx": _pkg_version("httpx"),
+            "pdfplumber": _pkg_version("pdfplumber"),
+        },
+        "components": {
+            "postgres": _probe_postgres(),
+            "redis": _probe_redis(),
+            "celery_worker": _probe_celery(),
+        },
+    }
 
 
 class CustomerSlaCreateIn(BaseModel):

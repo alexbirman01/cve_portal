@@ -534,7 +534,7 @@ a.btn {
 
 .cveTable th {
   text-align: left;
-  padding: 6px 6px;
+  padding: 6px 10px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -546,7 +546,7 @@ a.btn {
 }
 
 .cveTable td {
-  padding: 8px 6px;
+  padding: 8px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
   /* Center CVE-level cells in tall rows; PLAT columns override with top (see .plat*Cell) */
   vertical-align: middle;
@@ -792,7 +792,7 @@ button.platCreateBugPill:disabled:hover {
 
 .cveTable td.platTicketCell {
   vertical-align: top;
-  padding: 12px 10px;
+  padding: 12px 0;
 }
 
 .platTicketCell {
@@ -813,8 +813,8 @@ button.platCreateBugPill:disabled:hover {
 
 .cveTable td.platColCell {
   vertical-align: top;
-  /* Match PLAT fix/tag cells so strip rhythm lines up across columns */
-  padding: 12px 10px;
+  /* Strip inner padding (0.6rem) already aligns with th's 10px — no extra cell padding needed */
+  padding: 12px 0;
 }
 
 /* Plain vertical stack (same idea as .platSyncStack — no inner table/card chrome) */
@@ -1427,6 +1427,154 @@ button.platCreateBugPill:disabled:hover {
   margin: 0;
   max-width: none;
   word-break: break-word;
+}
+
+.resultsPlatBulkErr.resultsPlatBulkInfo {
+  color: #4ade80;
+}
+
+.platSyncProgressPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+}
+
+.platSyncProgressPhase {
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 400;
+}
+
+/* ─── Sync summary modal ─────────────────────────────────────────────────── */
+
+.platSyncModalBox {
+  width: 580px;
+}
+
+.platSyncModalIssueKey {
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 400;
+}
+
+.platSyncModalBody {
+  padding: 0 0 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.platSyncModalTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.platSyncModalTable thead tr {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.platSyncModalTable th {
+  padding: 9px 14px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: rgba(255, 255, 255, 0.38);
+  white-space: nowrap;
+}
+
+.platSyncModalTable th:nth-child(3),
+.platSyncModalTable th:nth-child(4) {
+  text-align: right;
+}
+
+.platSyncModalTable td {
+  padding: 10px 14px;
+  vertical-align: middle;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.platSyncModalTable tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.platSyncModalTable tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.platSyncModalStep {
+  color: rgba(255, 255, 255, 0.28);
+  font-size: 11px;
+  width: 24px;
+  padding-right: 0;
+}
+
+.platSyncModalOperation {
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.platSyncModalNum {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+  width: 64px;
+}
+
+.platSyncModalChanged {
+  color: rgba(255, 255, 255, 0.88);
+  font-weight: 600;
+}
+
+.platSyncModalDetails {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+}
+
+.platSyncModalWarnings {
+  margin: 4px 14px 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.06);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.platSyncModalWarningsTitle {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(251, 191, 36, 0.85);
+  margin-bottom: 6px;
+}
+
+.platSyncModalWarningsList {
+  margin: 0;
+  padding: 0 0 0 16px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.platSyncModalFooter {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 18px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  flex-shrink: 0;
 }
 
 .resultsFilterSearchWrap {
@@ -2074,3 +2222,173 @@ button.platCreateBugPill:disabled:hover {
 .muted  { opacity: 0.6; }
 .mono   { font-family: ui-monospace, monospace; font-size: 12.5px; }
 .small  { font-size: 12px; }
+
+/* ─── modal shared ───────────────────────────────────────────────────────── */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modalBox {
+  background: #1e2130;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+  min-width: 340px;
+  max-width: 90vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+}
+
+.modalTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.9);
+}
+
+.modalClose {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.4);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.modalClose:hover {
+  color: rgba(255,255,255,0.85);
+  background: rgba(255,255,255,0.07);
+}
+
+/* ─── About modal ────────────────────────────────────────────────────────── */
+.topNavLinkBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.aboutModalBox {
+  width: 480px;
+}
+
+.aboutBody {
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.aboutSection {}
+
+.aboutSectionTitle {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.35);
+  margin: 0 0 8px;
+}
+
+.aboutTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aboutTable td {
+  padding: 4px 6px;
+  color: rgba(255,255,255,0.8);
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.aboutTable td:first-child {
+  color: rgba(255,255,255,0.45);
+  width: 140px;
+  padding-right: 12px;
+}
+
+.aboutTable tr:last-child td {
+  border-bottom: none;
+}
+
+.aboutTable code {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  background: rgba(255,255,255,0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.aboutVersionHero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0 4px;
+}
+
+.aboutVersionNumber {
+  font-size: 26px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.92);
+  letter-spacing: -0.5px;
+}
+
+.aboutCommitBadge {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.5);
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.03em;
+}
+
+.healthDot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.healthDotOk {
+  background: rgba(52, 199, 89, 0.15);
+  color: #34c759;
+}
+
+.healthDotWarn {
+  background: rgba(255, 159, 10, 0.15);
+  color: #ff9f0a;
+}
+
+.healthDotErr {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff453a;
+}
+
+.healthWorkerCount {
+  opacity: 0.7;
+  font-weight: 400;
+}

@@ -8,6 +8,7 @@ from typing import Any
 from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient, PlatTicket
+from api.app.plat_linking import plat_keys_to_link_for_row, plat_tickets_for_row
 from api.app.models import CveCache, CustomerSla, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
@@ -22,6 +23,65 @@ def _set_run_status(run_id: str, status: str) -> None:
             run.status = status
             db.add(run)
             db.commit()
+
+
+_PLAT_SYNC_PHASE_COUNT = 4
+
+
+def _write_plat_sync_progress(
+    run_id: str,
+    *,
+    phase: str,
+    phase_current: int,
+    phase_total: int,
+    phase_index: int,
+) -> None:
+    """Persist in-flight PLAT sync progress into result_json for UI polling."""
+    rid = uuid.UUID(run_id)
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return
+        data = json.loads(run.result_json)
+        data["_plat_sync_progress"] = {
+            "phase": phase,
+            "phase_current": phase_current,
+            "phase_total": max(phase_total, 1),
+            "phase_index": phase_index,
+            "phase_count": _PLAT_SYNC_PHASE_COUNT,
+        }
+        run.result_json = json.dumps(data)
+        db.add(run)
+        db.commit()
+
+
+class _SyncProgressReporter:
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
+        self.phase = "Starting"
+        self.phase_current = 0
+        self.phase_total = 1
+        self.phase_index = 0
+
+    def set_phase(self, phase: str, phase_total: int, phase_index: int) -> None:
+        self.phase = phase
+        self.phase_total = max(phase_total, 1)
+        self.phase_current = 0
+        self.phase_index = phase_index
+        self._flush()
+
+    def bump(self) -> None:
+        self.phase_current += 1
+        self._flush()
+
+    def _flush(self) -> None:
+        _write_plat_sync_progress(
+            self._run_id,
+            phase=self.phase,
+            phase_current=self.phase_current,
+            phase_total=self.phase_total,
+            phase_index=self.phase_index,
+        )
 
 
 def _img_tokens(img_name: str) -> list[str]:
@@ -215,6 +275,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         _set_run_status(run_id, "looking_up_plat_tickets")
         cve_to_plat: dict[str, list[dict]] = {}
         cve_to_plat_security_by_image: dict[str, dict[str, list[str]]] = {}
+        cve_to_plat_bugs: dict[str, list[dict[str, str]]] = {}
         try:
             for cve_id in cve_ids:
                 try:
@@ -230,9 +291,11 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                             continue
                         by_img.setdefault(img, []).append(item["key"])
                     cve_to_plat_security_by_image[cve_id] = by_img
+                    cve_to_plat_bugs[cve_id] = jira.search_plat_bugs_for_cve(cve_id)
                 except Exception:
                     cve_to_plat[cve_id] = []
                     cve_to_plat_security_by_image[cve_id] = {}
+                    cve_to_plat_bugs[cve_id] = []
         finally:
             jira.close()
 
@@ -367,6 +430,16 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 t["key"] for t in raw_plat if t["issue_type"] == "Security Vulnerability"
             ]
             plat_security_for_images = dict(cve_to_plat_security_by_image.get(cve_id, {}))
+            row_for_plat = {
+                "cve_id": cve_id,
+                "affected_images": [{"image": i["image"], "tag": i["tag"]} for i in imgs],
+            }
+            plat_tickets = plat_tickets_for_row(
+                cve_id,
+                raw_plat,
+                row_for_plat,
+                cve_to_plat_bugs.get(cve_id),
+            )
 
             cve_rows.append(
                 {
@@ -385,7 +458,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "all_packages": all_packages,
                     "plat_security_keys": plat_security_keys,
                     "plat_security_for_images": plat_security_for_images,
-                    "plat_tickets":  _filter_plat_tickets(raw_plat, imgs),
+                    "plat_tickets": plat_tickets,
                     "sources": list(
                         {c.source for c in desc_cves if c.cve_id == cve_id}
                         | {c["source"] for p in parsed_attachments for c in p["cves"] if c["cve_id"] == cve_id}
@@ -416,6 +489,14 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 rows_by_customer_lower,
             )
 
+        link_counts: dict[str, Any] = {"links_checked": 0, "links_created": 0, "errors": []}
+        if issue.key:
+            _jira_link = JiraClient()
+            try:
+                link_counts = _link_plat_rows(_jira_link, cve_rows, issue.key)
+            finally:
+                _jira_link.close()
+
         result = {
             "issue_key": issue.key,
             "sla_anchor_issue_key": issue.key,
@@ -427,6 +508,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             + [c for p in parsed_attachments for c in p["cves"]],
             "attachments": parsed_attachments,
             "images": images,
+            "_plat_link_counts": link_counts,
         }
     except Exception as e:
         _set_run_status(run_id, f"failed: {type(e).__name__}")
@@ -441,6 +523,48 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             db.commit()
 
     return result
+
+
+def _do_link(
+    jira: JiraClient,
+    plat_key: str,
+    source_issue_key: str,
+    seen: set[str],
+    counts: dict[str, Any],
+) -> None:
+    """Link plat_key to source_issue_key once, recording checked vs created in counts."""
+    pk = (plat_key or "").strip().upper()
+    if not pk or pk in seen:
+        return
+    seen.add(pk)
+    result = jira.ensure_plat_linked_to_parent(pk, source_issue_key)
+    counts["links_checked"] += 1
+    if result.created:
+        counts["links_created"] += 1
+    elif result.error_warning:
+        counts["errors"].append(result.error_warning)
+
+
+def _link_plat_rows(
+    jira: JiraClient,
+    cve_rows: list[dict[str, Any]],
+    source_issue_key: str,
+    *,
+    progress: _SyncProgressReporter | None = None,
+) -> dict[str, Any]:
+    """
+    Link PLAT tickets to source_issue_key for each extracted CVE+image basename
+    (same logic as Create PLAT API: find_plat_*_for_image).
+    Returns counts: {"links_checked": N, "links_created": N, "errors": [...]}
+    """
+    counts: dict[str, Any] = {"links_checked": 0, "links_created": 0, "errors": []}
+    seen: set[str] = set()
+    for row in cve_rows:
+        for pk in plat_keys_to_link_for_row(jira, row):
+            _do_link(jira, pk, source_issue_key, seen, counts)
+            if progress:
+                progress.bump()
+    return counts
 
 
 def _plat_sec_keys_for_row(row: dict[str, Any]) -> set[str]:
@@ -469,6 +593,7 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             if not run or not run.result_json:
                 raise ValueError("run has no stored result")
             result = json.loads(run.result_json)
+            source_issue_key: str = (run.issue_key or "").strip()
         cve_rows: list[dict[str, Any]] = result.get("cve_rows") or []
         if not cve_rows:
             with db_session() as db:
@@ -482,14 +607,27 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
         jira = JiraClient()
         plat_meta: dict[str, dict[str, Any]] = {}
         sync_errors: list[str] = []
+        progress = _SyncProgressReporter(run_id)
+        stats: dict[str, Any] = {
+            "tickets_refreshed": 0,    # CVE rows whose PLAT tickets were re-queried from Jira
+            "fields_read": 0,          # Security Vuln keys whose fix/tag fields were fetched
+            "label_date_checked": 0,   # Security Vuln keys checked for label/duedate
+            "label_date_updated": 0,   # of those: actually had a label added or duedate changed
+            "labels_added": 0,
+            "duedates_updated": 0,
+            "links_checked": 0,        # PLAT tickets checked for PLATFORM link
+            "links_created": 0,        # of those: a new link was created
+        }
         try:
+            refresh_rows = [row for row in cve_rows if row.get("cve_id")]
+            progress.set_phase("Refreshing PLAT tickets", len(refresh_rows), 1)
+
             # Re-query Jira for PLAT links. Stored result_json does not include tickets created from the UI
             # until we refresh — otherwise "Sync PLAT" would drop them when saving.
-            for row in cve_rows:
+            for row in refresh_rows:
                 cve_id = row.get("cve_id")
                 if not cve_id:
                     continue
-                imgs = _affected_imgs_for_cve_row(row)
                 try:
                     tickets: list[PlatTicket] = jira.search_plat_tickets(str(cve_id))
                     raw_plat = [
@@ -506,13 +644,28 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                         t["key"] for t in raw_plat if t["issue_type"] == "Security Vulnerability"
                     ]
                     row["plat_security_for_images"] = by_img
-                    row["plat_tickets"] = _filter_plat_tickets(raw_plat, imgs)
+                    bug_items = jira.search_plat_bugs_for_cve(str(cve_id))
+                    row["plat_tickets"] = plat_tickets_for_row(str(cve_id), raw_plat, row, bug_items)
+                    stats["tickets_refreshed"] += 1
                 except Exception as ex:
                     sync_errors.append(f"{cve_id} plat refresh: {ex}")
+                progress.bump()
 
             all_keys: set[str] = set()
             for row in cve_rows:
                 all_keys |= _plat_sec_keys_for_row(row)
+
+            link_key_count = 0
+            if source_issue_key:
+                link_seen: set[str] = set()
+                for row in cve_rows:
+                    for pk in plat_keys_to_link_for_row(jira, row):
+                        ku = pk.strip().upper()
+                        if ku and ku not in link_seen:
+                            link_seen.add(ku)
+                            link_key_count += 1
+
+            progress.set_phase("Reading fix/tag from Jira", len(all_keys), 2)
 
             key_to_rows: dict[str, list[dict[str, Any]]] = {}
             for row in cve_rows:
@@ -523,7 +676,10 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 m = jira.get_issue_platsync_fields(pk)
                 if m:
                     plat_meta[pk] = m
+                    stats["fields_read"] += 1
+                progress.bump()
 
+            progress.set_phase("Syncing label and due date", len(all_keys), 3)
             for pk in sorted(all_keys):
                 rows_for = key_to_rows.get(pk) or []
                 sla_dates = [r.get("sla_due_date") for r in rows_for if r.get("sla_due_date")]
@@ -534,9 +690,17 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                         if best is None or s < best:
                             best = s
                 try:
-                    jira.ensure_plat_security_issue_sync(pk, best)
+                    write_result = jira.ensure_plat_security_issue_sync(pk, best)
+                    stats["label_date_checked"] += 1
+                    if write_result.any_change:
+                        stats["label_date_updated"] += 1
+                    if write_result.label_added:
+                        stats["labels_added"] += 1
+                    if write_result.duedate_updated:
+                        stats["duedates_updated"] += 1
                 except Exception as ex:
                     sync_errors.append(f"{pk}: {ex}")
+                progress.bump()
 
             for row in cve_rows:
                 row.pop("plat_app_fix_versions", None)
@@ -556,6 +720,17 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                     row["plat_security_field_sync"] = sync_map
                 else:
                     row.pop("plat_security_field_sync", None)
+
+            if source_issue_key:
+                progress.set_phase("Linking to PLATFORM", max(link_key_count, 1), 4)
+                link_counts = _link_plat_rows(
+                    jira, cve_rows, source_issue_key, progress=progress
+                )
+                stats["links_checked"] = link_counts["links_checked"]
+                stats["links_created"] = link_counts["links_created"]
+                if link_counts["errors"]:
+                    sync_errors.extend(link_counts["errors"])
+
         finally:
             jira.close()
 
@@ -563,6 +738,8 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             result["_plat_sync_errors"] = sync_errors
         else:
             result.pop("_plat_sync_errors", None)
+        result.pop("_plat_sync_progress", None)
+        result["_plat_sync_stats"] = stats
         result["cve_rows"] = cve_rows
         with db_session() as db:
             run = db.get(ProcessingRun, rid)

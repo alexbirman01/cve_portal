@@ -14,6 +14,34 @@ from api.app.plat_organization_labels import plat_organization_name_allowed
 from api.app.sla_commitment import parse_jira_created
 
 
+@dataclass
+class PlatSyncWriteResult:
+    """Outcome of ensure_plat_security_issue_sync for one ticket."""
+
+    label_added: bool = False
+    duedate_updated: bool = False
+
+    @property
+    def any_change(self) -> bool:
+        return self.label_added or self.duedate_updated
+
+
+@dataclass
+class PlatLinkResult:
+    """Outcome of ensure_plat_linked_to_parent for one ticket."""
+
+    status: str = "already_linked"  # "already_linked" | "created" | "error"
+    warning: str | None = None
+
+    @property
+    def created(self) -> bool:
+        return self.status == "created"
+
+    @property
+    def error_warning(self) -> str | None:
+        return self.warning if self.status == "error" else None
+
+
 def _jira_fix_versions_display(raw: Any) -> str:
     if not raw or not isinstance(raw, list):
         return ""
@@ -1153,6 +1181,28 @@ class JiraClient:
         err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
         raise RuntimeError(f"Jira could not add labels to {key}: {err}")
 
+    def set_issue_components(self, issue_key: str, component_names: list[str]) -> None:
+        """Set issue components via PUT fields.components (replaces current components)."""
+        key = (issue_key or "").strip()
+        names = [n.strip() for n in component_names if n and str(n).strip()]
+        if not key or not names:
+            return
+        body: dict[str, Any] = {
+            "fields": {"components": [{"name": n} for n in names]},
+        }
+        headers = {**self._headers, "Content-Type": "application/json"}
+        put_urls = [
+            f"{self._base}/rest/api/3/issue/{key}",
+            f"{self._base}/rest/api/2/issue/{key}",
+        ]
+        last: httpx.Response | None = None
+        for put_url in put_urls:
+            last = self._client.put(put_url, json=body, headers=headers)
+            if last.is_success:
+                return
+        err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
+        raise RuntimeError(f"Jira could not set components on {key}: {err}")
+
     def get_issue_platsync_fields(self, issue_key: str) -> dict[str, Any]:
         """Read fixVersions, tag CF, labels, duedate, issuetype for PLAT↔portal sync."""
         key = (issue_key or "").strip()
@@ -1181,21 +1231,28 @@ class JiraClient:
                 continue
         return {}
 
-    def ensure_plat_security_issue_sync(self, issue_key: str, desired_duedate_iso: str | None) -> None:
-        """For PLAT Security Vulnerability: add CVE label; set or tighten SLA duedate (never relax)."""
+    def ensure_plat_security_issue_sync(
+        self, issue_key: str, desired_duedate_iso: str | None
+    ) -> "PlatSyncWriteResult":
+        """
+        For PLAT Security Vulnerability: add CVE label; set or tighten SLA duedate (never relax).
+        Returns a PlatSyncWriteResult describing what was actually changed.
+        """
         meta = self.get_issue_platsync_fields(issue_key)
         if not meta:
-            return
+            return PlatSyncWriteResult()
         it = (meta.get("issuetype") or "").strip()
         want_type = (settings.jira_plat_issuetype_name or "").strip()
         if want_type and it.casefold() != want_type.casefold():
-            return
+            return PlatSyncWriteResult()
+        result = PlatSyncWriteResult()
         labels = [str(x) for x in (meta.get("labels") or [])]
         if "CVE" not in labels:
             self._issue_add_labels_via_update(issue_key, ["CVE"])
+            result.label_added = True
         dd = _jira_duedate_str(desired_duedate_iso)
         if not dd:
-            return
+            return result
         cur_raw = meta.get("duedate")
         cur_norm = (
             _jira_duedate_str(str(cur_raw).strip())
@@ -1203,7 +1260,7 @@ class JiraClient:
             else None
         )
         if cur_norm is not None and dd >= cur_norm:
-            return
+            return result
         headers = {**self._headers, "Content-Type": "application/json"}
         body = {"fields": {"duedate": dd}}
         last: httpx.Response | None = None
@@ -1213,7 +1270,8 @@ class JiraClient:
         ):
             last = self._client.put(put_url, json=body, headers=headers)
             if last.is_success:
-                return
+                result.duedate_updated = True
+                return result
         err = (last.text if last is not None else "") or "unknown error"
         raise RuntimeError(f"Jira could not set duedate on {issue_key}: {err}")
 
@@ -1354,11 +1412,88 @@ class JiraClient:
         if dd:
             base_fields["duedate"] = dd
 
-        return self._create_plat_issue_with_organization(
+        comp = (settings.jira_plat_bug_component_name or "").strip()
+        if comp:
+            base_fields["components"] = [{"name": comp}]
+
+        key = self._create_plat_issue_with_organization(
             base_fields,
             organization_refs=organization_refs,
             source_issue_key=source_issue_key,
         )
+        if comp and key:
+            try:
+                self.set_issue_components(key, [comp])
+            except Exception:
+                pass
+        return key
+
+    def create_issue_link(
+        self,
+        inward_key: str,
+        outward_key: str,
+        link_type_name: str = "Relates",
+    ) -> None:
+        """Create a Jira issue link between two tickets (e.g. PLATFORM → PLAT)."""
+        url = f"{self._base}/rest/api/3/issueLink"
+        payload: dict[str, Any] = {
+            "type": {"name": link_type_name},
+            "inwardIssue": {"key": inward_key},
+            "outwardIssue": {"key": outward_key},
+        }
+        headers = {**self._headers, "Content-Type": "application/json"}
+        r = self._client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+
+    def _existing_issue_link_keys(self, issue_key: str) -> set[str]:
+        """Return issue keys already linked to `issue_key` (any direction, any type)."""
+        url = f"{self._base}/rest/api/3/issue/{issue_key}"
+        try:
+            r = self._client.get(url, params={"fields": "issuelinks"}, headers=self._headers)
+            r.raise_for_status()
+            links = (r.json().get("fields") or {}).get("issuelinks") or []
+            keys: set[str] = set()
+            for lnk in links:
+                ii = lnk.get("inwardIssue") or {}
+                oi = lnk.get("outwardIssue") or {}
+                if ii.get("key"):
+                    keys.add(str(ii["key"]).strip().upper())
+                if oi.get("key"):
+                    keys.add(str(oi["key"]).strip().upper())
+            return keys
+        except Exception:
+            return set()
+
+    def ensure_plat_linked_to_parent(
+        self,
+        plat_key: str,
+        source_issue_key: str | None,
+    ) -> "PlatLinkResult":
+        """
+        Idempotently link `plat_key` to `source_issue_key` (PLATFORM → PLAT direction).
+        Returns a PlatLinkResult describing the outcome.
+        """
+        if not settings.jira_plat_link_to_parent_on_create:
+            return PlatLinkResult(status="already_linked")
+        src = (source_issue_key or "").strip()
+        plat = (plat_key or "").strip()
+        if not src or not plat or src.upper() == plat.upper():
+            return PlatLinkResult(status="already_linked")
+        try:
+            existing = self._existing_issue_link_keys(plat)
+            if src.upper() in existing:
+                return PlatLinkResult(status="already_linked")
+            self.create_issue_link(src, plat, link_type_name=settings.jira_plat_parent_link_type_name)
+        except Exception as exc:
+            msg = str(exc)
+            # Jira returns 400 when the link already exists; treat as success.
+            if "already" in msg.lower() or "duplicate" in msg.lower():
+                return PlatLinkResult(status="already_linked")
+            return PlatLinkResult(
+                status="error",
+                warning=f"Linked ticket warning: could not link {plat} to {src}: {msg}",
+            )
+        return PlatLinkResult(status="created")
 
     def download_attachment(self, content_url: str) -> bytes:
         r = self._client.get(content_url)
