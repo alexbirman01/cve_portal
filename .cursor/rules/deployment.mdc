@@ -1,0 +1,123 @@
+---
+description: Deployment commands and conventions for the CVE Portal (local dev + production K8s)
+alwaysApply: false
+---
+
+# Deployment
+
+## Environments
+
+| Environment | Command trigger | URL | Auth |
+|---|---|---|---|
+| Local dev | `docker compose up -d` | `http://localhost:8080` | none |
+| Production (K8s) | "deploy to prod" | `https://cve.ps-cluster.plainid.net` | basic auth |
+
+Both environments share the same external RDS (`alexb-persistent-mat-view.cmo3hixnsmm5.us-east-1.rds.amazonaws.com`).
+
+---
+
+## "Deploy to prod" — full workflow
+
+When asked to deploy to prod, run ALL of the following steps in order:
+
+### 1. Build images (linux/amd64 — EKS cluster is x86_64, Mac is arm64)
+
+```bash
+VERSION=$(cat VERSION)
+GIT_COMMIT=$(git rev-parse --short HEAD)
+
+docker build \
+  --platform linux/amd64 \
+  --build-arg GIT_COMMIT=$GIT_COMMIT \
+  --build-arg APP_VERSION=$VERSION \
+  -t psplainid/cve-portal:$VERSION \
+  -t psplainid/cve-portal:latest \
+  -f api/Dockerfile .
+
+docker build \
+  --platform linux/amd64 \
+  --build-arg GIT_COMMIT=$GIT_COMMIT \
+  --build-arg APP_VERSION=$VERSION \
+  -t psplainid/cve-worker:$VERSION \
+  -t psplainid/cve-worker:latest \
+  -f worker/Dockerfile .
+```
+
+### 2. Push to Docker Hub (`psplainid`)
+
+```bash
+docker push psplainid/cve-portal:$VERSION
+docker push psplainid/cve-portal:latest
+docker push psplainid/cve-worker:$VERSION
+docker push psplainid/cve-worker:latest
+```
+
+### 3. Deploy to K8s (Helm upgrade)
+
+```bash
+helm upgrade cve infra/helm/cve-portal \
+  --namespace cve \
+  -f infra/helm/cve-portal/values.secret.yaml \
+  --set image.portal.tag=$VERSION \
+  --set image.worker.tag=$VERSION
+```
+
+### 4. Verify
+
+```bash
+kubectl get pods -n cve
+curl -s -u "admin:d01phin!" https://cve.ps-cluster.plainid.net/health
+```
+
+---
+
+## Local dev
+
+```bash
+docker compose up -d          # start (uses RDS, local Redis)
+docker compose down           # stop
+docker compose logs portal    # check logs
+```
+
+Build context is always the **repo root** — both Dockerfiles rely on `api/`, `worker/`, `requirements.txt`, and `VERSION`.
+
+---
+
+## K8s — first-time install
+
+```bash
+helm dependency update infra/helm/cve-portal
+
+helm install cve infra/helm/cve-portal \
+  --namespace cve \
+  --create-namespace \
+  -f infra/helm/cve-portal/values.secret.yaml
+```
+
+Secret values file: `infra/helm/cve-portal/values.secret.yaml` (gitignored — copy from `values.secret.example.yaml`).
+
+---
+
+## Versioning
+
+### Production (`VERSION` file)
+
+Format: `1.YYWW.X`
+- `YY` — 2-digit year (e.g. `26` for 2026)
+- `WW` — 2-digit ISO week number (e.g. `21` for week 21)
+- `X` — incrementing release number within that week, starting at `1`
+
+Examples: `1.2621.1`, `1.2621.2`, `1.2622.1`
+
+Steps before "deploy to prod":
+1. Get current week: `date +"%y%V"` → e.g. `2621`
+2. If `VERSION` is already on this week, increment `X`; otherwise reset to `1`
+3. Update `VERSION` file, then proceed with build → push → helm upgrade
+
+### Local dev
+
+Local builds are **unversioned** — `docker compose build` always builds from current source.
+The `APP_VERSION` is set to `dev` in the local build (default in `docker-compose.yml`).
+Never push local dev images to Docker Hub.
+
+- AWS SSO token may need refresh before K8s commands: `aws sso login`

@@ -1019,6 +1019,19 @@ class JiraClient:
                         return True
         return False
 
+    def _plat_extra_base_fields(self) -> dict[str, Any]:
+        """Extra fields to include inline on PLAT issue create (account picker + team select)."""
+        extra: dict[str, Any] = {}
+        account_fid = (settings.jira_plat_cf_account_field_id or "").strip()
+        account_id = (settings.jira_plat_cf_account_id or "").strip()
+        team_fid = (settings.jira_plat_cf_team_field_id or "").strip()
+        team_val = (settings.jira_plat_cf_team_value or "").strip()
+        if account_fid and account_id:
+            extra[account_fid] = {"accountId": account_id}
+        if team_fid and team_val:
+            extra[team_fid] = {"value": team_val}
+        return extra
+
     def _delete_issue(self, issue_key: str) -> None:
         url = f"{self._base}/rest/api/3/issue/{issue_key}"
         r = self._client.delete(url, headers=self._headers)
@@ -1321,6 +1334,8 @@ class JiraClient:
         if dd:
             base_fields["duedate"] = dd
 
+        base_fields.update(self._plat_extra_base_fields())
+
         key = self._create_plat_issue_with_organization(
             base_fields,
             organization_refs=organization_refs,
@@ -1415,6 +1430,8 @@ class JiraClient:
         comp = (settings.jira_plat_bug_component_name or "").strip()
         if comp:
             base_fields["components"] = [{"name": comp}]
+
+        base_fields.update(self._plat_extra_base_fields())
 
         key = self._create_plat_issue_with_organization(
             base_fields,

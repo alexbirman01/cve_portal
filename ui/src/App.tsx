@@ -76,6 +76,19 @@ function SevBadge({ sev, score }: { sev?: string | null; score?: string | null }
 }
 
 
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+function formatSyncDate(iso?: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  const day = d.getDate()
+  const mon = MONTH_ABBR[d.getMonth()]
+  const yr = String(d.getFullYear()).slice(2)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${day}-${mon}-${yr} ${hh}:${mm}`
+}
+
 function StepList({ status }: { status?: string | null }) {
   const steps = statusSteps(status)
   return (
@@ -2087,7 +2100,9 @@ function ResultsPanel({
           <h1 className="resultsBarTitleMain">{issue.summary ?? '—'}</h1>
           <div className="resultsBarRight">
             {job.status === 'done' ? (
-              <span className="resultsDonePill">✓ Done</span>
+              <span className="resultsDonePill">
+                Last Sync: {formatSyncDate(job.updated_at)}
+              </span>
             ) : (
               <StatusBadge status={job.status} />
             )}
@@ -2484,11 +2499,19 @@ function DashboardView({
                   <summary className="dashIssueSummary">
                     <span className="dashIssueSummaryMain">
                       <span className="dashIssueKey mono">{s.issue_key}</span>
-                      <span className={dashTicketWorkflowPillClass(wf)} title="PLAT ticket workflow (last run)">
-                        {dashboardTicketStatusLabel(wf)}
-                      </span>
-                      {wf === 'processing' && (
-                        <StatusBadge status={s.run_status} />
+                      {wf === 'done' ? (
+                        <span className="resultsDonePill">
+                          Last Sync: {formatSyncDate(s.updated_at)}
+                        </span>
+                      ) : (
+                        <>
+                          <span className={dashTicketWorkflowPillClass(wf)} title="PLAT ticket workflow (last run)">
+                            {dashboardTicketStatusLabel(wf)}
+                          </span>
+                          {wf === 'processing' && (
+                            <StatusBadge status={s.run_status} />
+                          )}
+                        </>
                       )}
                       {s.cve_count != null && (
                         <span className="cvePill">{s.cve_count} CVE{s.cve_count !== 1 ? 's' : ''}</span>
@@ -2701,8 +2724,14 @@ function AboutModal({ open, onClose, info, loading }: {
               <h4 className="aboutSectionTitle">Components</h4>
               <table className="aboutTable">
                 <tbody>
-                  <tr><td>PostgreSQL</td><td><HealthDot h={components.postgres} /></td></tr>
-                  <tr><td>Redis</td><td><HealthDot h={components.redis} /></td></tr>
+                  <tr>
+                    <td>PostgreSQL</td>
+                    <td><HealthDot h={components.postgres} />{components.postgres.host ? <span className="aboutHost">{components.postgres.host}</span> : null}</td>
+                  </tr>
+                  <tr>
+                    <td>Redis</td>
+                    <td><HealthDot h={components.redis} />{components.redis.host ? <span className="aboutHost">{components.redis.host}</span> : null}</td>
+                  </tr>
                   <tr><td>Celery worker</td><td><HealthDot h={components.celery_worker} /></td></tr>
                 </tbody>
               </table>
@@ -2714,7 +2743,7 @@ function AboutModal({ open, onClose, info, loading }: {
             <h4 className="aboutSectionTitle">Frontend</h4>
             <table className="aboutTable">
               <tbody>
-                <tr><td>Build time</td><td>{new Date(buildTime).toLocaleString()}</td></tr>
+                <tr><td>Build time</td><td>{formatSyncDate(buildTime)}</td></tr>
                 <tr><td>React</td><td>{__REACT_VERSION__}</td></tr>
                 <tr><td>TypeScript</td><td>{__TS_VERSION__}</td></tr>
                 <tr><td>Vite</td><td>{__VITE_VERSION__}</td></tr>

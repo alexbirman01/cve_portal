@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func
 
@@ -458,6 +459,7 @@ def list_jobs_cve_status(limit: int = 50):
                 "run_status": r.status,
                 "ticket_status": ticket_status,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                 "cve_count": cve_count,
                 "needs_plat_cve_count": needs_plat,
                 "plat_keys": plat_keys,
@@ -504,24 +506,50 @@ def _read_version_file() -> str:
     return os.environ.get("APP_VERSION", "dev")
 
 
+def _pg_host() -> str:
+    """Extract host:port from the configured Postgres DSN."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.postgres_dsn)
+        host = parsed.hostname or ""
+        port = parsed.port
+        return f"{host}:{port}" if port else host
+    except Exception:
+        return ""
+
+
+def _redis_host() -> str:
+    """Extract host:port from the configured Redis URL."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.redis_url)
+        host = parsed.hostname or ""
+        port = parsed.port
+        return f"{host}:{port}" if port else host
+    except Exception:
+        return ""
+
+
 def _probe_postgres() -> dict:
     from sqlalchemy import text
+    host = _pg_host()
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"status": "ok"}
+        return {"status": "ok", "host": host}
     except Exception as exc:
-        return {"status": "error", "detail": str(exc)[:200]}
+        return {"status": "error", "host": host, "detail": str(exc)[:200]}
 
 
 def _probe_redis() -> dict:
     import redis as redis_lib
+    host = _redis_host()
     try:
         r = redis_lib.Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
         r.ping()
-        return {"status": "ok"}
+        return {"status": "ok", "host": host}
     except Exception as exc:
-        return {"status": "error", "detail": str(exc)[:200]}
+        return {"status": "error", "host": host, "detail": str(exc)[:200]}
 
 
 def _probe_celery() -> dict:
@@ -820,6 +848,14 @@ def job_status(run_id: str):
             "issue_key": run.issue_key,
             "status": run.status,
             "task_id": run.celery_task_id,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
             "result": result,
         }
 
+
+# Mount React SPA — must be last, after all API routes.
+# StaticFiles with html=True serves index.html for any unmatched path (SPA routing).
+# Only active when dist/ exists (combined portal container); skipped in bare API dev.
+import os as _os
+if _os.path.isdir("dist"):
+    app.mount("/", StaticFiles(directory="dist", html=True), name="static")

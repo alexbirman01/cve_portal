@@ -1,0 +1,58 @@
+---
+description: React/TypeScript UI patterns for the CVE Portal frontend
+globs: ui/src/**/*.tsx
+alwaysApply: false
+---
+
+# UI Patterns
+
+## Admin modal structure
+All admin modals (Customer SLA, Allowed Images, etc.) follow a two-component pattern:
+
+- **`Toolbar<Name>Modal`** — wraps `<Modal>` + open/close state, fetches data, owns the list state
+- **`<Name>AdminPanelBody`** — renders the list with edit/delete controls
+
+## Row edit pattern (read → edit → save/cancel)
+Rows display as text by default. Clicking "Edit" switches that row to inputs.
+
+```tsx
+const [editingId, setEditingId] = useState<string | null>(null)
+const [editDraft, setEditDraft] = useState<MyRecord | null>(null)
+
+// In JSX — each row:
+{editingId === row.id ? (
+  <>
+    <input value={editDraft!.name} onChange={e => setEditDraft({...editDraft!, name: e.target.value})} />
+    <button onClick={saveEdit}>Save</button>
+    <button onClick={() => setEditingId(null)}>Cancel</button>
+    <button onClick={() => removeRow(row.id)}>Remove</button>
+  </>
+) : (
+  <>
+    <span>{row.name}</span>
+    <button onClick={() => { setEditingId(row.id); setEditDraft(row) }}>Edit</button>
+  </>
+)}
+```
+
+## API client (`ui/src/api.ts`)
+- Every resource gets typed `Record` type + `apiList*`, `apiCreate*`, `apiUpdate*`, `apiDelete*` functions
+- All functions call `apiGet<T>` / `apiPost` / `apiPut` / `apiDelete` helpers — never raw `fetch`
+
+## Warning badges
+Use the `.imageNameWarn` CSS class for inline warning badges next to field values:
+```tsx
+{!isValid && <span className="imageNameWarn">Unknown image</span>}
+```
+
+## About dialog
+The `ComponentHealth` type includes `host?: string`. Show it next to the health dot:
+```tsx
+<HealthDot h={components.postgres} />
+{components.postgres.host && <span className="aboutHost">{components.postgres.host}</span>}
+```
+
+## CSS naming
+- Modal containers: `modalBox`, `modalOverlay`, `modalTitle`
+- Admin panel body: camelCase prefixed by feature (e.g. `slaRow`, `allowedImgRow`)
+- Status/badge variants: descriptive suffix (`imageNameWarn`, `aboutHost`, `aboutCommitBadge`)

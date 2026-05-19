@@ -1,0 +1,65 @@
+---
+description: FastAPI endpoint and ORM conventions for the CVE Portal API
+globs: api/**/*.py
+alwaysApply: false
+---
+
+# API Conventions
+
+## CRUD resource pattern
+Every new resource (e.g. `CustomerSla`, `AllowedImage`) follows this layout:
+
+**`api/app/models.py`** — SQLAlchemy model
+```python
+class MyResource(Base):
+    __tablename__ = "my_resources"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(512), unique=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=..., onupdate=...)
+```
+
+**`api/app/main.py`** — four routes + Pydantic models + serializer
+```python
+class MyResourceCreateIn(BaseModel):
+    name: str
+
+class MyResourceUpdateIn(BaseModel):
+    name: str | None = None
+
+def _my_resource_to_api(row: MyResource) -> dict:
+    return {"id": str(row.id), "name": row.name, ...}
+
+@app.get("/api/my-resources")
+def list_my_resources(db: Session = Depends(get_db)): ...
+
+@app.post("/api/my-resources", status_code=201)
+def create_my_resource(payload: MyResourceCreateIn, db: Session = Depends(get_db)): ...
+
+@app.put("/api/my-resources/{resource_id}")
+def update_my_resource(resource_id: uuid.UUID, payload: MyResourceUpdateIn, db: Session = Depends(get_db)): ...
+
+@app.delete("/api/my-resources/{resource_id}", status_code=204)
+def delete_my_resource(resource_id: uuid.UUID, db: Session = Depends(get_db)): ...
+```
+
+Helpers with non-trivial logic (normalization, lookup sets) live in a **separate module** (e.g. `api/app/allowed_images.py`), not inside `main.py`.
+
+## Health probe convention
+`_probe_<component>()` functions always return `{"status": "ok" | "error", "host": "<host:port>"}`:
+```python
+def _probe_postgres() -> dict:
+    host = _pg_host()  # parsed from settings.postgres_dsn
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"status": "ok", "host": host}
+    except Exception as exc:
+        return {"status": "error", "host": host, "detail": str(exc)[:200]}
+```
+
+## Settings
+Add new config to `api/app/config.py` as a typed Pydantic field with a sensible default. Never read `os.environ` directly in route handlers.
+
+## Error handling
+Use `raise HTTPException(status_code=..., detail="...")` — never return bare dicts for errors.

@@ -134,6 +134,7 @@ export type JobResponse = {
   issue_key: string
   status: string
   task_id?: string | null
+  updated_at?: string | null
   result?: JobResult | null
 }
 
@@ -245,6 +246,7 @@ export type IssueCveStatusSummary = {
   /** PLAT workflow: done = all CVE PLAT tickets created; in_progress = some still missing. */
   ticket_status?: DashboardTicketStatus | string
   created_at?: string | null
+  updated_at?: string | null
   cve_count?: number | null
   needs_plat_cve_count?: number
   /** PLAT-xxx keys from linked Jira tickets in the last run result */
@@ -374,7 +376,7 @@ export async function apiGetClientConfig(): Promise<ClientConfig> {
   return apiGet<ClientConfig>('/api/config/client')
 }
 
-export type ComponentHealth = { status: 'ok' | 'error' | 'no_workers'; detail?: string; workers?: string[] }
+export type ComponentHealth = { status: 'ok' | 'error' | 'no_workers'; host?: string; detail?: string; workers?: string[] }
 
 export type AboutInfo = {
   portal_version: string

@@ -1,0 +1,58 @@
+---
+description: CVE Portal project overview — stack, directory layout, deployment, and key conventions
+alwaysApply: true
+---
+
+# CVE Portal — Project Overview
+
+## What it is
+Internal PlainID tool that ingests Jira PLATFORM security tickets, enriches them with NVD CVE data, and creates/syncs PLAT "Security Vulnerability" tickets. Operators manage Customer SLAs and an allowed-image allowlist through an admin UI.
+
+## Stack
+| Layer | Technology |
+|---|---|
+| API | FastAPI (Python 3.12), Pydantic v2, SQLAlchemy 2 |
+| Background | Celery + Redis |
+| Database | PostgreSQL (external AWS RDS in prod; local `postgres` service in Docker) |
+| Frontend | React 18 + TypeScript (Vite build) |
+| Container | Single `portal` image: 2-stage Docker build (Node → React `dist/` baked into Python image) |
+
+## Directory layout
+```
+api/
+  app/
+    main.py          # FastAPI app + all routes
+    config.py        # Pydantic Settings (reads .env / env vars)
+    models.py        # SQLAlchemy ORM models
+    db.py            # engine + SessionLocal
+    allowed_images.py  # image-name normalization helpers
+    seed_allowed_images.py  # one-shot DB seed script
+worker/
+  app/
+    celery_app.py    # Celery app
+    tasks.py         # background processing tasks
+ui/
+  src/
+    App.tsx          # entire frontend (single-file SPA)
+    App.css
+    api.ts           # typed API client + shared types
+docker-compose.yml   # portal + worker + postgres + redis
+api/Dockerfile       # 2-stage build (Node ui-build → python:3.12-slim)
+```
+
+## Environment variables (`.env`)
+- `POSTGRES_DSN` — full connection string used by Python app (Pydantic Settings)
+- `POSTGRES_HOST/USER/PASSWORD/DB/PORT` — used by `docker-compose.yml` to construct `POSTGRES_DSN` inside containers
+- `REDIS_URL` — Redis connection string
+- `JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN` — Jira REST API credentials
+
+## Running locally
+```bash
+# Combined portal (API + UI) on :8080
+docker compose build portal worker
+docker compose up -d
+# Seed allowed images on a fresh DB
+docker compose exec portal python -m api.app.seed_allowed_images
+```
+
+The FastAPI app serves the React SPA via `StaticFiles(directory="dist", html=True)` mounted last, only when `dist/` exists (not in bare local dev).

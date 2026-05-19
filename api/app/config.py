@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     # Jira issue-link type name used for the PLATFORM → PLAT relationship.
     jira_plat_parent_link_type_name: str = "Relates"
 
+    # Extra fields included inline on PLAT issue create (both Security Vulnerability and Bug).
+    # Account picker field — set to {"accountId": <value>} when non-empty.
+    jira_plat_cf_account_field_id: str = "customfield_10650"
+    jira_plat_cf_account_id: str | None = None
+    # Team/squad select field — set to {"value": <value>} when non-empty.
+    jira_plat_cf_team_field_id: str = "customfield_10776"
+    jira_plat_cf_team_value: str | None = None
+
 
 settings = Settings()
 

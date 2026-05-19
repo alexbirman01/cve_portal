@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 
+# Helm secret overrides — never commit real credentials
+infra/helm/**/values.secret.yaml
+
