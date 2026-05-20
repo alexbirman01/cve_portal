@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -240,6 +241,136 @@ def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: st
     )
 
 
+# ─── Aqua Security JSON parser ────────────────────────────────────────────────
+
+_AQUA_TAG_SERVICE_RE = re.compile(r"[\d.]+_(.+?)_\d{2}[A-Za-z]{3}\d{4}$")
+
+
+def _aqua_image_basename(image_name: str) -> tuple[str, str]:
+    """Return (service_token, tag) extracted from a full Aqua image_name field.
+
+    image_name format:
+      registry/repo:version_ServiceName_DDMonYYYY  (ECR transactional repo)
+      registry/repo:tag                            (standard naming)
+
+    The service token is the segment between the version and date in the tag when
+    the tag follows the Aqua transactional pattern; otherwise it is the repo basename.
+    """
+    s = image_name.strip()
+    # Strip registry prefix (first component containing "." or port ":")
+    parts = s.split("/", 1)
+    if len(parts) == 2 and ("." in parts[0] or (parts[0].count(":") == 1 and parts[0].split(":")[1].isdigit())):
+        s = parts[1]
+    # Split tag
+    if ":" in s:
+        repo, tag = s.rsplit(":", 1)
+    else:
+        repo, tag = s, ""
+    # Try to extract a service identifier from the tag pattern {version}_{Service}_{Date}
+    m = _AQUA_TAG_SERVICE_RE.match(tag)
+    service = m.group(1).lower() if m else repo.strip().lower()
+    return service, tag.strip()
+
+
+def parse_aqua_json_bytes(
+    data: bytes,
+    source: str,
+    attachment_id: str,
+    filename: str,
+    mime_type: str | None,
+    alias_map: dict[str, str] | None = None,
+) -> ParsedAttachment:
+    """Parse an Aqua Security scan report JSON attachment.
+
+    Supports the format exported by Aqua Cloud (array of scan results with
+    ``image_name`` and ``results.resources[].vulnerabilities[]``).
+    ``alias_map`` resolves vendor-specific service tokens to canonical image basenames.
+    """
+    try:
+        raw = json.loads(data.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="error", text_preview=str(exc)[:500],
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    # Validate Aqua shape: list of scan entries with image_name + results.resources
+    if not isinstance(raw, list) or not raw:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="unparsed", text_preview=None,
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+    first = raw[0] if isinstance(raw[0], dict) else {}
+    if "image_name" not in first or "results" not in first:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="unparsed", text_preview=None,
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    seen_facts: set[tuple[str, str, str]] = set()
+    cve_image_facts: list[CveImageFact] = []
+    packages: list[ExtractedPackage] = []
+    seen_pkgs: set[tuple[str, str]] = set()
+    all_cve_ids: list[str] = []
+
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        image_name = str(entry.get("image_name") or "")
+        service_token, tag = _aqua_image_basename(image_name)
+        # Resolve alias → canonical name; fall back to the token itself
+        canonical = (alias_map or {}).get(service_token, service_token)
+
+        resources = (entry.get("results") or {}).get("resources") or []
+        for res in resources:
+            if not isinstance(res, dict):
+                continue
+            pkg = res.get("resource") or {}
+            pkg_name = str(pkg.get("name") or "").strip()
+            pkg_version = str(pkg.get("version") or "").strip() or None
+
+            for vuln in (res.get("vulnerabilities") or []):
+                if not isinstance(vuln, dict):
+                    continue
+                cve_raw = str(vuln.get("name") or "").strip()
+                if not _CVE_RE.match(cve_raw):
+                    continue
+                cve_id = cve_raw.upper()
+                all_cve_ids.append(cve_id)
+
+                key = (cve_id, canonical, tag)
+                if key not in seen_facts:
+                    seen_facts.add(key)
+                    cve_image_facts.append(CveImageFact(
+                        cve_id=cve_id,
+                        image=canonical,
+                        tag=tag,
+                        source=source,
+                    ))
+
+                if pkg_name:
+                    pkg_key = (cve_id, pkg_name)
+                    if pkg_key not in seen_pkgs:
+                        seen_pkgs.add(pkg_key)
+                        packages.append(ExtractedPackage(
+                            cve_id=cve_id,
+                            package_name=pkg_name,
+                            package_version=pkg_version,
+                            fixed_version=None,
+                            source=source,
+                        ))
+
+    cves = [ExtractedCve(cve_id=c, source=source) for c in dict.fromkeys(all_cve_ids)]
+    return ParsedAttachment(
+        attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+        status="ok", text_preview=None,
+        cves=cves, images=[], packages=packages, cve_image_facts=cve_image_facts,
+    )
+
+
 # ─── dispatcher ──────────────────────────────────────────────────────────────
 
 def parse_attachment_bytes(
@@ -248,6 +379,7 @@ def parse_attachment_bytes(
     filename: str,
     mime_type: str | None,
     data: bytes,
+    alias_map: dict[str, str] | None = None,
 ) -> ParsedAttachment:
     source = f"attachment:{attachment_id}:{filename}"
     lower  = filename.lower()
@@ -260,6 +392,9 @@ def parse_attachment_bytes(
 
     if lower.endswith(".pdf") or mime_type == "application/pdf":
         return parse_pdf_bytes(data, source, attachment_id, filename, mime_type)
+
+    if lower.endswith(".json"):
+        return parse_aqua_json_bytes(data, source, attachment_id, filename, mime_type, alias_map=alias_map)
 
     return ParsedAttachment(
         attachment_id=attachment_id, filename=filename, mime_type=mime_type,

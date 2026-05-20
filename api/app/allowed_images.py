@@ -16,11 +16,37 @@ def normalize_image_basename(path_or_name: str) -> str:
 
 
 def load_allowed_names(db: "Session") -> set[str]:
-    """Return lowercase set of all allowed basenames for O(1) lookup."""
+    """Return lowercase set of all allowed basenames (names + aliases) for O(1) lookup."""
     from api.app.models import AllowedImage
 
     rows = db.query(AllowedImage).all()
-    return {r.name.lower() for r in rows}
+    names: set[str] = set()
+    for r in rows:
+        names.add(r.name.lower())
+        for alias in (r.aliases or "").split(","):
+            a = alias.strip().lower()
+            if a:
+                names.add(a)
+    return names
+
+
+def load_alias_map(db: "Session") -> dict[str, str]:
+    """Map every known token (name + aliases, lowercased) → canonical lowercase name.
+
+    Used by the Aqua JSON parser and worker to resolve vendor-specific image identifiers
+    (e.g. 'secretmgr', 'sqlauth') to the canonical PlainID basename (e.g. 'secrets-mgmt').
+    """
+    from api.app.models import AllowedImage
+
+    out: dict[str, str] = {}
+    for row in db.query(AllowedImage).all():
+        canonical = row.name.lower().strip()
+        out[canonical] = canonical
+        for alias in (row.aliases or "").split(","):
+            a = alias.strip().lower()
+            if a:
+                out[a] = canonical
+    return out
 
 
 def is_allowed_basename(name: str, allowed: set[str]) -> bool:

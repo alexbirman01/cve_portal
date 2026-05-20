@@ -9,7 +9,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from api.app.config import settings
 from api.app.cve_row_derived import (
@@ -32,6 +32,15 @@ app = FastAPI(title="CVE Portal API", version="0.1.0")
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
+    # Add aliases column if upgrading from a schema that predates it.
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE allowed_images ADD COLUMN IF NOT EXISTS "
+                "aliases VARCHAR(1024) NOT NULL DEFAULT ''"
+            )
+        )
+        conn.commit()
 
 
 @app.get("/health")
@@ -729,16 +738,19 @@ def sla_due_date_preview(
 
 class AllowedImageCreateIn(BaseModel):
     name: str
+    aliases: str = ""
 
 
 class AllowedImageUpdateIn(BaseModel):
     name: str
+    aliases: str = ""
 
 
 def _allowed_image_to_api(row: AllowedImage) -> dict:
     return {
         "id": str(row.id),
         "name": row.name,
+        "aliases": row.aliases or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -760,7 +772,7 @@ def create_allowed_image(payload: AllowedImageCreateIn):
         exists = db.query(AllowedImage).filter(AllowedImage.name == name).first()
         if exists:
             raise HTTPException(status_code=409, detail="name already exists")
-        row = AllowedImage(name=name)
+        row = AllowedImage(name=name, aliases=payload.aliases.strip())
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -788,6 +800,7 @@ def update_allowed_image(image_id: str, payload: AllowedImageUpdateIn):
         if conflict:
             raise HTTPException(status_code=409, detail="name already exists")
         row.name = name
+        row.aliases = payload.aliases.strip()
         db.add(row)
         db.commit()
         db.refresh(row)

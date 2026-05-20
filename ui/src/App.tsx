@@ -1130,8 +1130,10 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
   const [savingId, setSavingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
+  const [editAliasDraft, setEditAliasDraft] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [draft, setDraft] = useState('')
+  const [aliasDraft, setAliasDraft] = useState('')
 
   const load = useCallback(async () => {
     setErr(null)
@@ -1140,7 +1142,12 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
       const list = await apiListAllowedImages()
       const sorted = [...list].sort((a, b) => a.name.localeCompare(b.name))
       setRows(sorted)
-      onSaved?.(new Set(sorted.map((r) => r.name.toLowerCase())))
+      const nameSet = new Set<string>()
+      sorted.forEach((r) => {
+        nameSet.add(r.name.toLowerCase())
+        ;(r.aliases || '').split(',').forEach((a) => { const t = a.trim().toLowerCase(); if (t) nameSet.add(t) })
+      })
+      onSaved?.(nameSet)
     } catch (e: any) {
       setErr(e?.message ?? String(e))
     } finally {
@@ -1159,7 +1166,12 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
       await apiDeleteAllowedImage(r.id)
       const updated = rows.filter((x) => x.id !== r.id)
       setRows(updated)
-      onSaved?.(new Set(updated.map((x) => x.name.toLowerCase())))
+      const nameSet = new Set<string>()
+      updated.forEach((x) => {
+        nameSet.add(x.name.toLowerCase())
+        ;(x.aliases || '').split(',').forEach((a) => { const t = a.trim().toLowerCase(); if (t) nameSet.add(t) })
+      })
+      onSaved?.(nameSet)
     } catch (e: any) {
       setErr(e?.message ?? String(e))
     } finally {
@@ -1173,10 +1185,15 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
     setErr(null)
     setSavingId(r.id)
     try {
-      const updated = await apiUpdateAllowedImage(r.id, { name })
+      const updated = await apiUpdateAllowedImage(r.id, { name, aliases: editAliasDraft.trim() })
       const next = rows.map((x) => (x.id === r.id ? updated : x)).sort((a, b) => a.name.localeCompare(b.name))
       setRows(next)
-      onSaved?.(new Set(next.map((x) => x.name.toLowerCase())))
+      const nameSet = new Set<string>()
+      next.forEach((x) => {
+        nameSet.add(x.name.toLowerCase())
+        ;(x.aliases || '').split(',').forEach((a) => { const t = a.trim().toLowerCase(); if (t) nameSet.add(t) })
+      })
+      onSaved?.(nameSet)
       setEditingId(null)
     } catch (e: any) {
       setErr(e?.message ?? String(e))
@@ -1191,11 +1208,17 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
     setErr(null)
     setCreateBusy(true)
     try {
-      const created = await apiCreateAllowedImage({ name })
+      const created = await apiCreateAllowedImage({ name, aliases: aliasDraft.trim() })
       const next = [...rows, created].sort((a, b) => a.name.localeCompare(b.name))
       setRows(next)
-      onSaved?.(new Set(next.map((x) => x.name.toLowerCase())))
+      const nameSet = new Set<string>()
+      next.forEach((x) => {
+        nameSet.add(x.name.toLowerCase())
+        ;(x.aliases || '').split(',').forEach((a) => { const t = a.trim().toLowerCase(); if (t) nameSet.add(t) })
+      })
+      onSaved?.(nameSet)
       setDraft('')
+      setAliasDraft('')
     } catch (e: any) {
       setErr(e?.message ?? String(e))
     } finally {
@@ -1222,6 +1245,7 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
           <thead>
             <tr>
               <th>Image basename</th>
+              <th>Aliases <span className="muted" style={{ fontWeight: 400, fontSize: 11 }}>(comma-separated)</span></th>
               <th style={{ width: 130 }}>Actions</th>
             </tr>
           </thead>
@@ -1241,6 +1265,19 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
                     <code style={{ fontSize: 12 }}>{r.name}</code>
                   )}
                 </td>
+                <td>
+                  {editingId === r.id ? (
+                    <input
+                      className="slaInput"
+                      placeholder="e.g. secretmgr, secret-mgmt"
+                      value={editAliasDraft}
+                      onChange={(e) => setEditAliasDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void saveEdit(r); if (e.key === 'Escape') setEditingId(null) }}
+                    />
+                  ) : (
+                    <span className="muted small">{r.aliases || '—'}</span>
+                  )}
+                </td>
                 <td className="slaRowActions">
                   {editingId === r.id ? (
                     <>
@@ -1249,7 +1286,7 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
                     </>
                   ) : (
                     <>
-                      <button type="button" className="btn btnSm btnSecondary" disabled={!!savingId} onClick={() => { setEditingId(r.id); setEditDraft(r.name) }}>Edit</button>
+                      <button type="button" className="btn btnSm btnSecondary" disabled={!!savingId} onClick={() => { setEditingId(r.id); setEditDraft(r.name); setEditAliasDraft(r.aliases || '') }}>Edit</button>
                       <button type="button" className="btn btnSm btnDanger" disabled={!!savingId} onClick={() => void removeRow(r)}>Remove</button>
                     </>
                   )}
@@ -1263,6 +1300,15 @@ function AllowedImagesAdminPanelBody({ onSaved }: { onSaved?: (names: Set<string
                   placeholder="e.g. authz-access-file"
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !createBusy && void createRow()}
+                />
+              </td>
+              <td>
+                <input
+                  className="slaInput"
+                  placeholder="e.g. sqlauth, sql"
+                  value={aliasDraft}
+                  onChange={(e) => setAliasDraft(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !createBusy && void createRow()}
                 />
               </td>
@@ -1389,6 +1435,41 @@ function TicketPanel({
       </div>
 
       {job?.status && <StepList status={job.status} />}
+
+      {job?.status && job.status.startsWith('failed') && (
+        <div className="errorBox" style={{ marginTop: '16px', fontFamily: 'inherit', color: '#f87171' }}>
+          <div style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '8px' }}>
+            Processing Failed:
+          </div>
+          <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: '13px', background: 'rgba(0,0,0,0.2)', padding: '8px 12px', borderRadius: '6px', overflowX: 'auto', marginBottom: job.result?.traceback ? '12px' : '0' }}>
+            {job.result?.error || job.status}
+          </div>
+          {job.result?.traceback && (
+            <details style={{ cursor: 'pointer' }}>
+              <summary style={{ fontSize: '13px', fontWeight: '500', color: '#fca5a5', userSelect: 'none' }}>
+                Show full traceback
+              </summary>
+              <pre style={{
+                marginTop: '8px',
+                padding: '12px',
+                background: '#111827',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontFamily: 'ui-monospace, monospace',
+                color: '#e5e7eb',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+                overflowX: 'auto',
+                maxHeight: '300px',
+                overflowY: 'auto'
+              }}>
+                {job.result.traceback}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
 
       {/* Description */}
       <div className="card">

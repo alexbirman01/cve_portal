@@ -127,6 +127,8 @@ export type JobResult = {
   } | null
   /** Cumulative link counters from process_issue. */
   _plat_link_counts?: { links_checked?: number; links_created?: number; errors: string[] } | null
+  error?: string | null
+  traceback?: string | null
 }
 
 export type JobResponse = {
@@ -183,6 +185,7 @@ export async function apiDeleteCustomerSla(id: string): Promise<void> {
 export type AllowedImageRecord = {
   id: string
   name: string
+  aliases?: string
   created_at?: string | null
   updated_at?: string | null
 }
@@ -191,13 +194,13 @@ export async function apiListAllowedImages(): Promise<AllowedImageRecord[]> {
   return apiGet('/api/allowed-images')
 }
 
-export async function apiCreateAllowedImage(body: { name: string }): Promise<AllowedImageRecord> {
+export async function apiCreateAllowedImage(body: { name: string; aliases?: string }): Promise<AllowedImageRecord> {
   return apiPost('/api/allowed-images', body)
 }
 
 export async function apiUpdateAllowedImage(
   id: string,
-  body: { name: string },
+  body: { name: string; aliases?: string },
 ): Promise<AllowedImageRecord> {
   return apiPut(`/api/allowed-images/${encodeURIComponent(id)}`, body)
 }

@@ -9,6 +9,7 @@ from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient, PlatTicket
 from api.app.plat_linking import plat_keys_to_link_for_row, plat_tickets_for_row
+from api.app.allowed_images import load_alias_map, normalize_image_basename
 from api.app.models import CveCache, CustomerSla, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
@@ -160,6 +161,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             blobs.append((a, jira.download_attachment(a["content"])))
 
         _set_run_status(run_id, "parsing_attachments")
+        with db_session() as db:
+            alias_map = load_alias_map(db)
         parsed_attachments = []
         for a, blob in blobs:
             parsed = parse_attachment_bytes(
@@ -167,6 +170,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 filename=str(a["filename"]),
                 mime_type=a.get("mimeType"),
                 data=blob,
+                alias_map=alias_map,
             )
             parsed_attachments.append(
                 {
@@ -327,10 +331,13 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         )
         # Always accept images whose path starts with "plainid/".
         _plainid_tokens = _plainid_tokens + ("plainid",)
+        # Any canonical name in the Allowed Images catalog is a known PlainID image
+        # (covers resolved Aqua aliases like "secrets-mgmt" that don't match token patterns).
+        _allowed_canonical: set[str] = set(alias_map.values())
 
         def _is_plainid_image(image_name: str) -> bool:
             lower = image_name.lower()
-            return any(tok in lower for tok in _plainid_tokens)
+            return lower in _allowed_canonical or any(tok in lower for tok in _plainid_tokens)
 
         # Build cve_to_images from CveImageFacts (structured per-row links) first.
         # This avoids fragile cross-attachment correlation.
@@ -349,18 +356,24 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         {"image": fact["image"], "tag": fact["tag"], "source": fact["source"]}
                     )
 
+        def _resolve_image_name(raw: str) -> str:
+            """Normalize raw image path → canonical name via alias map, or best-effort basename."""
+            basename = normalize_image_basename(raw)
+            return alias_map.get(basename, basename)
+
         # 2. Legacy: free-text images from description apply to all CVEs in description.
         desc_cve_ids = {c.cve_id for c in desc_cves}
         for i in desc_images:
             if not _is_plainid_image(i.image):
                 continue
+            canonical = _resolve_image_name(i.image)
             for cve_id in desc_cve_ids:
                 if cve_id not in cve_to_images:
                     continue
-                key = (cve_id, i.image, i.tag)
+                key = (cve_id, canonical, i.tag)
                 if key not in seen_img_keys:
                     seen_img_keys.add(key)
-                    cve_to_images[cve_id].append({"image": i.image, "tag": i.tag, "source": i.source})
+                    cve_to_images[cve_id].append({"image": canonical, "tag": i.tag, "source": i.source})
 
         # 3. Legacy: free-text images from attachments (when no structured facts were extracted).
         #    Correlate by CVEs found in the same attachment.
@@ -371,13 +384,14 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             for img_dict in p.get("images", []):
                 if not _is_plainid_image(img_dict["image"]):
                     continue
+                canonical = _resolve_image_name(img_dict["image"])
                 for cve_id in att_cves:
                     if cve_id not in cve_to_images:
                         continue
-                    key = (cve_id, img_dict["image"], img_dict["tag"])
+                    key = (cve_id, canonical, img_dict["tag"])
                     if key not in seen_img_keys:
                         seen_img_keys.add(key)
-                        cve_to_images[cve_id].append(img_dict)
+                        cve_to_images[cve_id].append({**img_dict, "image": canonical})
 
         # Build a map of CVE -> list of package records from Excel attachments.
         cve_to_excel_pkgs: dict[str, list[dict]] = {}
@@ -511,7 +525,19 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "_plat_link_counts": link_counts,
         }
     except Exception as e:
-        _set_run_status(run_id, f"failed: {type(e).__name__}")
+        import traceback
+        err_msg = str(e)
+        tb_str = traceback.format_exc()
+        with db_session() as db:
+            run = db.get(ProcessingRun, uuid.UUID(run_id))
+            if run:
+                run.status = f"failed: {type(e).__name__}"[:32]
+                run.result_json = json.dumps({
+                    "error": err_msg,
+                    "traceback": tb_str
+                })
+                db.add(run)
+                db.commit()
         raise
 
     with db_session() as db:
@@ -750,6 +776,21 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 db.commit()
         return result
     except Exception as e:
-        _set_run_status(run_id, f"failed: {type(e).__name__}")
+        import traceback
+        err_msg = str(e)
+        tb_str = traceback.format_exc()
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if run:
+                run.status = f"failed: {type(e).__name__}"[:32]
+                try:
+                    res = json.loads(run.result_json) if run.result_json else {}
+                except Exception:
+                    res = {}
+                res["error"] = err_msg
+                res["traceback"] = tb_str
+                run.result_json = json.dumps(res)
+                db.add(run)
+                db.commit()
         raise
 
