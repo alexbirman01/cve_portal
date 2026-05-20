@@ -393,12 +393,6 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         seen_img_keys.add(key)
                         cve_to_images[cve_id].append({**img_dict, "image": canonical})
 
-        # Build a map of CVE -> list of package records from Excel attachments.
-        cve_to_excel_pkgs: dict[str, list[dict]] = {}
-        for p in parsed_attachments:
-            for ep in p.get("packages", []):
-                cve_to_excel_pkgs.setdefault(ep["cve_id"], []).append(ep)
-
         _set_run_status(run_id, "building_results")
 
         cve_rows = []
@@ -406,38 +400,14 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
 
-            # Excel package data takes priority over NVD CPE (it reflects the actual installed version).
-            excel_pkgs = cve_to_excel_pkgs.get(cve_id, [])
-            if excel_pkgs:
-                # Deduplicate by package name, keep first occurrence per package.
-                seen_names: set[str] = set()
-                deduped_excel: list[dict] = []
-                for ep in excel_pkgs:
-                    if ep["package_name"] not in seen_names:
-                        seen_names.add(ep["package_name"])
-                        deduped_excel.append(ep)
-                first_ep = deduped_excel[0]
-                affected_resource = first_ep["package_name"]
-                affected_version = first_ep["package_version"]
-                fixed_version = first_ep["fixed_version"]
-                # Store as all_packages for the comment builder.
-                all_packages = [
-                    {
-                        "vendor": "",
-                        "product": ep["package_name"],
-                        "version_start": ep["package_version"],
-                        "fixed_version": ep["fixed_version"],
-                    }
-                    for ep in deduped_excel
-                ]
-            else:
-                # Fall back to NVD CPE data.
-                nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
-                first_np = nvd_pkgs[0] if nvd_pkgs else None
-                affected_resource = first_np["product"] if first_np else None
-                affected_version = first_np["version_start"] if first_np else None
-                fixed_version = first_np["fixed_version"] if first_np else None
-                all_packages = nvd_pkgs
+            # Take package/product resource metadata only from trusted source like NVD.
+            # Avoid using customer-reported data (Excel, JSON attachments, etc.) for product/package info.
+            nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
+            first_np = nvd_pkgs[0] if nvd_pkgs else None
+            affected_resource = first_np["product"] if first_np else None
+            affected_version = first_np["version_start"] if first_np else None
+            fixed_version = first_np["fixed_version"] if first_np else None
+            all_packages = nvd_pkgs
 
             raw_plat = cve_to_plat.get(cve_id, [])
             plat_security_keys = [
