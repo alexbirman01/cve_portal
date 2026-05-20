@@ -883,6 +883,41 @@ export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
   return out
 }
 
+/**
+ * Parse any version week codes (e.g. `5.2627.x`) from a PLAT fix version string and
+ * translate each to the calendar Sunday that ends that ISO week (e.g. `July 5, 2026`).
+ * Returns null if no parseable week code is found.
+ */
+export function translateFixVersionToReleaseDate(fixVersion: string): string | null {
+  if (!fixVersion) return null
+  const regex = /\b\d\.(\d{2})(\d{2})\.[x\d]+\b/g
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ]
+  let match
+  const dates: string[] = []
+  const seenDates = new Set<string>()
+  while ((match = regex.exec(fixVersion)) !== null) {
+    const yy = parseInt(match[1], 10)
+    const ww = parseInt(match[2], 10)
+    if (isNaN(yy) || isNaN(ww) || ww < 1 || ww > 53) continue
+    const year = 2000 + yy
+    // ISO Week 1 is the week containing Jan 4; find its Monday.
+    const jan4 = new Date(year, 0, 4)
+    const dow = jan4.getDay() === 0 ? 7 : jan4.getDay()
+    const week1Monday = new Date(year, 0, 4 - dow + 1)
+    // Sunday = Monday of week WW + 6 days
+    const sunday = new Date(week1Monday.getTime() + ((ww - 1) * 7 + 6) * 86400000)
+    const formatted = `${months[sunday.getMonth()]} ${sunday.getDate()}, ${sunday.getFullYear()}`
+    if (!seenDates.has(formatted)) {
+      seenDates.add(formatted)
+      dates.push(formatted)
+    }
+  }
+  return dates.length > 0 ? dates.join(' and ') : null
+}
+
 /** PLAT fix / tag text for suggested Jira comment (per-image Security keys or row rollup). */
 function commentPlatMetaForKeys(r: CveRow, secKeys: string[]): { fix: string; tag: string } {
   const hasMap = !!(r.plat_security_field_sync && Object.keys(r.plat_security_field_sync).length > 0)
@@ -948,16 +983,24 @@ export function buildSuggestedComment(result: JobResult): string {
       const label = platDisplayLabelForImage(r, bn)
       const keys = platSecKeysForImage(r, bn)
       const { fix, tag } = commentPlatMetaForKeys(r, keys)
+      const potential = translateFixVersionToReleaseDate(fix)
+      const fixLabelAndVal = potential
+        ? `Potential release date: ${potential}`
+        : `Expected fix release date: ${fix}`
       lines.push(
-        `  Image:    ${label} -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+        `  Image:    ${label} -> ${fixLabelAndVal}. Release tag: ${tag}`,
       )
     }
 
     const orphan = platOrphanSecKeys(r)
     if (orphan.length) {
       const { fix, tag } = commentPlatMetaForKeys(r, orphan)
+      const potential = translateFixVersionToReleaseDate(fix)
+      const fixLabelAndVal = potential
+        ? `Potential release date: ${potential}`
+        : `Expected fix release date: ${fix}`
       lines.push(
-        `  Image:    Unmapped Security PLAT -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+        `  Image:    Unmapped Security PLAT -> ${fixLabelAndVal}. Release tag: ${tag}`,
       )
     }
 
@@ -970,8 +1013,12 @@ export function buildSuggestedComment(result: JobResult): string {
       if (legacyPath) {
         const keys = platSecurityKeys(r)
         const { fix, tag } = commentPlatMetaForKeys(r, keys)
+        const potential = translateFixVersionToReleaseDate(fix)
+        const fixLabelAndVal = potential
+          ? `Potential release date: ${potential}`
+          : `Expected fix release date: ${fix}`
         lines.push(
-          `  Image:    ${legacyPath} -> Expected fix release date: ${fix}. Release tag: ${tag}`,
+          `  Image:    ${legacyPath} -> ${fixLabelAndVal}. Release tag: ${tag}`,
         )
       }
     }

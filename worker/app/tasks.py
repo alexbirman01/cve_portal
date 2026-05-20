@@ -26,7 +26,7 @@ def _set_run_status(run_id: str, status: str) -> None:
             db.commit()
 
 
-_PLAT_SYNC_PHASE_COUNT = 4
+_PLAT_SYNC_PHASE_COUNT = 1
 
 
 def _write_plat_sync_progress(
@@ -580,7 +580,7 @@ def _plat_sec_keys_for_row(row: dict[str, Any]) -> set[str]:
 
 @celery_app.task(name="sync_plat_for_run")
 def sync_plat_for_run(run_id: str) -> dict[str, Any]:
-    """Re-fetch PLAT Security issue fields into cve_rows; push missing CVE label / duedate to Jira."""
+    """Re-fetch PLAT Security issue fields into cve_rows."""
     rid = uuid.UUID(run_id)
     _set_run_status(run_id, "syncing_plat")
     try:
@@ -605,99 +605,34 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
         sync_errors: list[str] = []
         progress = _SyncProgressReporter(run_id)
         stats: dict[str, Any] = {
-            "tickets_refreshed": 0,    # CVE rows whose PLAT tickets were re-queried from Jira
-            "fields_read": 0,          # Security Vuln keys whose fix/tag fields were fetched
-            "label_date_checked": 0,   # Security Vuln keys checked for label/duedate
-            "label_date_updated": 0,   # of those: actually had a label added or duedate changed
+            "tickets_refreshed": 0,
+            "fields_read": 0,
+            "label_date_checked": 0,
+            "label_date_updated": 0,
             "labels_added": 0,
             "duedates_updated": 0,
-            "links_checked": 0,        # PLAT tickets checked for PLATFORM link
-            "links_created": 0,        # of those: a new link was created
+            "links_checked": 0,
+            "links_created": 0,
         }
         try:
-            refresh_rows = [row for row in cve_rows if row.get("cve_id")]
-            progress.set_phase("Refreshing PLAT tickets", len(refresh_rows), 1)
-
-            # Re-query Jira for PLAT links. Stored result_json does not include tickets created from the UI
-            # until we refresh — otherwise "Sync PLAT" would drop them when saving.
-            for row in refresh_rows:
-                cve_id = row.get("cve_id")
-                if not cve_id:
-                    continue
-                try:
-                    tickets: list[PlatTicket] = jira.search_plat_tickets(str(cve_id))
-                    raw_plat = [
-                        {"key": t.key, "issue_type": t.issue_type, "summary": t.summary}
-                        for t in tickets
-                    ]
-                    by_img: dict[str, list[str]] = {}
-                    for item in jira.search_plat_security_for_cve(str(cve_id)):
-                        img = (item.get("image_basename") or "").strip()
-                        if not img:
-                            continue
-                        by_img.setdefault(img, []).append(item["key"])
-                    row["plat_security_keys"] = [
-                        t["key"] for t in raw_plat if t["issue_type"] == "Security Vulnerability"
-                    ]
-                    row["plat_security_for_images"] = by_img
-                    bug_items = jira.search_plat_bugs_for_cve(str(cve_id))
-                    row["plat_tickets"] = plat_tickets_for_row(str(cve_id), raw_plat, row, bug_items)
-                    stats["tickets_refreshed"] += 1
-                except Exception as ex:
-                    sync_errors.append(f"{cve_id} plat refresh: {ex}")
-                progress.bump()
-
+            # Collect existing Security Vulnerability (PLAT CVE) keys from cve_rows
             all_keys: set[str] = set()
             for row in cve_rows:
                 all_keys |= _plat_sec_keys_for_row(row)
 
-            link_key_count = 0
-            if source_issue_key:
-                link_seen: set[str] = set()
-                for row in cve_rows:
-                    for pk in plat_keys_to_link_for_row(jira, row):
-                        ku = pk.strip().upper()
-                        if ku and ku not in link_seen:
-                            link_seen.add(ku)
-                            link_key_count += 1
-
-            progress.set_phase("Reading fix/tag from Jira", len(all_keys), 2)
-
-            key_to_rows: dict[str, list[dict[str, Any]]] = {}
-            for row in cve_rows:
-                for pk in _plat_sec_keys_for_row(row):
-                    key_to_rows.setdefault(pk, []).append(row)
+            progress.set_phase("Reading fix/tag from Jira", len(all_keys), 1)
 
             for pk in sorted(all_keys):
-                m = jira.get_issue_platsync_fields(pk)
-                if m:
-                    plat_meta[pk] = m
-                    stats["fields_read"] += 1
-                progress.bump()
-
-            progress.set_phase("Syncing label and due date", len(all_keys), 3)
-            for pk in sorted(all_keys):
-                rows_for = key_to_rows.get(pk) or []
-                sla_dates = [r.get("sla_due_date") for r in rows_for if r.get("sla_due_date")]
-                best: str | None = None
-                for sd in sla_dates:
-                    if sd and str(sd).strip():
-                        s = str(sd).strip()
-                        if best is None or s < best:
-                            best = s
                 try:
-                    write_result = jira.ensure_plat_security_issue_sync(pk, best)
-                    stats["label_date_checked"] += 1
-                    if write_result.any_change:
-                        stats["label_date_updated"] += 1
-                    if write_result.label_added:
-                        stats["labels_added"] += 1
-                    if write_result.duedate_updated:
-                        stats["duedates_updated"] += 1
+                    m = jira.get_issue_platsync_fields(pk)
+                    if m:
+                        plat_meta[pk] = m
+                        stats["fields_read"] += 1
                 except Exception as ex:
-                    sync_errors.append(f"{pk}: {ex}")
+                    sync_errors.append(f"{pk} read field error: {ex}")
                 progress.bump()
 
+            # Update plat_security_field_sync mapping on each row with the retrieved values
             for row in cve_rows:
                 row.pop("plat_app_fix_versions", None)
                 row.pop("plat_tag_numbers", None)
@@ -716,16 +651,6 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                     row["plat_security_field_sync"] = sync_map
                 else:
                     row.pop("plat_security_field_sync", None)
-
-            if source_issue_key:
-                progress.set_phase("Linking to PLATFORM", max(link_key_count, 1), 4)
-                link_counts = _link_plat_rows(
-                    jira, cve_rows, source_issue_key, progress=progress
-                )
-                stats["links_checked"] = link_counts["links_checked"]
-                stats["links_created"] = link_counts["links_created"]
-                if link_counts["errors"]:
-                    sync_errors.extend(link_counts["errors"])
 
         finally:
             jira.close()

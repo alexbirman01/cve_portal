@@ -40,6 +40,7 @@ import {
   platSecuritySyncFixForKeys,
   platSecuritySyncTagForKeys,
   platSecuritySyncSearchBlob,
+  translateFixVersionToReleaseDate,
   sortCveRows,
   statusSteps,
   dashboardCveStateLabel,
@@ -244,7 +245,20 @@ function PlatSyncStripCell({
 }) {
   const raw = (field === 'fix' ? strip.fix : strip.tag).trim()
   if (raw) {
-    return <span className="platSyncStripText mono platAppMeta">{field === 'fix' ? strip.fix : strip.tag}</span>
+    let displayText = raw
+    let titleText: string | undefined = undefined
+    if (field === 'fix') {
+      const parsed = translateFixVersionToReleaseDate(raw)
+      if (parsed) {
+        displayText = parsed
+        titleText = raw // Tooltip shows original raw fix version from Jira
+      }
+    }
+    return (
+      <span className="platSyncStripText mono platAppMeta" title={titleText}>
+        {displayText}
+      </span>
+    )
   }
   if (strip.secKeyCount > 0 && !hasSyncMap) {
     return (
@@ -1775,43 +1789,15 @@ function PlatSyncSummaryModal({
 
   if (!open) return null
 
-  const ldChecked = stats.label_date_checked ?? stats.label_date_pushed ?? 0
-  const ldUpdated = stats.label_date_updated ?? 0
-  const labelsAdded = stats.labels_added ?? 0
-  const duedatesUpdated = stats.duedates_updated ?? 0
-  const lkChecked = stats.links_checked ?? 0
-  const lkCreated = stats.links_created ?? stats.linked ?? 0
-  const refreshed = stats.tickets_refreshed ?? 0
   const fieldsRead = stats.fields_read ?? 0
 
   const rows: { step: number; operation: string; checked: string; changed: string; details: string }[] = [
     {
       step: 1,
-      operation: 'Refresh CVEs from Jira',
-      checked: '—',
-      changed: `${refreshed}`,
-      details: 'PLAT tickets re-queried per CVE row',
-    },
-    {
-      step: 2,
       operation: 'Read fix version & tag',
       checked: `${fieldsRead}`,
       changed: `${fieldsRead}`,
       details: 'Security Vuln fields fetched',
-    },
-    {
-      step: 3,
-      operation: 'Sync CVE label & due date',
-      checked: `${ldChecked}`,
-      changed: `${ldUpdated}`,
-      details: `${labelsAdded} label${labelsAdded !== 1 ? 's' : ''} added · ${duedatesUpdated} due date${duedatesUpdated !== 1 ? 's' : ''} changed`,
-    },
-    {
-      step: 4,
-      operation: issueKey ? `Link to ${issueKey}` : 'Link to PLATFORM',
-      checked: `${lkChecked}`,
-      changed: `${lkCreated}`,
-      details: 'PLATFORM parent link ensured',
     },
   ]
 
