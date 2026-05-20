@@ -890,7 +890,7 @@ export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
  */
 export function translateFixVersionToReleaseDate(fixVersion: string): string | null {
   if (!fixVersion) return null
-  const regex = /\b\d\.(\d{2})(\d{2})\.[x\d]+\b/g
+  const regex = /\b\d\.(\d{2})(\d{2})\.[xX\d]+\b/g
   const months = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December',
