@@ -1,9 +1,15 @@
 ---
 description: Deployment commands and conventions for the CVE Portal (local dev + production K8s)
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Deployment
+
+## CRITICAL SAFETY PROTOCOL (MANDATORY)
+
+- **NEVER** run git commits, git pushes, Docker builds/pushes, or Helm upgrades/deployments to production unless the user has explicitly and separately requested/approved that specific action in the current turn.
+- Even if the user previously gave general deployment instructions or said "deploy in prod", you **MUST** wait for explicit, immediate consent before executing any code modifications commits, push commands, docker registry pushes, or kubernetes deployments for the current task.
+- When in doubt, ask for permission first. This is a non-negotiable safety guardrail.
 
 ## Environments
 

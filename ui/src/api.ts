@@ -531,8 +531,13 @@ export function platSecuritySyncFixForKeys(r: CveRow, keys: string[]): string {
   if (!upper.length) return ''
   const m = r.plat_security_field_sync
   if (!m || !Object.keys(m).length) return ''
-  if (upper.length === 1) return m[upper[0]]?.fix_versions ?? ''
-  return upper.map((k) => `${k} · ${m[k]?.fix_versions ?? '—'}`).join('\n')
+  if (upper.length === 1) return normalizePlatSyncFieldValue(m[upper[0]]?.fix_versions)
+  return upper
+    .map((k) => {
+      const fix = normalizePlatSyncFieldValue(m[k]?.fix_versions)
+      return `${k} · ${fix || '—'}`
+    })
+    .join('\n')
 }
 
 /** `tag_numbers` for these Security PLAT keys. */
@@ -541,8 +546,13 @@ export function platSecuritySyncTagForKeys(r: CveRow, keys: string[]): string {
   if (!upper.length) return ''
   const m = r.plat_security_field_sync
   if (!m || !Object.keys(m).length) return ''
-  if (upper.length === 1) return m[upper[0]]?.tag_numbers ?? ''
-  return upper.map((k) => `${k} · ${m[k]?.tag_numbers ?? '—'}`).join('\n')
+  if (upper.length === 1) return normalizePlatSyncFieldValue(m[upper[0]]?.tag_numbers)
+  return upper
+    .map((k) => {
+      const tag = normalizePlatSyncFieldValue(m[k]?.tag_numbers)
+      return `${k} · ${tag || '—'}`
+    })
+    .join('\n')
 }
 
 /** Multiline text for Tag numbers column (one line per key: `KEY · tag`). */
@@ -858,8 +868,6 @@ export type PlatMissingCveSlot = { cve_id: string; image_basename: string }
 export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
   const out: PlatMissingCveSlot[] = []
   for (const r of rows) {
-    const verOk = !!(r.affected_version && String(r.affected_version).trim())
-    if (!verOk) continue
     for (const imageBasename of imageBasenamesForCveRow(r)) {
       if (platSecKeysForImage(r, imageBasename).length === 0) {
         out.push({ cve_id: r.cve_id, image_basename: imageBasename })
@@ -872,8 +880,6 @@ export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
 export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
   const out: PlatMissingCveSlot[] = []
   for (const r of rows) {
-    const verOk = !!(r.affected_version && String(r.affected_version).trim())
-    if (!verOk) continue
     for (const imageBasename of imageBasenamesForCveRow(r)) {
       if (platBugTicketsForImage(r, imageBasename).length === 0) {
         out.push({ cve_id: r.cve_id, image_basename: imageBasename })
@@ -883,14 +889,21 @@ export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
   return out
 }
 
+/** Empty Jira sync placeholder and other non-values → blank for display. */
+export function normalizePlatSyncFieldValue(raw: string | null | undefined): string {
+  const s = (raw ?? '').trim()
+  if (!s || s.toLowerCase() === 'none') return ''
+  return s
+}
+
 /**
- * Parse any version week codes (e.g. `5.2627.x`) from a PLAT fix version string and
- * translate each to the calendar Sunday that ends that ISO week (e.g. `July 5, 2026`).
+ * Parse any version week codes (e.g. `5.2627.x`, `5.2622.2`) from a PLAT fix/tag string and
+ * translate each to the calendar Monday that starts that ISO week (e.g. `June 29, 2026`).
  * Returns null if no parseable week code is found.
  */
 export function translateFixVersionToReleaseDate(fixVersion: string): string | null {
   if (!fixVersion) return null
-  const regex = /\b\d\.(\d{2})(\d{2})\.[xX\d]+\b/g
+  const regex = /\b\d\.(\d{2})(\d{2})\.[xX\d]+\b/gi
   const months = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December',
@@ -907,9 +920,8 @@ export function translateFixVersionToReleaseDate(fixVersion: string): string | n
     const jan4 = new Date(year, 0, 4)
     const dow = jan4.getDay() === 0 ? 7 : jan4.getDay()
     const week1Monday = new Date(year, 0, 4 - dow + 1)
-    // Sunday = Monday of week WW + 6 days
-    const sunday = new Date(week1Monday.getTime() + ((ww - 1) * 7 + 6) * 86400000)
-    const formatted = `${months[sunday.getMonth()]} ${sunday.getDate()}, ${sunday.getFullYear()}`
+    const monday = new Date(week1Monday.getTime() + (ww - 1) * 7 * 86400000)
+    const formatted = `${months[monday.getMonth()]} ${monday.getDate()}, ${monday.getFullYear()}`
     if (!seenDates.has(formatted)) {
       seenDates.add(formatted)
       dates.push(formatted)
@@ -918,14 +930,37 @@ export function translateFixVersionToReleaseDate(fixVersion: string): string | n
   return dates.length > 0 ? dates.join(' and ') : null
 }
 
+/**
+ * Resolve PLAT fix column / comment text: prefer week code in fixVersions name, else tag number.
+ * Returns translated date when possible; otherwise the raw fix name.
+ */
+export function resolvePlatFixReleaseDateDisplay(
+  fixRaw: string,
+  tagRaw = '',
+): { display: string; title?: string } {
+  const fix = normalizePlatSyncFieldValue(fixRaw)
+  const tag = normalizePlatSyncFieldValue(tagRaw)
+  const fromFix = fix ? translateFixVersionToReleaseDate(fix) : null
+  if (fromFix) {
+    return { display: fromFix, title: fix }
+  }
+  const fromTag = tag ? translateFixVersionToReleaseDate(tag) : null
+  if (fromTag) {
+    const titleParts = [fix, tag ? `Tag: ${tag}` : ''].filter(Boolean)
+    return { display: fromTag, title: titleParts.join('\n') || undefined }
+  }
+  if (fix) return { display: fix }
+  return { display: '' }
+}
+
 /** PLAT fix / tag text for suggested Jira comment (per-image Security keys or row rollup). */
 function commentPlatMetaForKeys(r: CveRow, secKeys: string[]): { fix: string; tag: string } {
   const hasMap = !!(r.plat_security_field_sync && Object.keys(r.plat_security_field_sync).length > 0)
   let fix = platSecuritySyncFixForKeys(r, secKeys).trim()
   let tag = platSecuritySyncTagForKeys(r, secKeys).trim()
   if (!hasMap && secKeys.length === 0) {
-    const lf = (r.plat_app_fix_versions ?? '').trim()
-    const lt = (r.plat_tag_numbers ?? '').trim()
+    const lf = normalizePlatSyncFieldValue(r.plat_app_fix_versions)
+    const lt = normalizePlatSyncFieldValue(r.plat_tag_numbers)
     if (!fix && lf) fix = lf
     if (!tag && lt) tag = lt
   }
@@ -933,6 +968,34 @@ function commentPlatMetaForKeys(r: CveRow, secKeys: string[]): { fix: string; ta
   if (!fix) fix = secKeys.length > 0 && !hasMap ? pendingHint : '—'
   if (!tag) tag = secKeys.length > 0 && !hasMap ? pendingHint : '—'
   return { fix, tag }
+}
+
+function suggestedFixReleaseLabel(fix: string, tag: string): string {
+  const fixNorm = normalizePlatSyncFieldValue(fix)
+  const tagNorm = normalizePlatSyncFieldValue(tag)
+  const date =
+    (fixNorm && translateFixVersionToReleaseDate(fixNorm)) ||
+    (tagNorm && translateFixVersionToReleaseDate(tagNorm))
+  if (date) return `Potential fix release date: ${date}`
+  return `Expected fix release date: ${fixNorm || fix || '—'}`
+}
+
+function hasReleaseTagForComment(tag: string): boolean {
+  const tagNorm = normalizePlatSyncFieldValue(tag)
+  if (!tagNorm) return false
+  const raw = tag.trim()
+  if (raw === '—') return false
+  if (raw.startsWith('— (sync PLAT')) return false
+  return true
+}
+
+function suggestedImageCommentLine(label: string, fix: string, tag: string): string {
+  const fixLabelAndVal = suggestedFixReleaseLabel(fix, tag)
+  const tagNorm = normalizePlatSyncFieldValue(tag)
+  if (hasReleaseTagForComment(tag)) {
+    return `  Image:    ${label} -> ${fixLabelAndVal}. Release tag: ${tagNorm}`
+  }
+  return `  Image:    ${label} -> ${fixLabelAndVal}`
 }
 
 function pushSuggestedPackageLines(lines: string[], r: CveRow): void {
@@ -983,25 +1046,13 @@ export function buildSuggestedComment(result: JobResult): string {
       const label = platDisplayLabelForImage(r, bn)
       const keys = platSecKeysForImage(r, bn)
       const { fix, tag } = commentPlatMetaForKeys(r, keys)
-      const potential = translateFixVersionToReleaseDate(fix)
-      const fixLabelAndVal = potential
-        ? `Potential release date: ${potential}`
-        : `Expected fix release date: ${fix}`
-      lines.push(
-        `  Image:    ${label} -> ${fixLabelAndVal}. Release tag: ${tag}`,
-      )
+      lines.push(suggestedImageCommentLine(label, fix, tag))
     }
 
     const orphan = platOrphanSecKeys(r)
     if (orphan.length) {
       const { fix, tag } = commentPlatMetaForKeys(r, orphan)
-      const potential = translateFixVersionToReleaseDate(fix)
-      const fixLabelAndVal = potential
-        ? `Potential release date: ${potential}`
-        : `Expected fix release date: ${fix}`
-      lines.push(
-        `  Image:    Unmapped Security PLAT -> ${fixLabelAndVal}. Release tag: ${tag}`,
-      )
+      lines.push(suggestedImageCommentLine('Unmapped Security PLAT', fix, tag))
     }
 
     if (!basenames.length) {
@@ -1013,13 +1064,7 @@ export function buildSuggestedComment(result: JobResult): string {
       if (legacyPath) {
         const keys = platSecurityKeys(r)
         const { fix, tag } = commentPlatMetaForKeys(r, keys)
-        const potential = translateFixVersionToReleaseDate(fix)
-        const fixLabelAndVal = potential
-          ? `Potential release date: ${potential}`
-          : `Expected fix release date: ${fix}`
-        lines.push(
-          `  Image:    ${legacyPath} -> ${fixLabelAndVal}. Release tag: ${tag}`,
-        )
+        lines.push(suggestedImageCommentLine(legacyPath, fix, tag))
       }
     }
 

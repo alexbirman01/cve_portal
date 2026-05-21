@@ -40,7 +40,8 @@ import {
   platSecuritySyncFixForKeys,
   platSecuritySyncTagForKeys,
   platSecuritySyncSearchBlob,
-  translateFixVersionToReleaseDate,
+  resolvePlatFixReleaseDateDisplay,
+  normalizePlatSyncFieldValue,
   sortCveRows,
   statusSteps,
   dashboardCveStateLabel,
@@ -88,6 +89,19 @@ function formatSyncDate(iso?: string | null): string {
   const hh = String(d.getHours()).padStart(2, '0')
   const mm = String(d.getMinutes()).padStart(2, '0')
   return `${day}-${mon}-${yr} ${hh}:${mm}`
+}
+
+function formatIssueCreatedDate(iso?: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  const day = d.getDate()
+  const mon = MONTH_ABBR[d.getMonth()]
+  const yr = String(d.getFullYear()).slice(2)
+  return `${day}-${mon}-${yr}`
+}
+
+function isSecurityIssueType(issuetype?: string | null): boolean {
+  return (issuetype ?? '').trim().toLowerCase() === 'security'
 }
 
 function StepList({ status }: { status?: string | null }) {
@@ -243,20 +257,30 @@ function PlatSyncStripCell({
   field: 'fix' | 'tag'
   hasSyncMap: boolean
 }) {
-  const raw = (field === 'fix' ? strip.fix : strip.tag).trim()
-  if (raw) {
-    let displayText = raw
-    let titleText: string | undefined = undefined
-    if (field === 'fix') {
-      const parsed = translateFixVersionToReleaseDate(raw)
-      if (parsed) {
-        displayText = parsed
-        titleText = raw // Tooltip shows original raw fix version from Jira
-      }
+  if (field === 'fix') {
+    const { display, title } = resolvePlatFixReleaseDateDisplay(strip.fix, strip.tag)
+    if (display) {
+      return (
+        <span className="platSyncStripText mono platAppMeta" title={title}>
+          {display}
+        </span>
+      )
     }
+    if (strip.secKeyCount > 0 && !hasSyncMap) {
+      return (
+        <span className="platSyncPendingHint muted small" title="Run Actions → Sync PLAT (Jira) to load fix versions and tag field">
+          Sync PLAT…
+        </span>
+      )
+    }
+    return <Dash />
+  }
+
+  const raw = normalizePlatSyncFieldValue(strip.tag)
+  if (raw) {
     return (
-      <span className="platSyncStripText mono platAppMeta" title={titleText}>
-        {displayText}
+      <span className="platSyncStripText mono platAppMeta">
+        {raw}
       </span>
     )
   }
@@ -436,7 +460,7 @@ function CveTable({
                   bugTickets.sort((a, b) => a.key.localeCompare(b.key))
 
                   const perImages = imageBasenamesForCveRow(r)
-                  const verOk = !!(r.affected_version && String(r.affected_version).trim())
+                  const verOk = true
                   const orphanSec = platOrphanSecKeys(r)
                   const allSecKeys = platSecurityKeys(r)
 
@@ -570,8 +594,8 @@ function CveTable({
                                           disabled={platBusy === busyKeyBug}
                                           title={`Create Bug PLAT for ${imgBasename}`}
                                           onClick={async () => {
+                                            if (!onPlatBugCreated) return
                                             const ver = (r.affected_version ?? '').trim()
-                                            if (!ver || !onPlatBugCreated) return
                                             setPlatBusy(busyKeyBug)
                                             setPlatErrRow(null)
                                             setPlatErrMsg(null)
@@ -711,8 +735,8 @@ function CveTable({
                                           disabled={platBusy === busyKeyCve}
                                           title={`Create Security Vulnerability (CVE) PLAT for ${imgBasename}`}
                                           onClick={async () => {
+                                            if (!onPlatCreated) return
                                             const ver = (r.affected_version ?? '').trim()
-                                            if (!ver || !onPlatCreated) return
                                             setPlatBusy(busyKeyCve)
                                             setPlatErrRow(null)
                                             setPlatErrMsg(null)
@@ -1421,13 +1445,9 @@ function TicketPanel({
           </div>
         </div>
         <div className="ticketMeta">
-          <div className="attrChip attrChipProject">
-            <span className="attrChipLabel">Project</span>
-            <span className="attrChipValue mono">{issue.project ?? '—'}</span>
-          </div>
-          <div className="attrChip attrChipType">
-            <span className="attrChipLabel">Type</span>
-            <span className="attrChipValue">{issue.issuetype ?? '—'}</span>
+          <div className="attrChip attrChipCreated">
+            <span className="attrChipLabel">Created</span>
+            <span className="attrChipValue">{formatIssueCreatedDate(issue.created)}</span>
           </div>
           <div className="attrChip attrChipAttach">
             <span className="attrChipLabel">Attachments</span>
@@ -1980,7 +2000,6 @@ function ResultsPanel({
         const r = acc.find((x) => x.cve_id === slot.cve_id)
         if (!r) continue
         const ver = (r.affected_version ?? '').trim()
-        if (!ver) continue
         try {
           const out = await apiCreatePlat({
             cve_id: r.cve_id,
@@ -2036,7 +2055,6 @@ function ResultsPanel({
         const r = acc.find((x) => x.cve_id === slot.cve_id)
         if (!r) continue
         const ver = (r.affected_version ?? '').trim()
-        if (!ver) continue
         try {
           const out = await apiCreatePlatBug({
             cve_id: r.cve_id,
@@ -2177,19 +2195,13 @@ function ResultsPanel({
           </div>
         </div>
         <div className="resultsAttrRow resultsAttrRowMeta">
-          <div className="attrChip attrChipMetaBox attrChipProject">
-            <span className="attrChipLabel">Project</span>
-            <span className="attrChipValuePill">
-              <span className="mono">{issue.project ?? '—'}</span>
-            </span>
-          </div>
           <div className={`attrChip ${severityMetaChipClass(findingsSeveritySummary)}`}>
             <span className="attrChipLabel">Severity</span>
             <span className="attrChipValuePill">{formatSeverityTitleCase(findingsSeveritySummary)}</span>
           </div>
-          <div className="attrChip attrChipMetaBox attrChipType">
-            <span className="attrChipLabel">Type</span>
-            <span className="attrChipValuePill">{issue.issuetype ?? '—'}</span>
+          <div className="attrChip attrChipMetaBox attrChipCreated">
+            <span className="attrChipLabel">Created</span>
+            <span className="attrChipValuePill">{formatIssueCreatedDate(issue.created)}</span>
           </div>
           <div className="attrChip attrChipMetaBox attrChipAttach">
             <span className="attrChipLabel">Attachments</span>
@@ -2756,6 +2768,51 @@ function HealthDot({ h }: { h: ComponentHealth }) {
   )
 }
 
+function SecurityTypeModal({
+  open,
+  issueKey,
+  issuetype,
+  onClose,
+}: {
+  open: boolean
+  issueKey: string
+  issuetype: string
+  onClose: () => void
+}) {
+  if (!open) return null
+  return (
+    <div className="modalOverlay" onClick={onClose} role="presentation">
+      <div
+        className="modalBox securityTypeModalBox"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="securityTypeModalTitle"
+      >
+        <div className="modalHeader">
+          <span className="modalTitle" id="securityTypeModalTitle">
+            Cannot process ticket
+          </span>
+          <button className="modalClose" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="securityTypeModalBody">
+          <p>
+            This portal only processes PLATFORM tickets with issue type <strong>Security</strong>.
+          </p>
+          <p>
+            <span className="mono">{issueKey}</span> has type <strong>{issuetype}</strong> and cannot be processed.
+          </p>
+        </div>
+        <div className="securityTypeModalFooter">
+          <button type="button" className="btn btnPrimary" onClick={onClose}>
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AboutModal({ open, onClose, info, loading }: {
   open: boolean
   onClose: () => void
@@ -2854,6 +2911,10 @@ function App() {
   const [aboutOpen, setAboutOpen]     = useState(false)
   const [aboutInfo, setAboutInfo]     = useState<AboutInfo | null>(null)
   const [aboutLoading, setAboutLoading] = useState(false)
+  const [securityTypeWarning, setSecurityTypeWarning] = useState<{
+    issueKey: string
+    issuetype: string
+  } | null>(null)
 
   useEffect(() => {
     apiListAllowedImages().then((list) => {
@@ -2926,6 +2987,14 @@ function App() {
     setCommentPosted(false)
     try {
       const data = await apiGet<IssueResponse>(`/api/issues/${key}`)
+      if (!isSecurityIssueType(data.issuetype)) {
+        setSecurityTypeWarning({
+          issueKey: data.key,
+          issuetype: data.issuetype?.trim() || 'Unknown',
+        })
+        setIssue(null)
+        return
+      }
       setIssue(data)
     } catch (e: any) {
       setError(e?.message ?? String(e))
@@ -2935,6 +3004,13 @@ function App() {
   }
 
   async function startProcessingForIssue(issueRow: IssueResponse) {
+    if (!isSecurityIssueType(issueRow.issuetype)) {
+      setSecurityTypeWarning({
+        issueKey: issueRow.key,
+        issuetype: issueRow.issuetype?.trim() || 'Unknown',
+      })
+      return
+    }
     setError(null)
     setLoading(true)
     setRunId(null)
@@ -3083,6 +3159,12 @@ function App() {
         open={allowedImagesOpen}
         onClose={() => setAllowedImagesOpen(false)}
         onSaved={setAllowedImageNames}
+      />
+      <SecurityTypeModal
+        open={!!securityTypeWarning}
+        issueKey={securityTypeWarning?.issueKey ?? ''}
+        issuetype={securityTypeWarning?.issuetype ?? ''}
+        onClose={() => setSecurityTypeWarning(null)}
       />
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} info={aboutInfo} loading={aboutLoading} />
 

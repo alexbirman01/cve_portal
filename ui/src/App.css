@@ -12,7 +12,7 @@
   gap: 0;
   height: 52px;
   padding: 0 24px;
-  background: rgba(255,255,255,0.025);
+  background: #13141a;
   border-bottom: 1px solid rgba(255,255,255,0.08);
   position: sticky;
   top: 0;
@@ -288,17 +288,6 @@
   color: rgba(255, 255, 255, 0.96);
 }
 
-.attrChipProject {
-  background: linear-gradient(140deg, rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0.07));
-  border-color: rgba(129, 140, 248, 0.5);
-}
-.attrChipProject .attrChipLabel { color: #a5b4fc; }
-
-.attrChipType {
-  background: linear-gradient(140deg, rgba(34, 211, 238, 0.2), rgba(34, 211, 238, 0.06));
-  border-color: rgba(34, 211, 238, 0.45);
-}
-.attrChipType .attrChipLabel { color: #67e8f9; }
 
 .attrChipAttach {
   background: linear-gradient(140deg, rgba(52, 211, 153, 0.22), rgba(52, 211, 153, 0.07));
@@ -317,6 +306,12 @@
   border-color: rgba(192, 132, 252, 0.48);
 }
 .attrChipOrg .attrChipLabel { color: #e9d5ff; }
+
+.attrChipCreated {
+  background: linear-gradient(140deg, rgba(100, 116, 139, 0.22), rgba(100, 116, 139, 0.07));
+  border-color: rgba(148, 163, 184, 0.38);
+}
+.attrChipCreated .attrChipLabel { color: #cbd5e1; }
 /* ─── buttons ────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
@@ -1281,17 +1276,6 @@ button.platCreateBugPill:disabled:hover {
   text-overflow: ellipsis;
 }
 
-.resultsAttrRowMeta .attrChipProject .attrChipLabel { color: #a5b4fc; }
-.resultsAttrRowMeta .attrChipProject .attrChipValuePill {
-  background: rgba(67, 56, 202, 0.55);
-  border: 1px solid rgba(129, 140, 248, 0.35);
-}
-
-.resultsAttrRowMeta .attrChipType .attrChipLabel { color: #67e8f9; }
-.resultsAttrRowMeta .attrChipType .attrChipValuePill {
-  background: rgba(8, 145, 178, 0.45);
-  border: 1px solid rgba(34, 211, 238, 0.35);
-}
 
 .resultsAttrRowMeta .attrChipAttach .attrChipLabel { color: #6ee7b7; }
 .resultsAttrRowMeta .attrChipAttach .attrChipValuePill {
@@ -1309,6 +1293,12 @@ button.platCreateBugPill:disabled:hover {
 .resultsAttrRowMeta .attrChipOrg .attrChipValuePill {
   background: rgba(107, 33, 168, 0.5);
   border: 1px solid rgba(192, 132, 252, 0.35);
+}
+
+.resultsAttrRowMeta .attrChipCreated .attrChipLabel { color: #cbd5e1; }
+.resultsAttrRowMeta .attrChipCreated .attrChipValuePill {
+  background: rgba(71, 85, 105, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.35);
 }
 
 .resultsAttrRowMeta .attrChipSevCritical .attrChipLabel { color: #f87171; }
@@ -2302,6 +2292,28 @@ button.platCreateBugPill:disabled:hover {
 
 .aboutModalBox {
   width: 480px;
+}
+
+.securityTypeModalBox {
+  width: 440px;
+}
+
+.securityTypeModalBody {
+  padding: 18px 20px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.securityTypeModalFooter {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 18px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  flex-shrink: 0;
 }
 
 .aboutBody {

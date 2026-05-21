@@ -351,6 +351,25 @@ def post_comment(issue_key: str, payload: CommentIn):
 
 @app.post("/api/issues/{issue_key}/process")
 def start_processing(issue_key: str):
+    jira = JiraClient()
+    try:
+        issue = jira.get_issue(issue_key)
+        it = (issue.issuetype or "").strip().casefold()
+        if it != "security":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"This portal only processes Security tickets; "
+                    f"got issuetype '{issue.issuetype or 'Unknown'}'."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        jira.close()
+
     run_id = uuid.uuid4()
     with db_session() as db:
         run = ProcessingRun(id=run_id, issue_key=issue_key, status="queued")
