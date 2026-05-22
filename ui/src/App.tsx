@@ -9,6 +9,7 @@ import {
   apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
   apiCancelRun,
+  apiPatchIssueSyncSchedule,
   apiPatchCveRow,
   apiGet,
   apiGetAbout,
@@ -2478,6 +2479,71 @@ function normalizeDashboardSearchQuery(raw: string): string {
   return t
 }
 
+type DashSortOption =
+  | 'sync_desc'
+  | 'sync_asc'
+  | 'ticket_asc'
+  | 'ticket_desc'
+  | 'customer_asc'
+  | 'cve_desc'
+  | 'cve_asc'
+  | 'status'
+
+const DASH_STATUS_SORT_ORDER: Record<DashboardTicketStatus, number> = {
+  failed: 0,
+  processing: 1,
+  in_progress: 2,
+  done: 3,
+}
+
+function dashSummaryTimestamp(s: IssueCveStatusSummary): number {
+  const raw = s.updated_at ?? s.created_at
+  if (!raw) return 0
+  const t = Date.parse(raw)
+  return Number.isNaN(t) ? 0 : t
+}
+
+function dashSummaryCveCount(s: IssueCveStatusSummary): number {
+  return s.cve_count ?? s.cves.length ?? 0
+}
+
+function dashSummaryCustomer(s: IssueCveStatusSummary): string {
+  return (s.customer_names?.[0] ?? '').toLowerCase()
+}
+
+function sortDashboardSummaries(
+  items: IssueCveStatusSummary[],
+  sort: DashSortOption,
+): IssueCveStatusSummary[] {
+  const sorted = [...items]
+  sorted.sort((a, b) => {
+    switch (sort) {
+      case 'sync_desc':
+        return dashSummaryTimestamp(b) - dashSummaryTimestamp(a) || a.issue_key.localeCompare(b.issue_key)
+      case 'sync_asc':
+        return dashSummaryTimestamp(a) - dashSummaryTimestamp(b) || a.issue_key.localeCompare(b.issue_key)
+      case 'ticket_asc':
+        return a.issue_key.localeCompare(b.issue_key)
+      case 'ticket_desc':
+        return b.issue_key.localeCompare(a.issue_key)
+      case 'customer_asc':
+        return dashSummaryCustomer(a).localeCompare(dashSummaryCustomer(b)) || a.issue_key.localeCompare(b.issue_key)
+      case 'cve_desc':
+        return dashSummaryCveCount(b) - dashSummaryCveCount(a) || a.issue_key.localeCompare(b.issue_key)
+      case 'cve_asc':
+        return dashSummaryCveCount(a) - dashSummaryCveCount(b) || a.issue_key.localeCompare(b.issue_key)
+      case 'status':
+        return (
+          DASH_STATUS_SORT_ORDER[ticketStatusForSummary(a)] - DASH_STATUS_SORT_ORDER[ticketStatusForSummary(b)]
+          || a.issue_key.localeCompare(b.issue_key)
+        )
+      default:
+        return 0
+    }
+  })
+  return sorted
+}
+
 function DashboardView({
   onOpen,
   onNew,
@@ -2490,9 +2556,10 @@ function DashboardView({
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [dashSearch, setDashSearch] = useState('')
-  const [dashStatusFilter, setDashStatusFilter] = useState<DashboardTicketStatus | ''>('')
+  const [dashSort, setDashSort] = useState<DashSortOption>('sync_desc')
   const [jiraBrowseUrl, setJiraBrowseUrl] = useState('')
   const [removeBusyKey, setRemoveBusyKey] = useState<string | null>(null)
+  const [scheduleBusyKey, setScheduleBusyKey] = useState<string | null>(null)
 
   const loadSummaries = useCallback(async () => {
     setError(null)
@@ -2529,18 +2596,7 @@ function DashboardView({
 
   useEffect(() => {
     setPage(1)
-  }, [dashSearch, dashStatusFilter])
-
-  function relativeTime(iso?: string | null) {
-    if (!iso) return '—'
-    const diff = Date.now() - new Date(iso).getTime()
-    const m = Math.floor(diff / 60000)
-    if (m < 1) return 'just now'
-    if (m < 60) return `${m}m ago`
-    const h = Math.floor(m / 60)
-    if (h < 24) return `${h}h ago`
-    return `${Math.floor(h / 24)}d ago`
-  }
+  }, [dashSearch, dashSort])
 
   const totalIssues = summaries.length
   const totalCves = summaries.reduce((s, x) => s + (x.cve_count ?? x.cves.length ?? 0), 0)
@@ -2551,18 +2607,40 @@ function DashboardView({
 
   const filteredSummaries = useMemo(() => {
     const q = normalizeDashboardSearchQuery(dashSearch)
-    return summaries.filter((s) => {
-      const ts = ticketStatusForSummary(s)
-      if (dashStatusFilter && ts !== dashStatusFilter) return false
+    const filtered = summaries.filter((s) => {
       if (!q) return true
       const parent = (s.parent_issue_key ?? s.issue_key).toLowerCase()
       const proj = (s.issue_project ?? '').toLowerCase()
       if (parent.includes(q)) return true
       if (proj && proj === q) return true
       if (s.plat_keys?.some((k) => k.toLowerCase().includes(q))) return true
+      if (s.customer_names?.some((n) => n.toLowerCase().includes(q))) return true
       return s.cves.some((c) => c.cve_id.toLowerCase().includes(q))
     })
-  }, [summaries, dashSearch, dashStatusFilter])
+    return sortDashboardSummaries(filtered, dashSort)
+  }, [summaries, dashSearch, dashSort])
+
+  async function toggleDailySync(issueKey: string, enabled: boolean) {
+    setScheduleBusyKey(issueKey)
+    try {
+      const updated = await apiPatchIssueSyncSchedule(issueKey, { daily_sync_enabled: enabled })
+      setSummaries((prev) =>
+        prev.map((s) =>
+          s.issue_key === issueKey
+            ? {
+                ...s,
+                daily_sync_enabled: updated.daily_sync_enabled,
+                last_auto_sync_at: updated.last_auto_sync_at ?? s.last_auto_sync_at,
+              }
+            : s,
+        ),
+      )
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setScheduleBusyKey(null)
+    }
+  }
 
   const totalPages = Math.max(1, Math.ceil(filteredSummaries.length / DASH_PAGE_SIZE))
   const pageSlice = filteredSummaries.slice((page - 1) * DASH_PAGE_SIZE, page * DASH_PAGE_SIZE)
@@ -2624,23 +2702,26 @@ function DashboardView({
               <input
                 type="search"
                 className="dashSearchInput"
-                placeholder="Search PLATFORM parent, PLAT-…, CVE… (or paste Jira URL)"
+                placeholder="Search ticket, customer, PLAT-…, CVE… (or paste Jira URL)"
                 value={dashSearch}
                 onChange={(e) => setDashSearch(e.target.value)}
                 autoComplete="off"
               />
             </label>
             <select
-              className="dashFilterSelect"
-              value={dashStatusFilter}
-              onChange={(e) => setDashStatusFilter(e.target.value as DashboardTicketStatus | '')}
-              aria-label="Filter by ticket status"
+              className="dashSortSelect"
+              value={dashSort}
+              onChange={(e) => setDashSort(e.target.value as DashSortOption)}
+              aria-label="Sort tickets"
             >
-              <option value="">All statuses</option>
-              <option value="in_progress">In progress</option>
-              <option value="done">Done</option>
-              <option value="processing">Processing</option>
-              <option value="failed">Failed</option>
+              <option value="sync_desc">Last sync (newest)</option>
+              <option value="sync_asc">Last sync (oldest)</option>
+              <option value="ticket_asc">Ticket (A–Z)</option>
+              <option value="ticket_desc">Ticket (Z–A)</option>
+              <option value="customer_asc">Customer (A–Z)</option>
+              <option value="cve_desc">Most CVEs</option>
+              <option value="cve_asc">Fewest CVEs</option>
+              <option value="status">Status</option>
             </select>
           </div>
         )}
@@ -2654,10 +2735,10 @@ function DashboardView({
 
         {!loading && !error && summaries.length > 0 && filteredSummaries.length === 0 && (
           <div className="muted small dashFilterEmpty">
-            No issues match search or status filter.
+            No issues match your search.
             {' '}
-            <button type="button" className="resultsClearFiltersLink" onClick={() => { setDashSearch(''); setDashStatusFilter('') }}>
-              Clear filters
+            <button type="button" className="resultsClearFiltersLink" onClick={() => setDashSearch('')}>
+              Clear search
             </button>
           </div>
         )}
@@ -2671,7 +2752,12 @@ function DashboardView({
                 <details key={s.issue_key} className="dashIssueDetails">
                   <summary className="dashIssueSummary">
                     <span className="dashIssueSummaryMain">
-                      <span className="dashIssueKey mono">{s.issue_key}</span>
+                      <span className="dashIssueKeyRow">
+                        <span className="dashIssueKey mono">{s.issue_key}</span>
+                        {(s.customer_names?.length ?? 0) > 0 && (
+                          <span className="dashIssueCustomer">{s.customer_names!.join(', ')}</span>
+                        )}
+                      </span>
                       {wf === 'done' ? (
                         <span className="resultsDonePill">
                           Last Sync: {formatSyncDate(s.updated_at)}
@@ -2694,7 +2780,21 @@ function DashboardView({
                       )}
                     </span>
                     <span className="dashIssueSummaryAside">
-                      <span className="muted small">{relativeTime(s.created_at)}</span>
+                      <label
+                        className="dashDailySyncToggle"
+                        title="Automatically run Sync PLAT once every 24 hours"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={s.daily_sync_enabled ?? false}
+                          disabled={scheduleBusyKey === s.issue_key}
+                          onChange={(e) => {
+                            void toggleDailySync(s.issue_key, e.target.checked)
+                          }}
+                        />
+                        Daily sync
+                      </label>
                       <span className="dashIssueActionBtns">
                         <button
                           type="button"

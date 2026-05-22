@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import uuid
 from typing import Any
+
+from sqlalchemy import func
 
 from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient, PlatTicket
 from api.app.plat_linking import plat_keys_to_link_for_row, plat_tickets_for_row
 from api.app.allowed_images import load_alias_map, normalize_image_basename
-from api.app.models import CveCache, CustomerSla, ProcessingRun
+from api.app.models import CveCache, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
 from api.app.redhat_client import RedHatClient
@@ -612,6 +615,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "issue_key": issue.key,
             "sla_anchor_issue_key": issue.key,
             "sla_anchor_created": anchor.isoformat() if anchor else None,
+            "organizations": org_names,
             "cves": cve_ids,
             "cve_rows": cve_rows,
             "nvd": enriched,
@@ -815,4 +819,54 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 db.add(run)
                 db.commit()
         raise
+
+
+_DAILY_SYNC_INTERVAL = dt.timedelta(hours=24)
+
+
+@celery_app.task(name="run_due_plat_syncs")
+def run_due_plat_syncs() -> dict[str, Any]:
+    """Enqueue Sync PLAT for tickets with daily sync enabled and last run > 24h ago."""
+    now = dt.datetime.now(dt.UTC)
+    enqueued: list[str] = []
+    skipped: list[str] = []
+
+    with db_session() as db:
+        schedules = (
+            db.query(IssueSyncSchedule)
+            .filter(IssueSyncSchedule.daily_sync_enabled.is_(True))
+            .all()
+        )
+        schedule_items = [(s.issue_key, s.last_auto_sync_at) for s in schedules]
+
+    for issue_key, last_at in schedule_items:
+        if last_at and (now - last_at) < _DAILY_SYNC_INTERVAL:
+            skipped.append(issue_key)
+            continue
+
+        with db_session() as db:
+            run = (
+                db.query(ProcessingRun)
+                .filter(
+                    func.lower(ProcessingRun.issue_key) == issue_key.casefold(),
+                    ProcessingRun.status == "done",
+                    ProcessingRun.result_json.isnot(None),
+                )
+                .order_by(ProcessingRun.created_at.desc())
+                .first()
+            )
+            if not run:
+                skipped.append(issue_key)
+                continue
+
+        sync_plat_for_run.delay(str(run.id))
+        with db_session() as db:
+            row = db.get(IssueSyncSchedule, issue_key)
+            if row:
+                row.last_auto_sync_at = now
+                db.add(row)
+                db.commit()
+        enqueued.append(issue_key)
+
+    return {"enqueued": enqueued, "skipped": skipped, "checked_at": now.isoformat()}
 

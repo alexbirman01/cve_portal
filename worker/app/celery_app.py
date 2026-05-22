@@ -14,6 +14,12 @@ celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
+    beat_schedule={
+        "run-due-plat-syncs": {
+            "task": "run_due_plat_syncs",
+            "schedule": 900.0,  # every 15 minutes
+        },
+    },
 )
 
 # Ensure tasks are registered when the worker starts.

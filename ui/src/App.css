@@ -1980,14 +1980,14 @@ button.platCreateBugPill:disabled:hover {
   font-size: 12.5px;
 }
 
-.dashFilterSelect {
+.dashSortSelect {
   padding: 7px 12px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(0, 0, 0, 0.28);
   color: inherit;
   font-size: 12px;
-  min-width: 160px;
+  min-width: 180px;
 }
 
 .dashFilterEmpty {
@@ -2082,9 +2082,40 @@ button.platCreateBugPill:disabled:hover {
   font-weight: 700;
 }
 
+.dashIssueKeyRow {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.dashIssueCustomer {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.72);
+  letter-spacing: 0.01em;
+}
+
 .dashIssueOpenBtn {
   padding: 4px 12px !important;
   font-size: 12px !important;
+}
+
+.dashDailySyncToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.dashDailySyncToggle input {
+  margin: 0;
+  cursor: pointer;
 }
 
 .dashNeedsPlatPill {

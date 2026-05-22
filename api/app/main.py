@@ -20,7 +20,7 @@ from api.app.cve_row_derived import (
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
 from api.app.allowed_images import normalize_image_basename
-from api.app.models import AllowedImage, Base, CustomerSla, ProcessingRun
+from api.app.models import AllowedImage, Base, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
 from worker.app.tasks import process_issue, sync_plat_for_run
@@ -443,7 +443,17 @@ def list_jobs_cve_status(limit: int = 50):
         reverse=True,
     )
 
+    schedule_by_key: dict[str, IssueSyncSchedule] = {}
+    with db_session() as db:
+        issue_keys = [r.issue_key for r in chosen if r.issue_key]
+        if issue_keys:
+            folds = {k.casefold() for k in issue_keys}
+            for row in db.query(IssueSyncSchedule).all():
+                if row.issue_key.casefold() in folds:
+                    schedule_by_key[row.issue_key.casefold()] = row
+
     out: list[dict] = []
+    need_jira_orgs: list[str] = []
     for r in chosen:
         result = json.loads(r.result_json) if r.result_json else None
         rows = cve_rows_from_result(result if isinstance(result, dict) else None)
@@ -478,6 +488,16 @@ def list_jobs_cve_status(limit: int = 50):
             ticket_status = "in_progress"
         else:
             ticket_status = "done"
+        customer_names: list[str] = []
+        if isinstance(result, dict):
+            raw_orgs = result.get("organizations")
+            if isinstance(raw_orgs, list):
+                customer_names = [
+                    str(x).strip() for x in raw_orgs if x and str(x).strip()
+                ]
+        if not customer_names and r.issue_key:
+            need_jira_orgs.append(r.issue_key)
+        sched = schedule_by_key.get(r.issue_key.casefold())
         out.append(
             {
                 "issue_key": r.issue_key,
@@ -491,9 +511,33 @@ def list_jobs_cve_status(limit: int = 50):
                 "cve_count": cve_count,
                 "needs_plat_cve_count": needs_plat,
                 "plat_keys": plat_keys,
+                "customer_names": customer_names,
+                "daily_sync_enabled": bool(sched.daily_sync_enabled) if sched else False,
+                "last_auto_sync_at": (
+                    sched.last_auto_sync_at.isoformat()
+                    if sched and sched.last_auto_sync_at
+                    else None
+                ),
                 "cves": cves,
             }
         )
+
+    jira_orgs: dict[str, list[str]] = {}
+    if need_jira_orgs:
+        jira = JiraClient()
+        try:
+            for key in dict.fromkeys(need_jira_orgs):
+                try:
+                    issue = jira.get_issue(key)
+                    jira_orgs[key] = list(issue.organizations or [])
+                except Exception:
+                    jira_orgs[key] = []
+        finally:
+            jira.close()
+        for item in out:
+            if not item.get("customer_names") and item.get("issue_key"):
+                item["customer_names"] = jira_orgs.get(item["issue_key"], [])
+
     return out
 
 
@@ -510,8 +554,43 @@ def delete_processing_runs_for_issue(issue_key: str):
             .filter(func.lower(ProcessingRun.issue_key) == fold)
             .delete(synchronize_session=False)
         )
+        db.query(IssueSyncSchedule).filter(
+            func.lower(IssueSyncSchedule.issue_key) == fold
+        ).delete(synchronize_session=False)
         db.commit()
     return {"ok": True, "deleted_count": n}
+
+
+class IssueSyncScheduleIn(BaseModel):
+    daily_sync_enabled: bool
+
+
+def _normalize_issue_key(raw: str) -> str:
+    key = (raw or "").strip().upper()
+    if not key:
+        raise HTTPException(status_code=400, detail="issue_key required")
+    return key
+
+
+@app.patch("/api/issues/{issue_key}/sync-schedule")
+def patch_issue_sync_schedule(issue_key: str, payload: IssueSyncScheduleIn):
+    key = _normalize_issue_key(issue_key)
+    with db_session() as db:
+        row = db.get(IssueSyncSchedule, key)
+        if not row:
+            row = IssueSyncSchedule(issue_key=key, daily_sync_enabled=payload.daily_sync_enabled)
+        else:
+            row.daily_sync_enabled = payload.daily_sync_enabled
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {
+            "issue_key": row.issue_key,
+            "daily_sync_enabled": row.daily_sync_enabled,
+            "last_auto_sync_at": (
+                row.last_auto_sync_at.isoformat() if row.last_auto_sync_at else None
+            ),
+        }
 
 
 def _pkg_version(name: str) -> str:

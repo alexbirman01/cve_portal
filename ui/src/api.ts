@@ -252,6 +252,11 @@ export type IssueCveStatusSummary = {
   updated_at?: string | null
   cve_count?: number | null
   needs_plat_cve_count?: number
+  /** JSM Organization / customer names from the parent ticket */
+  customer_names?: string[]
+  /** Dashboard checkbox: run Sync PLAT automatically once every 24 hours */
+  daily_sync_enabled?: boolean
+  last_auto_sync_at?: string | null
   /** PLAT-xxx keys from linked Jira tickets in the last run result */
   plat_keys?: string[]
   cves: IssueCveStatusEntry[]
@@ -868,6 +873,25 @@ export async function apiEnqueuePlatSync(runId: string): Promise<{ task_id: stri
 export async function apiCancelRun(runId: string): Promise<void> {
   const res = await fetch(`/api/jobs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
+}
+
+export type IssueSyncScheduleResponse = {
+  issue_key: string
+  daily_sync_enabled: boolean
+  last_auto_sync_at?: string | null
+}
+
+export async function apiPatchIssueSyncSchedule(
+  issueKey: string,
+  body: { daily_sync_enabled: boolean },
+): Promise<IssueSyncScheduleResponse> {
+  const res = await fetch(`/api/issues/${encodeURIComponent(issueKey)}/sync-schedule`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as IssueSyncScheduleResponse
 }
 
 export async function apiPatchCveRow(

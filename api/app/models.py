@@ -71,3 +71,18 @@ class CveCache(Base):
     raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
+
+class IssueSyncSchedule(Base):
+    """Per-ticket optional daily Sync PLAT schedule (dashboard checkbox)."""
+
+    __tablename__ = "issue_sync_schedules"
+
+    issue_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    daily_sync_enabled: Mapped[bool] = mapped_column(default=False)
+    last_auto_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
