@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     nvd_api_key: str | None = None
+    redhat_enrichment_enabled: bool = False
+    cve5_enrichment_enabled: bool = False
 
     # Comma-separated lowercase tokens used to decide if an image is a PlainID image.
     # Matched case-insensitively as a substring of image name or tag.
@@ -43,6 +45,8 @@ class Settings(BaseSettings):
     jira_plat_cf_internal_id: str = "customfield_10744"
     jira_plat_cf_package_name: str = "customfield_11243"
     jira_plat_cf_package_vuln_version: str = "customfield_11246"
+    # Fallback sent when affected_version is unknown but Jira requires the field.
+    jira_plat_package_vuln_version_fallback: str = "N/A"
     # PLAT Security Vulnerability: “Tag numbers” (PlainID customer field) — read on sync.
     jira_plat_tag_numbers_field_id: str = "customfield_11210"
 

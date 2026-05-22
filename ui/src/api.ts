@@ -276,6 +276,7 @@ export function dashboardTicketStatusLabel(status: string): string {
     failed: 'Failed',
     in_progress: 'In progress',
     done: 'Done',
+    cancelled: 'Cancelled',
   }
   return map[status] ?? status
 }
@@ -304,6 +305,8 @@ export function formatStatus(status?: string | null): string {
     downloading_attachments: 'Downloading attachments',
     parsing_attachments: 'Parsing attachments',
     enriching_nvd: 'Validating/enriching via NVD',
+    enriching_rh: 'Enriching via Red Hat Security',
+    enriching_cve5: 'Enriching via MITRE CVE 5.0',
     looking_up_plat_tickets: 'Looking up PLAT tickets',
     building_results: 'Building results',
     done: 'Done',
@@ -860,6 +863,24 @@ export function mergePlatCreateIntoRows(
 
 export async function apiEnqueuePlatSync(runId: string): Promise<{ task_id: string }> {
   return apiPost<{ task_id: string }>(`/api/jobs/${encodeURIComponent(runId)}/sync-plat`, {})
+}
+
+export async function apiCancelRun(runId: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function apiPatchCveRow(
+  runId: string,
+  cveId: string,
+  patch: { affected_version?: string | null },
+): Promise<void> {
+  const res = await fetch(`/api/jobs/${encodeURIComponent(runId)}/cve-row`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cve_id: cveId, ...patch }),
+  })
+  if (!res.ok) throw new Error(await res.text())
 }
 
 export type PlatMissingCveSlot = { cve_id: string; image_basename: string }

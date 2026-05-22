@@ -1328,7 +1328,9 @@ class JiraClient:
         if settings.jira_plat_cf_package_name:
             base_fields[settings.jira_plat_cf_package_name] = pkg
         if settings.jira_plat_cf_package_vuln_version:
-            base_fields[settings.jira_plat_cf_package_vuln_version] = package_vulnerable_version
+            base_fields[settings.jira_plat_cf_package_vuln_version] = (
+                package_vulnerable_version or settings.jira_plat_package_vuln_version_fallback
+            )
 
         dd = _jira_duedate_str(due_date)
         if dd:

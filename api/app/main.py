@@ -867,6 +867,60 @@ def enqueue_sync_plat(run_id: str):
     return {"task_id": async_result.id}
 
 
+@app.post("/api/jobs/{run_id}/cancel")
+def cancel_run(run_id: str):
+    """Terminate an in-progress processing or sync run."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid run id") from e
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        terminal = {"done", "cancelled"}
+        if run.status in terminal or (run.status or "").startswith("failed"):
+            raise HTTPException(status_code=409, detail=f"run already in terminal state: {run.status}")
+        task_id = run.celery_task_id
+        if task_id:
+            from worker.app.celery_app import celery_app as _celery
+            _celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        run.status = "cancelled"
+        db.add(run)
+        db.commit()
+    return {"ok": True}
+
+
+class CveRowPatchIn(BaseModel):
+    cve_id: str
+    affected_version: str | None = None
+
+
+@app.patch("/api/jobs/{run_id}/cve-row")
+def patch_cve_row(run_id: str, payload: CveRowPatchIn):
+    """Persist a manual field override on a specific CVE row within a run's result_json."""
+    rid = uuid.UUID(run_id)
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            raise HTTPException(status_code=404, detail="run not found")
+        data = json.loads(run.result_json)
+        rows: list[dict] = data.get("cve_rows") or []
+        patched = False
+        for row in rows:
+            if row.get("cve_id") == payload.cve_id:
+                if payload.affected_version is not None:
+                    row["affected_version"] = payload.affected_version or None
+                patched = True
+        if not patched:
+            raise HTTPException(status_code=404, detail="cve_id not found in run")
+        data["cve_rows"] = rows
+        run.result_json = json.dumps(data)
+        db.add(run)
+        db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/jobs/{run_id}")
 def job_status(run_id: str):
     rid = uuid.UUID(run_id)

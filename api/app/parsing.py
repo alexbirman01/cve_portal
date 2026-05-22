@@ -29,6 +29,8 @@ _COL_ALIASES: dict[str, list[str]] = {
 }
 
 _FIX_VER_RE = re.compile(r"fixed in\s+([^\s,;]+)", re.IGNORECASE)
+# Version-like string: starts with a digit, contains at least one dot or dash
+_PLAIN_VER_RE = re.compile(r"^\d[\w.\-+~^]*$")
 
 
 # ─── dataclasses ─────────────────────────────────────────────────────────────
@@ -92,8 +94,15 @@ def _find_col(header: tuple, alias_key: str) -> int | None:
 def _parse_fix_version(raw: str | None) -> str | None:
     if not raw:
         return None
-    m = _FIX_VER_RE.search(str(raw))
-    return m.group(1) if m else None
+    s = str(raw).strip()
+    # Pattern 1: "Fixed in 3.8.13"
+    m = _FIX_VER_RE.search(s)
+    if m:
+        return m.group(1)
+    # Pattern 2: bare version string like "3.8.13" or "1.2.3-4"
+    if _PLAIN_VER_RE.match(s):
+        return s
+    return None
 
 
 # ─── public extraction helpers ───────────────────────────────────────────────

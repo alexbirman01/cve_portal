@@ -8,6 +8,8 @@ import {
   apiDeleteCustomerSla,
   apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
+  apiCancelRun,
+  apiPatchCveRow,
   apiGet,
   apiGetAbout,
   apiGetClientConfig,
@@ -123,10 +125,11 @@ function StepList({ status }: { status?: string | null }) {
 
 function StatusBadge({ status }: { status?: string | null }) {
   if (!status) return null
-  const isDone    = status === 'done'
-  const isFailed  = status.startsWith('failed')
-  const isRunning = !isDone && !isFailed && status !== 'queued'
-  const cls = isDone ? 'statusDone' : isFailed ? 'statusFailed' : isRunning ? 'statusRunning' : 'statusQueued'
+  const isDone      = status === 'done'
+  const isFailed    = status.startsWith('failed')
+  const isCancelled = status === 'cancelled'
+  const isRunning   = !isDone && !isFailed && !isCancelled && status !== 'queued'
+  const cls = isDone ? 'statusDone' : isFailed ? 'statusFailed' : isCancelled ? 'statusCancelled' : isRunning ? 'statusRunning' : 'statusQueued'
   return <span className={`statusBadge ${cls}`}>{formatStatus(status)}</span>
 }
 
@@ -353,6 +356,64 @@ const DEFAULT_CVE_TABLE_COLUMN_VISIBILITY: Record<CveTableColumnKey, boolean> = 
 
 type CveTableColumnVisibility = Record<CveTableColumnKey, boolean>
 
+// ─── inline editable cell ─────────────────────────────────────────────────────
+
+function InlineEditCell({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const committedRef = useRef(false)
+
+  const startEditing = () => {
+    committedRef.current = false
+    setDraft(value)
+    setEditing(true)
+    // Focus happens after the input mounts
+    requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    })
+  }
+
+  const commit = () => {
+    if (committedRef.current) return
+    committedRef.current = true
+    setEditing(false)
+    onCommit(draft.trim())
+  }
+
+  const cancel = () => {
+    committedRef.current = true
+    setEditing(false)
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="inlineEditInput mono"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commit() }
+          if (e.key === 'Escape') { e.preventDefault(); cancel() }
+        }}
+      />
+    )
+  }
+
+  return (
+    <span
+      className={value ? 'inlineEditValue mono' : 'inlineEditEmpty'}
+      title={value ? 'Click to edit' : 'Click to set affected version'}
+      onClick={startEditing}
+    >
+      {value || '—'}
+    </span>
+  )
+}
+
 // ─── CVE table ───────────────────────────────────────────────────────────────
 
 function CveTable({
@@ -362,6 +423,7 @@ function CveTable({
   platOrganizationRefs,
   onPlatCreated,
   onPlatBugCreated,
+  onRowUpdated,
   hideBuiltInToolbar,
   sourceRowCount,
   onClearSearch,
@@ -374,6 +436,7 @@ function CveTable({
   platOrganizationRefs?: OrgRef[] | null
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   onPlatBugCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
+  onRowUpdated?: (cveId: string, patch: Partial<CveRow>) => void
   hideBuiltInToolbar?: boolean
   /** When search hides all rows but source had rows, show clear action */
   sourceRowCount?: number
@@ -893,9 +956,10 @@ function CveTable({
               ) : null}
               {vis.affectedVer ? (
               <td>
-                {r.affected_version
-                  ? <span className="mono">{r.affected_version}</span>
-                  : <Dash />}
+                <InlineEditCell
+                  value={r.affected_version ?? ''}
+                  onCommit={(val) => onRowUpdated?.(r.cve_id, { affected_version: val || null })}
+                />
               </td>
               ) : null}
               {vis.vendorFix ? (
@@ -1413,15 +1477,18 @@ function TicketPanel({
   loading,
   onStartProcessing,
   onViewResults,
+  onCancel,
 }: {
   issue: IssueResponse
   job: JobResponse | null
   loading: boolean
   onStartProcessing: () => void
   onViewResults: () => void
+  onCancel?: () => void
 }) {
   const isDone = job?.status === 'done'
-  const isActive = !!job?.status && !isDone && !job.status.startsWith('failed')
+  const isCancelled = job?.status === 'cancelled'
+  const isActive = !!job?.status && !isDone && !isCancelled && !job.status.startsWith('failed')
 
   return (
     <div className="card">
@@ -1430,15 +1497,20 @@ function TicketPanel({
         <div className="ticketTitleRow">
           <div className="ticketSummary">{issue.summary ?? '—'}</div>
           <div className="ticketActions">
-            {!isDone && (
+            {!isDone && !isCancelled && (
               <button className="btn btnPrimary" disabled={loading || isActive} onClick={onStartProcessing}>
                 {isActive ? 'Processing…' : 'Start processing'}
+              </button>
+            )}
+            {isActive && onCancel && (
+              <button className="btn btnDanger btnSm" onClick={onCancel} title="Stop processing">
+                Stop
               </button>
             )}
             {isDone && (
               <button className="btn btnPrimary" onClick={onViewResults}>View results</button>
             )}
-            {isDone && (
+            {(isDone || isCancelled) && (
               <button className="btn btnSecondary" onClick={onStartProcessing} disabled={loading}>Re-run</button>
             )}
             {job?.status && <StatusBadge status={job.status} />}
@@ -1901,6 +1973,7 @@ function ResultsPanel({
   onRefreshSuggestedComment,
   commentPosted,
   allowedImageNames,
+  onCancel,
 }: {
   issue: IssueResponse
   job: JobResponse
@@ -1915,6 +1988,7 @@ function ResultsPanel({
   onRefreshSuggestedComment: () => Promise<void>
   commentPosted: boolean
   allowedImageNames?: Set<string>
+  onCancel?: () => void
 }) {
   const [rows, setRows] = useState<CveRow[]>([])
   const [filterText, setFilterText] = useState('')
@@ -1966,6 +2040,15 @@ function ResultsPanel({
 
   const onPlatBugCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
     setRows((prev) => mergePlatBugCreateIntoRows(prev, cveId, imageBasename, out))
+  }
+
+  const onRowUpdated = (cveId: string, patch: Partial<CveRow>) => {
+    setRows((prev) => prev.map((r) => r.cve_id === cveId ? { ...r, ...patch } : r))
+    if (job.run_id) {
+      apiPatchCveRow(job.run_id, cveId, {
+        affected_version: patch.affected_version ?? undefined,
+      }).catch((err) => console.error('Failed to persist cve row patch:', err))
+    }
   }
 
   const findingsSeveritySummary = useMemo(() => aggregateSeverityLabel(rows), [rows])
@@ -2191,6 +2274,16 @@ function ResultsPanel({
             ) : (
               <StatusBadge status={job.status} />
             )}
+            {job.status.startsWith('failed') && (
+              <button className="btn btnSecondary btnSm" onClick={() => void onReprocessTicket()} title="Re-run processing">
+                Re-run
+              </button>
+            )}
+            {onCancel && job.status !== 'done' && job.status !== 'cancelled' && !job.status.startsWith('failed') && (
+              <button className="btn btnDanger btnSm" onClick={onCancel} title="Stop processing or sync">
+                Stop
+              </button>
+            )}
             <ResultsOverflowMenu issueKey={issue.key} />
           </div>
         </div>
@@ -2301,6 +2394,7 @@ function ResultsPanel({
           platOrganizationRefs={platOrgRefsFromIssue(issue)}
           onPlatCreated={onPlatCreated}
           onPlatBugCreated={onPlatBugCreated}
+          onRowUpdated={onRowUpdated}
           hideBuiltInToolbar={findingsReady}
           sourceRowCount={rows.length}
           onClearSearch={findingsReady && rows.length > 0 ? clearCveSearch : undefined}
@@ -2959,7 +3053,7 @@ function App() {
           setViewMode('results')
           clearInterval(t)
         }
-        if (j.status.startsWith('failed')) clearInterval(t)
+        if (j.status.startsWith('failed') || j.status === 'cancelled') clearInterval(t)
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? String(e))
@@ -3091,6 +3185,16 @@ function App() {
       const j = await refreshJob()
       setCommentPosted(false)
       if (j.result) setCommentBody(buildSuggestedComment(j.result))
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    }
+  }, [runId, refreshJob])
+
+  const cancelRun = useCallback(async () => {
+    if (!runId) return
+    try {
+      await apiCancelRun(runId)
+      await refreshJob()
     } catch (e: any) {
       setError(e?.message ?? String(e))
     }
@@ -3228,6 +3332,7 @@ function App() {
                 onRefreshSuggestedComment={refreshSuggestedComment}
                 commentPosted={commentPosted}
                 allowedImageNames={allowedImageNames}
+                onCancel={cancelRun}
               />
             )}
 
@@ -3247,6 +3352,7 @@ function App() {
                   }
                   setViewMode('results')
                 }}
+                onCancel={cancelRun}
               />
             )}
           </>

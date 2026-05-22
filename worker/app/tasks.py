@@ -13,6 +13,8 @@ from api.app.allowed_images import load_alias_map, normalize_image_basename
 from api.app.models import CveCache, CustomerSla, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
+from api.app.redhat_client import RedHatClient
+from api.app.cve5_client import Cve5Client
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
 from worker.app.celery_app import celery_app
 
@@ -178,6 +180,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "filename": parsed.filename,
                     "mimeType": parsed.mime_type,
                     "status": parsed.status,
+                    "text_preview": parsed.text_preview,
                     "cves": [{"cve_id": c.cve_id, "source": c.source} for c in parsed.cves],
                     "images": [{"image": i.image, "tag": i.tag, "source": i.source} for i in parsed.images],
                     "packages": [
@@ -210,7 +213,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 for cve_id in cve_ids:
                     cached = db.get(CveCache, cve_id)
                     if cached and cached.state == "ok":
-                        # Re-parse packages from cached raw_json (no schema change needed).
+                        # Re-parse packages from cached raw_json.
                         pkgs = []
                         if cached.raw_json:
                             try:
@@ -275,6 +278,109 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         finally:
             nvd.close()
 
+        if settings.redhat_enrichment_enabled:
+            _set_run_status(run_id, "enriching_rh")
+            rh = RedHatClient()
+            try:
+                for entry in enriched:
+                    # Only call Red Hat when NVD is missing packages or severity/score.
+                    if entry.get("packages") and entry.get("severity") and entry.get("score"):
+                        continue
+                    rh_cve = rh.fetch_cve(entry["cve_id"])
+                    if not rh_cve:
+                        continue
+                    if not entry.get("packages") and rh_cve.packages:
+                        entry["packages"] = rh_cve.packages
+                    if not entry.get("severity") and rh_cve.severity:
+                        entry["severity"] = rh_cve.severity
+                    if not entry.get("score") and rh_cve.score:
+                        entry["score"] = rh_cve.score
+            finally:
+                rh.close()
+
+        # 3rd fallback: MITRE CVE 5.0 API — authoritative CNA version ranges.
+        # NVD's CPE layer sometimes drops version info that the CNA published in CVE 5.0 JSON.
+        # Enabled via CVE5_ENRICHMENT_ENABLED=true (disabled by default).
+        if settings.cve5_enrichment_enabled:
+            _set_run_status(run_id, "enriching_cve5")
+            cve5 = Cve5Client()
+            try:
+                for entry in enriched:
+                    if entry.get("packages") and all(
+                        p.get("version_start") or p.get("fixed_version")
+                        for p in entry["packages"]
+                    ):
+                        continue
+                    cve5_result = cve5.fetch_cve(entry["cve_id"])
+                    if not cve5_result or not cve5_result.packages:
+                        continue
+                    if not entry.get("packages"):
+                        entry["packages"] = cve5_result.packages
+                    else:
+                        # Merge: fill in missing version_start / fixed_version from CVE 5.0
+                        cve5_by_product = {
+                            p["product"].lower(): p for p in cve5_result.packages
+                        }
+                        for pkg in entry["packages"]:
+                            c5 = cve5_by_product.get((pkg.get("product") or "").lower())
+                            if not c5:
+                                continue
+                            if not pkg.get("version_start") and c5.get("version_start"):
+                                pkg["version_start"] = c5["version_start"]
+                            if not pkg.get("fixed_version") and c5.get("fixed_version"):
+                                pkg["fixed_version"] = c5["fixed_version"]
+            finally:
+                cve5.close()
+
+        # 4th fallback: fill missing packages / versions from ticket attachment columns
+        # ("Package Version" and "Fix Status").  Unlike the API fallbacks, ticket data
+        # is also merged into existing NVD package entries to fill missing version fields.
+        ticket_pkgs: dict[str, list[dict[str, Any]]] = {}
+        for att in parsed_attachments:
+            for p in att.get("packages") or []:
+                cve = (p.get("cve_id") or "").strip().upper()
+                if not cve:
+                    continue
+                ticket_pkgs.setdefault(cve, []).append({
+                    "vendor": "ticket",
+                    "product": (p.get("package_name") or "").strip(),
+                    "version_start": (p.get("package_version") or "").strip() or None,
+                    "fixed_version": (p.get("fixed_version") or "").strip() or None,
+                })
+        for entry in enriched:
+            t_pkgs = ticket_pkgs.get(entry["cve_id"])
+            if not t_pkgs:
+                continue
+            t_with_product = [p for p in t_pkgs if p.get("product")]
+            if not t_with_product:
+                continue
+            if not entry.get("packages"):
+                # No packages from online sources — use ticket data wholesale.
+                entry["packages"] = list(t_with_product)
+            else:
+                # Merge ticket version fields into NVD entries with matching product names.
+                t_by_product = {p["product"].lower(): p for p in t_with_product}
+                matched_ticket: set[str] = set()
+                for pkg in entry["packages"]:
+                    tp = t_by_product.get((pkg.get("product") or "").lower())
+                    if not tp:
+                        continue
+                    matched_ticket.add(tp["product"].lower())
+                    if not pkg.get("version_start") and tp.get("version_start"):
+                        pkg["version_start"] = tp["version_start"]
+                    if not pkg.get("fixed_version") and tp.get("fixed_version"):
+                        pkg["fixed_version"] = tp["fixed_version"]
+                # No name match (e.g. NVD "gnutls" vs scan "libgnutls30") — primary
+                # row fields come from the attachment, not NVD metadata.
+                if not matched_ticket:
+                    tp = t_with_product[0]
+                    entry["attachment_primary"] = {
+                        "product": tp["product"],
+                        "version_start": tp.get("version_start"),
+                        "fixed_version": tp.get("fixed_version"),
+                    }
+
+
         # Look up associated PLAT tickets (Security Vulnerability + Bug) for each CVE.
         _set_run_status(run_id, "looking_up_plat_tickets")
         cve_to_plat: dict[str, list[dict]] = {}
@@ -322,6 +428,17 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 if not existing or _ver_tuple(p.get("fixed_version")) > _ver_tuple(existing.get("fixed_version")):
                     seen[key] = p
             return list(seen.values())
+
+        def _pick_best_nvd_package(pkgs: list[dict]) -> dict | None:
+            if not pkgs:
+                return None
+            for p in pkgs:
+                if p.get("version_start"):
+                    return p
+            for p in pkgs:
+                if p.get("fixed_version"):
+                    return p
+            return pkgs[0]
 
         # Build PlainID image filter from configurable token list.
         _plainid_tokens = tuple(
@@ -400,13 +517,20 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
 
-            # Take package/product resource metadata only from trusted source like NVD.
-            # Avoid using customer-reported data (Excel, JSON attachments, etc.) for product/package info.
+            # Package/resource metadata priority: NVD CPE → Red Hat errata → MITRE CVE 5.0 → ticket attachments.
+            # The enrichment phases above (enriching_nvd, enriching_rh, ticket fallback) populate
+            # entry["packages"] in that priority order before we reach this point.
             nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
-            first_np = nvd_pkgs[0] if nvd_pkgs else None
-            affected_resource = first_np["product"] if first_np else None
-            affected_version = first_np["version_start"] if first_np else None
-            fixed_version = first_np["fixed_version"] if first_np else None
+            attach_primary = nvd_entry.get("attachment_primary")
+            if attach_primary:
+                primary = attach_primary
+            elif nvd_pkgs:
+                primary = _pick_best_nvd_package(nvd_pkgs)
+            else:
+                primary = None
+            affected_resource = primary.get("product") if primary else None
+            affected_version = primary.get("version_start") if primary else None
+            fixed_version = primary.get("fixed_version") if primary else None
             all_packages = nvd_pkgs
 
             raw_plat = cve_to_plat.get(cve_id, [])
@@ -480,6 +604,9 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 link_counts = _link_plat_rows(_jira_link, cve_rows, issue.key)
             finally:
                 _jira_link.close()
+
+        for entry in enriched:
+            entry.pop("attachment_primary", None)
 
         result = {
             "issue_key": issue.key,

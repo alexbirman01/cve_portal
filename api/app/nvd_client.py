@@ -61,7 +61,6 @@ class NvdClient:
         published = cve.get("published")
         modified = cve.get("lastModified")
         severity, score = _extract_cvss(cve.get("metrics") or {})
-
         affected_packages = _extract_affected_packages(cve)
 
         return NvdCve(
@@ -101,6 +100,13 @@ def _extract_affected_packages(cve_data: dict[str, Any]) -> list[AffectedPackage
                     match.get("versionEndExcluding")
                     or match.get("versionEndIncluding")
                 )
+                # For exact CPE matches (no range fields), the affected version
+                # is encoded directly in the CPE string at parts[5].
+                # e.g. cpe:2.3:a:oracle:jre:1.8.0:update481:... → "1.8.0"
+                if not version_start and not fixed_version and len(parts) > 5:
+                    inline_ver = parts[5]
+                    if inline_ver not in ("*", "-", ""):
+                        version_start = inline_ver
                 key = (vendor, product, version_start, fixed_version)
                 if key in seen:
                     continue
