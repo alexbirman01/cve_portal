@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     jira_plat_cf_team_field_id: str = "customfield_10776"
     jira_plat_cf_team_value: str | None = None
 
+    # Aqua Security CSP (read-only GET — no scans triggered).
+    aqua_token_url: str = "https://eu-1.api.cloudsploit.com/v2/tokens"
+    aqua_api_key: str = ""
+    aqua_api_secret: str = ""
+    aqua_packages_ttl_hours: int = 168
+    aqua_preferred_registry: str = "PlainID DHub"
+    aqua_default_image_tag: str = "latest"
+
 
 settings = Settings()
 

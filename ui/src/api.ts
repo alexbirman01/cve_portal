@@ -86,6 +86,41 @@ export type CveRow = {
    * @deprecated Legacy rollup from older sync — prefer plat_security_field_sync.
    */
   plat_tag_numbers?: string | null
+  /** True when Aqua confirmed package name; false = block PLAT CVE create; null/undefined = Aqua not configured. */
+  aqua_pkg_found?: boolean | null
+  aqua_package_name?: string | null
+  aqua_candidates?: AquaPackageCandidate[]
+  /** @deprecated Replaced by package_by_image — kept for backward compat with cached runs. */
+  aqua_pkg_by_image?: Record<string, AquaPkgByImageEntry>
+  /** Per-image package + Aqua status. Prefer this over aqua_pkg_by_image. */
+  package_by_image?: Record<string, PackageByImageEntry>
+}
+
+export type AquaPackageCandidate = {
+  name: string
+  version?: string | null
+  source: 'customer' | 'nvd' | 'aqua' | string
+}
+
+export type AquaPkgByImageEntry = {
+  found: boolean
+  aqua_package_name?: string | null
+  aqua_package_version?: string | null
+  candidates?: AquaPackageCandidate[]
+  aqua_checked?: boolean
+}
+
+export type PackageByImageEntry = {
+  /** Package name used for this image's Aqua lookup. */
+  affected_resource: string | null
+  aqua_pkg_found?: boolean | null
+  aqua_package_name?: string | null
+  aqua_package_version?: string | null
+  aqua_candidates?: AquaPackageCandidate[]
+  aqua_checked?: boolean
+  /** Jira tag when catalog came from another Aqua tag (e.g. latest). */
+  aqua_tag_requested?: string | null
+  aqua_tag_used?: string | null
 }
 
 export type JobResult = {
@@ -213,6 +248,83 @@ export function isAllowedImageBasename(basename: string, allowed: Set<string>): 
   return allowed.has(basename.toLowerCase())
 }
 
+export type AquaCachedImageSummary = {
+  registry: string
+  repository: string
+  tag: string
+  display: string
+  package_count: number
+  fetched_at: string | null
+  fresh: boolean
+}
+
+export type AquaCachedPackage = {
+  name: string
+  version?: string | null
+  fix_version?: string | null
+}
+
+export type AquaPackagesCatalogResponse = {
+  aqua_configured: boolean
+  ttl_hours: number
+  default_ttl_hours: number
+  images: AquaCachedImageSummary[]
+}
+
+export type AquaPackageEntryResponse = AquaCachedImageSummary & {
+  packages: AquaCachedPackage[]
+}
+
+export type AquaPackagesSettingsResponse = {
+  ttl_hours: number
+  default_ttl_hours: number
+  aqua_configured: boolean
+}
+
+export async function apiListAquaPackages(): Promise<AquaPackagesCatalogResponse> {
+  return apiGet('/api/aqua-packages')
+}
+
+export async function apiGetAquaPackagesSettings(): Promise<AquaPackagesSettingsResponse> {
+  return apiGet('/api/aqua-packages/settings')
+}
+
+export async function apiPatchAquaPackagesSettings(ttl_hours: number): Promise<{ ok: boolean; ttl_hours: number }> {
+  const res = await fetch('/api/aqua-packages/settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ttl_hours }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as { ok: boolean; ttl_hours: number }
+}
+
+export async function apiGetAquaPackageEntry(
+  registry: string,
+  repository: string,
+  tag: string,
+): Promise<AquaPackageEntryResponse> {
+  const q = new URLSearchParams({ registry, repository, tag })
+  return apiGet(`/api/aqua-packages/entry?${q}`)
+}
+
+export async function apiDeleteAquaPackageEntry(
+  registry: string,
+  repository: string,
+  tag: string,
+): Promise<void> {
+  const q = new URLSearchParams({ registry, repository, tag })
+  return apiDelete(`/api/aqua-packages/entry?${q}`)
+}
+
+export async function apiRefreshAquaPackageEntry(
+  registry: string,
+  repository: string,
+  tag: string,
+): Promise<AquaCachedImageSummary> {
+  return apiPost('/api/aqua-packages/refresh', { registry, repository, tag })
+}
+
 export type HistoryRun = {
   run_id: string
   issue_key: string
@@ -241,6 +353,7 @@ export type DashboardTicketStatus = 'processing' | 'failed' | 'in_progress' | 'd
 export type DashboardRemediationStatus =
   | 'error'
   | 'processing'
+  | 'package_not_matched'
   | 'needs_plat'
   | 'initialized'
   | 'waiting_release_date'
@@ -311,7 +424,7 @@ export function ticketStatusForSummary(s: IssueCveStatusSummary): DashboardTicke
 export function remediationStatusForSummary(s: IssueCveStatusSummary): DashboardRemediationStatus {
   const rs = s.remediation_status
   if (
-    rs === 'error' || rs === 'processing' || rs === 'needs_plat' ||
+    rs === 'error' || rs === 'processing' || rs === 'package_not_matched' || rs === 'needs_plat' ||
     rs === 'initialized' || rs === 'waiting_release_date' || rs === 'waiting_tags' || rs === 'done'
   ) return rs
   // Fallback for old cached API responses that only have ticket_status
@@ -326,6 +439,7 @@ export function dashboardRemediationStatusLabel(status: DashboardRemediationStat
   const map: Record<string, string> = {
     error: 'Error',
     processing: 'Processing',
+    package_not_matched: 'Package not matched',
     needs_plat: 'Needs PLAT',
     initialized: 'Initialized',
     waiting_release_date: 'Waiting for release date',
@@ -352,6 +466,7 @@ export function formatStatus(status?: string | null): string {
     enriching_cve5: 'Enriching via MITRE CVE 5.0',
     looking_up_plat_tickets: 'Looking up PLAT tickets',
     building_results: 'Building results',
+    enriching_aqua: 'Cross-checking packages in Aqua',
     done: 'Done',
     syncing_plat: 'Syncing PLAT with Jira',
     // Legacy (removed Aqua phase)
@@ -378,6 +493,7 @@ export function statusSteps(status?: string | null) {
     { id: 'enriching_nvd', label: 'NVD enrichment' },
     { id: 'looking_up_plat_tickets', label: 'Look up PLAT tickets' },
     { id: 'building_results', label: 'Build results' },
+    { id: 'enriching_aqua', label: 'Aqua package check' },
     { id: 'syncing_plat', label: 'Sync PLAT (Jira)' },
     { id: 'done', label: 'Done' },
   ]
@@ -514,8 +630,109 @@ export async function apiCreatePlatBug(body: {
   return JSON.parse(text) as CreatePlatResponse
 }
 
+/** Per-image package entry — reads new package_by_image first, falls back to aqua_pkg_by_image. */
+export function packageEntryForImage(
+  r: CveRow,
+  imageBasename: string,
+): PackageByImageEntry | undefined {
+  const fold = imageBasename.toLowerCase()
+  const pbi = r.package_by_image
+  if (pbi) {
+    if (pbi[imageBasename]) return pbi[imageBasename]
+    for (const [k, v] of Object.entries(pbi)) {
+      if (k.toLowerCase() === fold) return v
+    }
+  }
+  // Fallback: convert legacy aqua_pkg_by_image entry to PackageByImageEntry shape
+  const m = r.aqua_pkg_by_image
+  if (m) {
+    const legacy = m[imageBasename] ?? Object.entries(m).find(([k]) => k.toLowerCase() === fold)?.[1]
+    if (legacy) {
+      return {
+        affected_resource: r.affected_resource ?? null,
+        aqua_pkg_found: legacy.found,
+        aqua_package_name: legacy.aqua_package_name,
+        aqua_package_version: legacy.aqua_package_version,
+        aqua_candidates: legacy.candidates,
+        aqua_checked: legacy.aqua_checked,
+      }
+    }
+  }
+  return undefined
+}
+
+/** @deprecated Use packageEntryForImage instead. */
+export function aquaPkgEntryForImage(
+  r: CveRow,
+  imageBasename: string,
+): AquaPkgByImageEntry | undefined {
+  const e = packageEntryForImage(r, imageBasename)
+  if (!e) return undefined
+  return {
+    found: e.aqua_pkg_found === true,
+    aqua_package_name: e.aqua_package_name,
+    aqua_package_version: e.aqua_package_version,
+    candidates: e.aqua_candidates,
+    aqua_checked: e.aqua_checked,
+  }
+}
+
+/** Whether PLAT CVE create is allowed for this image (Aqua must confirm when checked). */
+export function aquaAllowsPlatCreate(r: CveRow, imageBasename: string): boolean {
+  const entry = packageEntryForImage(r, imageBasename)
+  if (entry?.aqua_checked) return entry.aqua_pkg_found === true
+  if (r.aqua_pkg_found === true || r.aqua_pkg_found === false) return r.aqua_pkg_found === true
+  return true
+}
+
+export function aquaCandidateSourceLabel(source: string): string {
+  if (source === 'customer') return 'Customer report'
+  if (source === 'nvd') return 'NVD'
+  if (source === 'aqua') return 'Aqua'
+  return source
+}
+
+export type PackagePickOption = {
+  source: 'aqua' | 'customer' | 'nvd'
+  value: string
+  label: string
+}
+
+/** Fixed-order pick list when Aqua did not confirm the package (aqua / customer / nvd). */
+export function packagePickOptions(
+  row: CveRow,
+  candidates: AquaPackageCandidate[],
+  entry?: PackageByImageEntry,
+): PackagePickOption[] {
+  const nameFor = (source: string) =>
+    candidates.find((c) => c.source === source)?.name?.trim() ?? ''
+  const customer =
+    nameFor('customer') ||
+    (entry?.affected_resource ?? row.affected_resource ?? '').trim()
+  const nvd =
+    nameFor('nvd') ||
+    (row.all_packages?.map((p) => (p.product ?? '').trim()).find(Boolean) ?? '')
+  const aqua = nameFor('aqua')
+  const label = (source: string, name: string) => {
+    if (name) return `${source} — ${name}`
+    if (source === 'aqua') return 'aqua — not found'
+    return `${source} — none`
+  }
+  return [
+    { source: 'aqua', value: aqua, label: label('aqua', aqua) },
+    { source: 'customer', value: customer, label: label('customer', customer) },
+    { source: 'nvd', value: nvd, label: label('nvd', nvd) },
+  ]
+}
+
 /** Best-effort package / component name for PLAT “Package Name” field. */
-export function platPackageNameForRow(r: CveRow): string {
+export function platPackageNameForRow(r: CveRow, imageBasename?: string): string {
+  if (imageBasename) {
+    const entry = packageEntryForImage(r, imageBasename)
+    if (entry?.aqua_pkg_found && entry.aqua_package_name) return entry.aqua_package_name.trim()
+    if (entry?.affected_resource) return entry.affected_resource.trim()
+  }
+  if (r.aqua_package_name?.trim()) return r.aqua_package_name.trim()
   const res = (r.affected_resource ?? '').trim()
   if (res) return res
   const product = r.all_packages?.map((p) => (p.product ?? '').trim()).find(Boolean)
@@ -932,17 +1149,35 @@ export async function apiPatchIssueSyncSchedule(
   return (await res.json()) as IssueSyncScheduleResponse
 }
 
+export type CveRowPatchResponse = {
+  ok: boolean
+  aqua_pkg_found?: boolean | null
+  aqua_package_name?: string | null
+  aqua_candidates?: AquaPackageCandidate[]
+  affected_resource?: string | null
+  /** Updated per-image entry for the patched image_basename. */
+  package_by_image_entry?: PackageByImageEntry | null
+  /** Full updated package_by_image map. */
+  package_by_image?: Record<string, PackageByImageEntry>
+}
+
 export async function apiPatchCveRow(
   runId: string,
   cveId: string,
-  patch: { affected_version?: string | null },
-): Promise<void> {
+  patch: {
+    affected_version?: string | null
+    affected_resource?: string | null
+    image_basename?: string | null
+    force_refresh_aqua?: boolean
+  },
+): Promise<CveRowPatchResponse> {
   const res = await fetch(`/api/jobs/${encodeURIComponent(runId)}/cve-row`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cve_id: cveId, ...patch }),
   })
   if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as CveRowPatchResponse
 }
 
 export type PlatMissingCveSlot = { cve_id: string; image_basename: string }
@@ -1102,8 +1337,38 @@ type CustomerStatusTableRow = {
   cve: string
   severity: string
   image: string
+  packageName: string
   expectedRelease: string
   fixVersion: string
+}
+
+/** Package column for customer comment: name when verified in image, else Package not found. */
+function formatPackageForComment(r: CveRow, imageBasename: string): string {
+  const entry = packageEntryForImage(r, imageBasename)
+  const checked =
+    entry?.aqua_checked === true ||
+    entry?.aqua_checked === false ||
+    r.aqua_pkg_found === true ||
+    r.aqua_pkg_found === false
+
+  if (checked) {
+    const found =
+      entry?.aqua_checked != null
+        ? entry.aqua_pkg_found === true
+        : r.aqua_pkg_found === true
+    if (found) {
+      return (
+        entry?.aqua_package_name ||
+        entry?.affected_resource ||
+        r.affected_resource ||
+        ''
+      ).trim() || '—'
+    }
+    return 'Package not found'
+  }
+
+  const name = (entry?.affected_resource ?? r.affected_resource ?? '').trim()
+  return name || '—'
 }
 
 function formatCveSeverityForComment(r: CveRow): string {
@@ -1121,20 +1386,24 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
     const severity = formatCveSeverityForComment(r)
     const basenames = imageBasenamesForCveRow(r)
 
-    const pushRow = (imageLabel: string, secKeys: string[]) => {
+    const pushRow = (imageLabel: string, secKeys: string[], imageBasename?: string) => {
       const { fix, tag } = commentPlatRawForKeys(r, secKeys)
+      const bn = imageBasename ?? ''
+      const packageName = bn ? formatPackageForComment(r, bn) : '—'
+      const packageMissing = packageName === 'Package not found'
       out.push({
         cve: r.cve_id,
         severity,
         image: imageLabel,
-        expectedRelease: plainIdExpectedReleaseDate(fix, tag),
-        fixVersion: plainIdReleaseVersion(tag),
+        packageName,
+        expectedRelease: packageMissing ? 'N/A' : plainIdExpectedReleaseDate(fix, tag),
+        fixVersion: packageMissing ? 'N/A' : plainIdReleaseVersion(tag),
       })
     }
 
     if (basenames.length > 0) {
       for (const bn of basenames) {
-        pushRow(platDisplayLabelForImage(r, bn), platSecKeysForImage(r, bn))
+        pushRow(platDisplayLabelForImage(r, bn), platSecKeysForImage(r, bn), bn)
       }
       const orphan = platOrphanSecKeys(r)
       if (orphan.length) {
@@ -1149,11 +1418,15 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
         ? `${r.affected_image.replace(/^plainid\//i, '')}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
         : ''
     if (legacyPath) {
-      pushRow(legacyPath, platSecurityKeys(r))
+      const legacyBn = imageBasenamesForCveRow(r)[0]
+      pushRow(legacyPath, platSecurityKeys(r), legacyBn)
     } else if (imgs.length) {
       for (const img of imgs) {
         const label = `${img.image.replace(/^plainid\//i, '')}${img.tag ? `:${String(img.tag).trim()}` : ''}`
-        pushRow(label, platSecurityKeys(r))
+        const bn = imageBasenamesForCveRow(r).find(
+          (b) => platDisplayLabelForImage(r, b) === label,
+        )
+        pushRow(label, platSecurityKeys(r), bn)
       }
     } else {
       pushRow('—', platSecurityKeys(r))
@@ -1172,14 +1445,16 @@ function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[
     cve: 'CVE',
     sev: 'Severity',
     img: 'Image',
+    pkg: 'Package',
     date: 'Expected release date',
     ver: 'Fix Version',
   }
-  const minW = { cve: 12, sev: 8, img: 5, date: 22, ver: 10 }
+  const minW = { cve: 12, sev: 8, img: 5, pkg: 7, date: 22, ver: 10 }
   const w = {
     cve: Math.max(minW.cve, colHeaders.cve.length, ...tableRows.map((r) => r.cve.length)),
     sev: Math.max(minW.sev, colHeaders.sev.length, ...tableRows.map((r) => r.severity.length)),
     img: Math.max(minW.img, colHeaders.img.length, ...tableRows.map((r) => r.image.length)),
+    pkg: Math.max(minW.pkg, colHeaders.pkg.length, ...tableRows.map((r) => r.packageName.length)),
     date: Math.max(minW.date, colHeaders.date.length, ...tableRows.map((r) => r.expectedRelease.length)),
     ver: Math.max(minW.ver, colHeaders.ver.length, ...tableRows.map((r) => r.fixVersion.length)),
   }
@@ -1187,6 +1462,7 @@ function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[
     padTableCell(colHeaders.cve, w.cve),
     padTableCell(colHeaders.sev, w.sev),
     padTableCell(colHeaders.img, w.img),
+    padTableCell(colHeaders.pkg, w.pkg),
     padTableCell(colHeaders.date, w.date),
     padTableCell(colHeaders.ver, w.ver),
   ].join(' | ')
@@ -1194,6 +1470,7 @@ function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[
     '-'.repeat(w.cve),
     '-'.repeat(w.sev),
     '-'.repeat(w.img),
+    '-'.repeat(w.pkg),
     '-'.repeat(w.date),
     '-'.repeat(w.ver),
   ].join('-+-')
@@ -1202,6 +1479,7 @@ function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[
       padTableCell(row.cve, w.cve),
       padTableCell(row.severity, w.sev),
       padTableCell(row.image, w.img),
+      padTableCell(row.packageName, w.pkg),
       padTableCell(row.expectedRelease, w.date),
       padTableCell(row.fixVersion, w.ver),
     ].join(' | '),

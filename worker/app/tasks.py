@@ -19,6 +19,9 @@ from api.app.nvd_client import NvdClient, _extract_affected_packages
 from api.app.redhat_client import RedHatClient
 from api.app.cve5_client import Cve5Client
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
+from api.app.aqua_client import AquaClient
+from api.app.aqua_packages import candidates_to_json, cross_check_package
+from api.app.cve_row_derived import _image_path_basename, image_basenames_for_cve_row
 from worker.app.celery_app import celery_app
 
 
@@ -576,6 +579,96 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     ),
                 }
             )
+
+        _set_run_status(run_id, "enriching_aqua")
+        if (settings.aqua_api_key or "").strip():
+            with db_session() as db:
+                aqua = AquaClient()
+                try:
+                    for row in cve_rows:
+                        cve_id = row.get("cve_id") or ""
+                        nvd_entry = nvd_by_id.get(cve_id, {})
+                        attach_primary = nvd_entry.get("attachment_primary") or {}
+                        customer_name = (attach_primary.get("product") or "").strip() or None
+                        nvd_pkgs = row.get("all_packages") or []
+                        nvd_name = None
+                        if nvd_pkgs and isinstance(nvd_pkgs[0], dict):
+                            nvd_name = (nvd_pkgs[0].get("product") or "").strip() or None
+                        search_name = (row.get("affected_resource") or "").strip()
+                        if not search_name:
+                            continue
+
+                        basenames = image_basenames_for_cve_row(row)
+                        if not basenames:
+                            continue
+
+                        by_image: dict[str, Any] = {}
+                        pkg_by_image: dict[str, Any] = {}
+                        row_ok = True
+                        row_checked = False
+                        primary_bn = basenames[0]
+                        primary_result = None
+
+                        for bn in basenames:
+                            tag = settings.aqua_default_image_tag
+                            for img in row.get("affected_images") or []:
+                                if _image_path_basename(str(img.get("image") or "")).lower() == bn.lower():
+                                    t = (img.get("tag") or "").strip()
+                                    if t:
+                                        tag = t
+                                    break
+
+                            result = cross_check_package(
+                                db,
+                                bn,
+                                search_name,
+                                tag=tag,
+                                customer_name=customer_name,
+                                nvd_name=nvd_name,
+                                client=aqua,
+                            )
+                            # Legacy shape (backward compat)
+                            by_image[bn] = {
+                                "found": result.found,
+                                "aqua_package_name": result.aqua_package_name,
+                                "aqua_package_version": result.aqua_package_version,
+                                "candidates": candidates_to_json(result.candidates),
+                                "aqua_checked": result.aqua_checked,
+                            }
+                            # New per-image shape that includes affected_resource
+                            pkg_by_image[bn] = {
+                                "affected_resource": search_name,
+                                "aqua_pkg_found": result.found if result.aqua_checked else None,
+                                "aqua_package_name": result.aqua_package_name,
+                                "aqua_package_version": result.aqua_package_version,
+                                "aqua_candidates": candidates_to_json(result.candidates),
+                                "aqua_checked": result.aqua_checked,
+                                "aqua_tag_requested": result.aqua_tag_requested,
+                                "aqua_tag_used": result.aqua_tag_used,
+                            }
+                            if result.aqua_checked:
+                                row_checked = True
+                                if not result.found:
+                                    row_ok = False
+                            if bn == primary_bn:
+                                primary_result = result
+
+                        if by_image:
+                            row["aqua_pkg_by_image"] = by_image
+                            row["package_by_image"] = pkg_by_image
+                        if row_checked:
+                            row["aqua_pkg_found"] = row_ok
+                            if primary_result:
+                                row["aqua_package_name"] = primary_result.aqua_package_name
+                                # Row-level affected_resource is NOT overwritten per-image;
+                                # the canonical name lives in package_by_image[bn].aqua_package_name.
+                                if not primary_result.found:
+                                    row["aqua_candidates"] = candidates_to_json(
+                                        primary_result.candidates
+                                    )
+                finally:
+                    aqua.close()
+        _set_run_status(run_id, "building_results")
 
         rows_by_customer_lower: dict[str, dict[str, Any]] = {}
         with db_session() as db:

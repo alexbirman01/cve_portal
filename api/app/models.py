@@ -72,6 +72,35 @@ class CveCache(Base):
     fetched_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
 
 
+class PortalSetting(Base):
+    """Key-value portal configuration (e.g. Aqua cache TTL)."""
+
+    __tablename__ = "portal_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+
+class AquaImagePackages(Base):
+    """Cached Aqua resource catalog per scanned image (registry + repository + tag)."""
+
+    __tablename__ = "aqua_image_packages"
+
+    registry: Mapped[str] = mapped_column(String(256), primary_key=True)
+    repository: Mapped[str] = mapped_column(String(512), primary_key=True)
+    tag: Mapped[str] = mapped_column(String(256), primary_key=True)
+    packages_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    fetched_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+
+
 class IssueSyncSchedule(Base):
     """Per-ticket optional daily Sync PLAT schedule (dashboard checkbox)."""
 

@@ -18,6 +18,12 @@ import {
   apiCreateAllowedImage,
   apiUpdateAllowedImage,
   apiDeleteAllowedImage,
+  apiListAquaPackages,
+  apiGetAquaPackagesSettings,
+  apiPatchAquaPackagesSettings,
+  apiGetAquaPackageEntry,
+  apiDeleteAquaPackageEntry,
+  apiRefreshAquaPackageEntry,
   apiListCustomerSlas,
   apiPost,
   apiUpdateCustomerSla,
@@ -41,6 +47,9 @@ import {
   platDisplayLabelForImage,
   platDisplaySketchSummary,
   platOrgRefsFromIssue,
+  aquaAllowsPlatCreate,
+  packageEntryForImage,
+  packagePickOptions,
   platPackageNameForRow,
   platSecurityKeys,
   platSecuritySyncFixForKeys,
@@ -56,8 +65,12 @@ import {
   remediationStatusForSummary,
   type AboutInfo,
   type AllowedImageRecord,
+  type AquaCachedImageSummary,
+  type AquaPackageEntryResponse,
   type CreatePlatResponse,
   type CustomerSlaRecord,
+  type AquaPackageCandidate,
+  type PackageByImageEntry,
   type CveRow,
   type DashboardRemediationStatus,
   type IssueCveStatusSummary,
@@ -439,6 +452,185 @@ function InlineEditCell({ value, onCommit }: { value: string; onCommit: (v: stri
   )
 }
 
+function PackageResourceCell({
+  row,
+  runId,
+  imageBasename,
+  onRowUpdated,
+}: {
+  row: CveRow
+  runId?: string | null
+  imageBasename: string
+  onRowUpdated?: (cveId: string, patch: Partial<CveRow>) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const entry: PackageByImageEntry | undefined = packageEntryForImage(row, imageBasename)
+  const candidates: AquaPackageCandidate[] =
+    (entry?.aqua_candidates?.length ? entry.aqua_candidates : row.aqua_candidates) ?? []
+  const pickOptions = packagePickOptions(row, candidates, entry)
+  const tagFallbackHint =
+    entry?.aqua_tag_requested && entry?.aqua_tag_used
+      ? `Aqua catalog: ${entry.aqua_tag_used} (ticket tag ${entry.aqua_tag_requested} not in Aqua)`
+      : ''
+
+  const matchedName = (
+    entry?.aqua_pkg_found && entry.aqua_package_name
+      ? entry.aqua_package_name
+      : entry?.aqua_pkg_found && entry.affected_resource
+        ? entry.affected_resource
+        : ''
+  ).trim()
+
+  const found: boolean | null = entry?.aqua_checked
+    ? (entry.aqua_pkg_found ?? null)
+    : row.aqua_pkg_found === true
+      ? true
+      : row.aqua_pkg_found === false
+        ? false
+        : null
+
+  const aquaDefaultOption = pickOptions.find((o) => o.source === 'aqua')
+  const AQUA_DEFAULT_VALUE = '__aqua_default__'
+  const [selectValue, setSelectValue] = useState(AQUA_DEFAULT_VALUE)
+
+  const save = async (name: string, forceRefresh = false) => {
+    if (!name.trim()) return
+    if (!runId || !onRowUpdated) {
+      onRowUpdated?.(row.cve_id, { affected_resource: name || null })
+      setEditing(false)
+      return
+    }
+    setSaving(true)
+    try {
+      const resp = await apiPatchCveRow(runId, row.cve_id, {
+        affected_resource: name || null,
+        image_basename: imageBasename,
+        force_refresh_aqua: forceRefresh,
+      })
+      const updatedPbi = resp.package_by_image ?? (
+        resp.package_by_image_entry
+          ? { ...(row.package_by_image ?? {}), [imageBasename]: resp.package_by_image_entry }
+          : undefined
+      )
+      onRowUpdated(row.cve_id, {
+        ...(updatedPbi ? { package_by_image: updatedPbi } : {}),
+        aqua_pkg_found: resp.aqua_pkg_found ?? null,
+        aqua_package_name: resp.aqua_package_name ?? null,
+        aqua_candidates: resp.aqua_candidates,
+        affected_resource: resp.affected_resource ?? row.affected_resource ?? null,
+      })
+      setEditing(false)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (found === true && matchedName) {
+    if (editing) {
+      return (
+        <div className="packageResourceCell">
+          <div className="packageResourceEdit">
+            <input
+              className="inlineEditInput mono"
+              value={draft}
+              disabled={saving}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  void save(draft.trim(), true)
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setEditing(false)
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn btnSmall"
+              disabled={saving}
+              onClick={() => void save(draft.trim(), true)}
+            >
+              {saving ? 'Checking…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return (
+      <div className="packageResourceCell">
+        <span
+          className="mono packageResourceMatched"
+          title={
+            tagFallbackHint
+              ? `${tagFallbackHint} — confirmed in Aqua, click to edit`
+              : 'Confirmed in Aqua — click to edit'
+          }
+          onClick={() => {
+            setDraft(matchedName)
+            setEditing(true)
+          }}
+        >
+          {matchedName}
+        </span>
+      </div>
+    )
+  }
+
+  if (found === false) {
+    const pickClass =
+      selectValue === AQUA_DEFAULT_VALUE
+        ? 'packageResourcePick packageResourcePickAquaDefault'
+        : 'packageResourcePick'
+    return (
+      <div className="packageResourceCell packageResourceCellPick">
+        <select
+          className={pickClass}
+          value={selectValue}
+          disabled={saving}
+          title={
+            tagFallbackHint
+              ? `${tagFallbackHint} — pick customer or NVD name to re-check Aqua`
+              : 'Not in Aqua — pick customer or NVD to re-check'
+          }
+          onChange={(e) => {
+            const name = e.target.value
+            if (!name || name === AQUA_DEFAULT_VALUE) return
+            setSelectValue(name)
+            void save(name, true)
+          }}
+        >
+          <option value={AQUA_DEFAULT_VALUE} disabled>
+            {aquaDefaultOption?.label ?? 'aqua — not found'}
+          </option>
+          {pickOptions
+            .filter((o) => o.source !== 'aqua')
+            .map((o) => (
+              <option key={o.source} value={o.value} disabled={!o.value}>
+                {o.label}
+              </option>
+            ))}
+        </select>
+      </div>
+    )
+  }
+
+  const fallback = (entry?.affected_resource ?? row.affected_resource ?? '').trim()
+  return (
+    <div className="packageResourceCell">
+      <span className="mono packageResourceMatched muted">
+        {fallback || '—'}
+      </span>
+    </div>
+  )
+}
+
 // ─── CVE table ───────────────────────────────────────────────────────────────
 
 function CveTable({
@@ -526,6 +718,7 @@ function CveTable({
           {sorted.map((r) => {
             const syncStrips = platSyncStripsForRow(r)
             const hasSyncMap = rowHasPlatSecuritySyncMap(r)
+            const rowPerImages = imageBasenamesForCveRow(r)
             return (
             <tr key={r.cve_id}>
               {vis.cve ? (
@@ -791,7 +984,10 @@ function CveTable({
                             const secKeys = platSecKeysForImage(r, imgBasename)
                             const busyKeyCve = `${r.cve_id}|${imgBasename}|cve`
                             const canCreateThis =
-                              onPlatCreated && verOk && secKeys.length === 0
+                              onPlatCreated &&
+                              verOk &&
+                              secKeys.length === 0 &&
+                              aquaAllowsPlatCreate(r, imgBasename)
                             const cveEmpty = !secKeys.length && !canCreateThis
                             return (
                               <div key={imgBasename} className="platColStrip">
@@ -833,7 +1029,7 @@ function CveTable({
                                               const out = await apiCreatePlat({
                                                 cve_id: r.cve_id,
                                                 image_basename: imgBasename,
-                                                package_name: platPackageNameForRow(r),
+                                                package_name: platPackageNameForRow(r, imgBasename),
                                                 package_version: ver,
                                                 severity: r.severity,
                                                 organizations: platOrganizationRefs ?? [],
@@ -973,10 +1169,32 @@ function CveTable({
               </td>
               ) : null}
               {vis.resource ? (
-              <td>
-                {r.affected_resource
-                  ? <span className="mono">{r.affected_resource}</span>
-                  : <Dash />}
+              <td className="platTicketCell platColCell cveResCell">
+                <div className="platColStack">
+                  {rowPerImages.length > 0 ? (
+                    <>
+                      {rowPerImages.map((imgBasename) => (
+                        <div key={imgBasename} className="cveResStrip">
+                          <PackageResourceCell
+                            row={r}
+                            runId={runId}
+                            imageBasename={imgBasename}
+                            onRowUpdated={onRowUpdated}
+                          />
+                        </div>
+                      ))}
+                    </>
+                  ) : (
+                    <div className="cveResStrip">
+                      <PackageResourceCell
+                        row={r}
+                        runId={runId}
+                        imageBasename={rowPerImages[0] ?? ''}
+                        onRowUpdated={onRowUpdated}
+                      />
+                    </div>
+                  )}
+                </div>
               </td>
               ) : null}
               {vis.affectedVer ? (
@@ -1488,6 +1706,342 @@ function ToolbarAllowedImagesModal({
         </div>
         <div className="slaModalBody">
           <AllowedImagesAdminPanelBody onSaved={onSaved} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Aqua package cache admin ───────────────────────────────────────────────
+
+function formatFetchedAt(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
+}
+
+function AquaPackagesAdminPanelBody() {
+  const [images, setImages] = useState<AquaCachedImageSummary[]>([])
+  const [ttlHours, setTtlHours] = useState(168)
+  const [defaultTtlHours, setDefaultTtlHours] = useState(168)
+  const [aquaConfigured, setAquaConfigured] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [savingTtl, setSavingTtl] = useState(false)
+  const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [selected, setSelected] = useState<AquaCachedImageSummary | null>(null)
+  const [detail, setDetail] = useState<AquaPackageEntryResponse | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [pkgFilter, setPkgFilter] = useState('')
+
+  const imageKey = (img: AquaCachedImageSummary) =>
+    `${img.registry}|${img.repository}|${img.tag}`
+
+  const load = useCallback(async () => {
+    setErr(null)
+    setLoading(true)
+    try {
+      const [catalog, settings] = await Promise.all([
+        apiListAquaPackages(),
+        apiGetAquaPackagesSettings(),
+      ])
+      setImages(catalog.images)
+      setAquaConfigured(catalog.aqua_configured)
+      setTtlHours(settings.ttl_hours)
+      setDefaultTtlHours(settings.default_ttl_hours)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const loadDetail = useCallback(async (img: AquaCachedImageSummary) => {
+    setSelected(img)
+    setDetail(null)
+    setPkgFilter('')
+    setDetailLoading(true)
+    setErr(null)
+    try {
+      const entry = await apiGetAquaPackageEntry(img.registry, img.repository, img.tag)
+      setDetail(entry)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDetailLoading(false)
+    }
+  }, [])
+
+  async function saveTtl() {
+    setErr(null)
+    setSavingTtl(true)
+    try {
+      const out = await apiPatchAquaPackagesSettings(ttlHours)
+      setTtlHours(out.ttl_hours)
+      await load()
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingTtl(false)
+    }
+  }
+
+  async function refreshImage(img: AquaCachedImageSummary) {
+    const key = imageKey(img)
+    setBusyKey(key)
+    setErr(null)
+    try {
+      const updated = await apiRefreshAquaPackageEntry(img.registry, img.repository, img.tag)
+      await load()
+      if (selected && imageKey(selected) === key) {
+        await loadDetail(updated)
+      }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function deleteImage(img: AquaCachedImageSummary) {
+    const ok = window.confirm(`Remove cached packages for ${img.display}?`)
+    if (!ok) return
+    const key = imageKey(img)
+    setBusyKey(key)
+    setErr(null)
+    try {
+      await apiDeleteAquaPackageEntry(img.registry, img.repository, img.tag)
+      if (selected && imageKey(selected) === key) {
+        setSelected(null)
+        setDetail(null)
+      }
+      await load()
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const filteredPackages = (() => {
+    const pkgs = detail?.packages
+    if (!pkgs?.length) return []
+    const q = pkgFilter.trim().toLowerCase()
+    if (!q) return pkgs
+    return pkgs.filter((p) => {
+      const hay = [p.name, p.version, p.fix_version]
+        .map((s) => (s ?? '').toLowerCase())
+        .join(' ')
+      return hay.includes(q)
+    })
+  })()
+
+  if (loading) return <p className="muted small">Loading Aqua package cache…</p>
+
+  return (
+    <div className="aquaCacheAdmin">
+      <p className="muted small slaAdminHint">
+        Read-only catalogs fetched from Aqua during CVE processing. Adjust cache TTL to control how
+        long entries are reused before re-fetching from Aqua (no scans triggered from this screen).
+      </p>
+      {!aquaConfigured && (
+        <div className="errorBox slaAdminErr">Aqua API credentials are not configured.</div>
+      )}
+      {err && <div className="errorBox slaAdminErr">{err}</div>}
+
+      <div className="aquaCacheSettings">
+        <label className="aquaCacheSettingsLabel">
+          Cache TTL (hours)
+          <input
+            type="number"
+            className="inlineEditInput aquaCacheTtlInput"
+            min={1}
+            max={8760}
+            value={ttlHours}
+            disabled={savingTtl}
+            onChange={(e) => setTtlHours(Number(e.target.value) || 1)}
+          />
+        </label>
+        <button
+          type="button"
+          className="btn btnSecondary btnSm"
+          disabled={savingTtl}
+          onClick={() => void saveTtl()}
+        >
+          {savingTtl ? 'Saving…' : 'Save TTL'}
+        </button>
+        <span className="muted small">
+          Env default: {defaultTtlHours}h · stale entries are ignored until refreshed
+        </span>
+      </div>
+
+      <div className="slaAdminToolbar">
+        <button type="button" className="btn btnSecondary btnSm" onClick={() => void load()} disabled={!!busyKey}>
+          Refresh list
+        </button>
+        <span className="muted small">{images.length} image(s) in cache</span>
+      </div>
+
+      <div className="aquaCacheLayout">
+        <div className="slaTableWrap aquaCacheTableWrap">
+          <table className="slaTable">
+            <thead>
+              <tr>
+                <th>Image</th>
+                <th>Packages</th>
+                <th>Fetched</th>
+                <th>Status</th>
+                <th style={{ width: 200 }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {images.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="muted small">
+                    No cached catalogs yet — process a ticket with Aqua configured.
+                  </td>
+                </tr>
+              ) : (
+                images.map((img) => {
+                  const key = imageKey(img)
+                  const isSel = selected && imageKey(selected) === key
+                  return (
+                    <tr key={key} className={isSel ? 'aquaCacheRowSelected' : undefined}>
+                      <td className="mono small">{img.display}</td>
+                      <td>{img.package_count}</td>
+                      <td className="small">{formatFetchedAt(img.fetched_at)}</td>
+                      <td>
+                        <span className={img.fresh ? 'aquaCacheFresh' : 'aquaCacheStale'}>
+                          {img.fresh ? 'Fresh' : 'Stale'}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="aquaCacheActions">
+                          <button
+                            type="button"
+                            className="btn btnSecondary btnSm"
+                            disabled={busyKey === key}
+                            onClick={() => void loadDetail(img)}
+                          >
+                            View
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btnSecondary btnSm"
+                            disabled={!aquaConfigured || busyKey === key}
+                            title="Re-fetch packages from Aqua"
+                            onClick={() => void refreshImage(img)}
+                          >
+                            {busyKey === key ? '…' : 'Sync'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btnSecondary btnSm"
+                            disabled={busyKey === key}
+                            onClick={() => void deleteImage(img)}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="aquaCacheDetail">
+          {!selected ? (
+            <p className="muted small">Select an image to browse cached package names.</p>
+          ) : detailLoading ? (
+            <p className="muted small">Loading packages…</p>
+          ) : detail ? (
+            <>
+              <div className="aquaCacheDetailHead">
+                <span className="mono small">{detail.display}</span>
+                <span className="muted small">
+                  {detail.package_count} packages · {detail.fresh ? 'Fresh' : 'Stale'}
+                </span>
+              </div>
+              <input
+                type="search"
+                className="inlineEditInput mono aquaCachePkgSearch"
+                placeholder="Filter packages…"
+                value={pkgFilter}
+                onChange={(e) => setPkgFilter(e.target.value)}
+                aria-label="Filter packages"
+              />
+              <div className="aquaCachePkgList">
+                {filteredPackages.length === 0 ? (
+                  <p className="muted small">No packages match filter.</p>
+                ) : (
+                  <table className="slaTable aquaCachePkgTable">
+                    <thead>
+                      <tr>
+                        <th>Package</th>
+                        <th>Version</th>
+                        <th>Fix version</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredPackages.map((p, i) => (
+                        <tr key={`${p.name}\0${p.version ?? ''}\0${p.fix_version ?? ''}\0${i}`}>
+                          <td className="mono">{p.name}</td>
+                          <td className="mono small">{p.version || '—'}</td>
+                          <td className="mono small">{p.fix_version || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ToolbarAquaPackagesModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+  return (
+    <div className="slaModalBackdrop" role="presentation" onClick={onClose}>
+      <div
+        className="slaModalPanel aquaModalPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="aquaPackagesModalTitle"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="slaModalHeader">
+          <h2 id="aquaPackagesModalTitle">Aqua package cache</h2>
+          <button type="button" className="slaModalClose" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div className="slaModalBody">
+          <AquaPackagesAdminPanelBody />
         </div>
       </div>
     </div>
@@ -2112,7 +2666,7 @@ function ResultsPanel({
           const out = await apiCreatePlat({
             cve_id: r.cve_id,
             image_basename: slot.image_basename,
-            package_name: platPackageNameForRow(r),
+            package_name: platPackageNameForRow(r, slot.image_basename),
             package_version: ver,
             severity: r.severity,
             organizations: orgRefs,
@@ -2120,6 +2674,11 @@ function ResultsPanel({
             sla_due_date: r.sla_due_date ?? null,
             run_id: job.run_id,
           })
+          if (!aquaAllowsPlatCreate(r, slot.image_basename)) {
+            failures.push(`${r.cve_id} / ${slot.image_basename}: package not confirmed in Aqua`)
+            setPlatBulkProgress({ done: i + 1, total: slots.length })
+            continue
+          }
           acc = mergePlatCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
           setRows(acc)
         } catch (e) {
@@ -2493,6 +3052,7 @@ function dashRemediationPillClass(status: DashboardRemediationStatus | string): 
   if (status === 'waiting_release_date') return 'dashRemediation dashRemediationWaiting'
   if (status === 'initialized') return 'dashRemediation dashRemediationInit'
   if (status === 'needs_plat') return 'dashRemediation dashRemediationNeedsPlat'
+  if (status === 'package_not_matched') return 'dashRemediation dashRemediationPackageNotMatched'
   if (status === 'processing') return 'dashRemediation dashRemediationProcessing'
   if (status === 'error') return 'dashRemediation dashRemediationError'
   return 'dashRemediation'
@@ -2520,11 +3080,12 @@ type DashSortOption =
 const DASH_STATUS_SORT_ORDER: Record<DashboardRemediationStatus, number> = {
   error: 0,
   processing: 1,
-  needs_plat: 2,
-  initialized: 3,
-  waiting_release_date: 4,
-  waiting_tags: 5,
-  done: 6,
+  package_not_matched: 2,
+  needs_plat: 3,
+  initialized: 4,
+  waiting_release_date: 5,
+  waiting_tags: 6,
+  done: 7,
 }
 
 function dashSummaryTimestamp(s: IssueCveStatusSummary): number {
@@ -2636,6 +3197,7 @@ function DashboardView({
   const remWaitingDate = summaries.filter((x) => remediationStatusForSummary(x) === 'waiting_release_date').length
   const remInit = summaries.filter((x) => remediationStatusForSummary(x) === 'initialized').length
   const remNeedsPlat = summaries.filter((x) => remediationStatusForSummary(x) === 'needs_plat').length
+  const remPackageNotMatched = summaries.filter((x) => remediationStatusForSummary(x) === 'package_not_matched').length
   const remError = summaries.filter((x) => remediationStatusForSummary(x) === 'error').length
 
   const filteredSummaries = useMemo(() => {
@@ -2717,6 +3279,10 @@ function DashboardView({
           <div className="statCard">
             <div className="statValue statValueAmber">{remNeedsPlat}</div>
             <div className="statLabel">Needs PLAT</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueRed">{remPackageNotMatched}</div>
+            <div className="statLabel">Package not matched</div>
           </div>
           <div className="statCard">
             <div className="statValue statValueRed">{remError}</div>
@@ -3138,6 +3704,7 @@ function App() {
   const [viewMode, setViewMode]       = useState<'ticket' | 'results'>('ticket')
   const [slaToolbarOpen, setSlaToolbarOpen] = useState(false)
   const [allowedImagesOpen, setAllowedImagesOpen] = useState(false)
+  const [aquaPackagesOpen, setAquaPackagesOpen] = useState(false)
   const [allowedImageNames, setAllowedImageNames] = useState<Set<string>>(new Set())
   const [aboutOpen, setAboutOpen]     = useState(false)
   const [aboutInfo, setAboutInfo]     = useState<AboutInfo | null>(null)
@@ -3373,6 +3940,13 @@ function App() {
             Allowed images
           </button>
           <button
+            type="button"
+            className="topNavItem"
+            onClick={() => setAquaPackagesOpen(true)}
+          >
+            Aqua packages
+          </button>
+          <button
             className={`topNavItem ${page === 'new' ? 'topNavItemActive' : ''}`}
             onClick={() => {
               setPage('new')
@@ -3402,6 +3976,10 @@ function App() {
         open={allowedImagesOpen}
         onClose={() => setAllowedImagesOpen(false)}
         onSaved={setAllowedImageNames}
+      />
+      <ToolbarAquaPackagesModal
+        open={aquaPackagesOpen}
+        onClose={() => setAquaPackagesOpen(false)}
       />
       <SecurityTypeModal
         open={!!securityTypeWarning}

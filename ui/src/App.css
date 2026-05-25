@@ -473,7 +473,7 @@ a.btn {
 .cveColPlatFix { width: 9.5%; }
 .cveColPlatTag { width: 8%; }
 .cveColSev { width: 6%; }
-.cveColRes { width: 10.5%; }
+.cveColRes { width: 14%; }
 .cveColVer { width: 8%; }
 .cveColFix { width: 8%; }
 .cveColDue { width: 8%; }
@@ -587,6 +587,112 @@ a.btn {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.aquaModalPanel {
+  width: min(1120px, 100%);
+}
+
+.aquaCacheAdmin {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.aquaCacheSettings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.aquaCacheSettingsLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.aquaCacheTtlInput {
+  width: 5rem;
+}
+
+.aquaCacheLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .aquaCacheLayout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.aquaCacheTableWrap {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.aquaCacheRowSelected td {
+  background: rgba(96, 165, 250, 0.08);
+}
+
+.aquaCacheFresh {
+  color: #86efac;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.aquaCacheStale {
+  color: #fdba74;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.aquaCacheActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.aquaCacheDetail {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aquaCacheDetailHead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aquaCachePkgSearch {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+.aquaCachePkgList {
+  flex: 1;
+  min-height: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.aquaCachePkgTable {
+  font-size: 11px;
 }
 
 .slaModalHeader {
@@ -883,6 +989,27 @@ button.platCreateBugPill:disabled:hover {
 }
 
 .platColStrip:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+/* Resource column: one strip per image, same rhythm as .platColStrip */
+.cveResStrip {
+  border-top: 1px solid rgba(255, 255, 255, 0.11);
+  padding: 0.55rem 0.55rem 0.55rem 0.6rem;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 2.45rem;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.cveResStrip:first-of-type {
+  border-top: none;
+  padding-top: 0.55rem;
+}
+
+.cveResStrip:not(:last-child) {
   margin-bottom: 10px;
 }
 
@@ -2079,6 +2206,209 @@ button.platCreateBugPill:disabled:hover {
   background: rgba(248, 113, 113, 0.14);
   color: #fca5a5;
   border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.dashRemediationPackageNotMatched {
+  background: rgba(251, 146, 60, 0.14);
+  color: #fdba74;
+  border: 1px solid rgba(251, 146, 60, 0.4);
+}
+
+.cveTable td.cveResCell {
+  vertical-align: top;
+  padding: 12px 8px;
+  overflow: hidden;
+}
+
+.packageResourceCell {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex: 1 1 0%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.packageResourceEdit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.aquaPkgBadge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+  flex-shrink: 0;
+}
+
+.aquaPkgConfirmed {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.aquaPkgNotFound {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.aquaPkgUnknown {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.aquaCandidateHints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.aquaCandidateLabel {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  width: 100%;
+}
+
+.aquaCandidateChip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  background: rgba(96, 165, 250, 0.1);
+  color: #bfdbfe;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.aquaCandidateChip:hover:not(:disabled) {
+  background: rgba(96, 165, 250, 0.2);
+}
+
+.aquaCandidateChip:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.aquaCandidateSelect {
+  font-size: 11px;
+  background: #1e2130;
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 4.5rem;
+  max-width: 7.5rem;
+}
+
+.aquaCandidateSelect:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.packageResourceCellPick {
+  width: 100%;
+}
+
+.packageResourcePick {
+  width: 100%;
+  max-width: 100%;
+  min-height: 1.65rem;
+  padding: 0.28rem 1.75rem 0.28rem 0.5rem;
+  font-size: 11px;
+  line-height: 1.35;
+  font-family: inherit;
+  color: #e2e8f0;
+  background-color: #1a1d28;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2394a3b8' d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.45rem center;
+  background-size: 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.packageResourcePick:hover:not(:disabled) {
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.packageResourcePick:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.5);
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.12);
+}
+
+.packageResourcePick:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+/* Closed state shows Aqua status (not found) */
+.packageResourcePickAquaDefault {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.35);
+  background-color: rgba(248, 113, 113, 0.06);
+}
+
+.packageResourcePickAquaDefault:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+.packageResourceRow {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.packageResourceName {
+  max-width: 5.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.packageResourceDisplay {
+  flex: 0 1 auto;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.packageResourceMatched {
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: default;
+}
+
+.packageResourceMatched[title*='click'] {
+  cursor: pointer;
+}
+
+.aquaCandidateSource {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .dashLastSync {

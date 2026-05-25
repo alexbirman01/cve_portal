@@ -13,14 +13,27 @@ from sqlalchemy import func, text
 
 from api.app.config import settings
 from api.app.cve_row_derived import (
+    _image_path_basename,
     cve_rows_from_result,
     derive_cve_state,
     derive_ticket_remediation_status,
+    image_basenames_for_cve_row,
     plat_keys_aggregate_from_rows,
 )
+from api.app.aqua_packages import candidates_to_json, cross_check_package
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
 from api.app.allowed_images import normalize_image_basename
+from api.app.aqua_catalog import (
+    AquaPackagesRefreshIn,
+    AquaPackagesSettingsIn,
+    delete_aqua_cache_entry,
+    get_aqua_package_entry,
+    get_aqua_packages_settings,
+    list_aqua_package_catalog,
+    patch_aqua_packages_settings,
+    refresh_aqua_cache_entry,
+)
 from api.app.models import AllowedImage, Base, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
@@ -219,8 +232,77 @@ def _link_plat_keys_to_parent(
     return warnings
 
 
+def _aqua_blocks_plat_create(run_id: str | None, cve_id: str, image_basename: str) -> str | None:
+    """Return error detail if Aqua is configured and package is not confirmed for this image."""
+    if not (settings.aqua_api_key or "").strip():
+        return None
+    if not run_id:
+        return None
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        return None
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return None
+        data = json.loads(run.result_json)
+        for row in data.get("cve_rows") or []:
+            if row.get("cve_id") != cve_id:
+                continue
+            fold = image_basename.lower()
+
+            def _lookup_entry(mapping: dict, found_key: str = "found") -> dict | None:
+                e = mapping.get(image_basename)
+                if e is None:
+                    for k, v in mapping.items():
+                        if str(k).lower() == fold:
+                            e = v
+                            break
+                return e
+
+            # Prefer new package_by_image (uses aqua_pkg_found key)
+            pbi = row.get("package_by_image") or {}
+            if pbi:
+                entry = _lookup_entry(pbi)
+                if entry is not None:
+                    if entry.get("aqua_checked") and entry.get("aqua_pkg_found") is False:
+                        return (
+                            "Package name not confirmed in Aqua for this image. "
+                            "Edit the package name and re-check, or pick a suggestion."
+                        )
+                    return None
+
+            # Fallback to legacy aqua_pkg_by_image (uses found key)
+            by_img = row.get("aqua_pkg_by_image") or {}
+            if by_img:
+                entry = _lookup_entry(by_img)
+                if entry is not None:
+                    if entry.get("aqua_checked") and entry.get("found") is False:
+                        return (
+                            "Package name not confirmed in Aqua for this image. "
+                            "Edit the package name and re-check, or pick a suggestion."
+                        )
+                    return None
+
+            if row.get("aqua_pkg_found") is False:
+                return (
+                    "Package name not confirmed in Aqua. "
+                    "Edit the package name and re-check, or pick a suggestion."
+                )
+            return None
+    return None
+
+
 @app.post("/api/plat")
 def create_plat_ticket(payload: CreatePlatIn):
+    block = _aqua_blocks_plat_create(
+        payload.run_id,
+        payload.cve_id.strip(),
+        payload.image_basename.strip(),
+    )
+    if block:
+        raise HTTPException(status_code=400, detail=block)
     jira = JiraClient()
     try:
         existing = jira.find_plat_security_for_image(
@@ -995,12 +1077,16 @@ def cancel_run(run_id: str):
 class CveRowPatchIn(BaseModel):
     cve_id: str
     affected_version: str | None = None
+    affected_resource: str | None = None
+    image_basename: str | None = None
+    force_refresh_aqua: bool = False
 
 
 @app.patch("/api/jobs/{run_id}/cve-row")
 def patch_cve_row(run_id: str, payload: CveRowPatchIn):
     """Persist a manual field override on a specific CVE row within a run's result_json."""
     rid = uuid.UUID(run_id)
+    aqua_out: dict | None = None
     with db_session() as db:
         run = db.get(ProcessingRun, rid)
         if not run or not run.result_json:
@@ -1009,17 +1095,137 @@ def patch_cve_row(run_id: str, payload: CveRowPatchIn):
         rows: list[dict] = data.get("cve_rows") or []
         patched = False
         for row in rows:
-            if row.get("cve_id") == payload.cve_id:
-                if payload.affected_version is not None:
-                    row["affected_version"] = payload.affected_version or None
-                patched = True
+            if row.get("cve_id") != payload.cve_id:
+                continue
+            if payload.affected_version is not None:
+                row["affected_version"] = payload.affected_version or None
+            if payload.affected_resource is not None:
+                bn = (payload.image_basename or "").strip()
+                if not bn:
+                    # Only update row-level resource when no image is specified
+                    row["affected_resource"] = payload.affected_resource or None
+                search = (payload.affected_resource or "").strip()
+                if search and (settings.aqua_api_key or "").strip():
+                    basenames = image_basenames_for_cve_row(row)
+                    if not bn:
+                        bn = basenames[0] if basenames else ""
+                    tag = settings.aqua_default_image_tag
+                    if bn:
+                        for img in row.get("affected_images") or []:
+                            if _image_path_basename(str(img.get("image") or "")).lower() == bn.lower():
+                                t = (img.get("tag") or "").strip()
+                                if t:
+                                    tag = t
+                                break
+                    nvd_name = None
+                    pkgs = row.get("all_packages") or []
+                    if pkgs and isinstance(pkgs[0], dict):
+                        nvd_name = (pkgs[0].get("product") or "").strip() or None
+                    result = cross_check_package(
+                        db,
+                        bn,
+                        search,
+                        tag=tag,
+                        customer_name=search,
+                        nvd_name=nvd_name,
+                        force_refresh=payload.force_refresh_aqua,
+                    )
+                    # Update legacy shape
+                    by_image = dict(row.get("aqua_pkg_by_image") or {})
+                    # Update new per-image shape
+                    pkg_by_image = dict(row.get("package_by_image") or {})
+                    new_entry = {
+                        "affected_resource": search,
+                        "aqua_pkg_found": result.found if result.aqua_checked else None,
+                        "aqua_package_name": result.aqua_package_name,
+                        "aqua_package_version": result.aqua_package_version,
+                        "aqua_candidates": candidates_to_json(result.candidates),
+                        "aqua_checked": result.aqua_checked,
+                        "aqua_tag_requested": result.aqua_tag_requested,
+                        "aqua_tag_used": result.aqua_tag_used,
+                    }
+                    if bn:
+                        by_image[bn] = {
+                            "found": result.found,
+                            "aqua_package_name": result.aqua_package_name,
+                            "aqua_package_version": result.aqua_package_version,
+                            "candidates": candidates_to_json(result.candidates),
+                            "aqua_checked": result.aqua_checked,
+                        }
+                        pkg_by_image[bn] = new_entry
+                        row["aqua_pkg_by_image"] = by_image
+                        row["package_by_image"] = pkg_by_image
+                    # Recompute row-level rollups
+                    if result.aqua_checked:
+                        all_checked = [
+                            e for e in pkg_by_image.values()
+                            if e.get("aqua_checked")
+                        ]
+                        row["aqua_pkg_found"] = all(
+                            e.get("aqua_pkg_found") is True for e in all_checked
+                        ) if all_checked else result.found
+                        row["aqua_package_name"] = result.aqua_package_name
+                        if not result.found:
+                            row["aqua_candidates"] = candidates_to_json(result.candidates)
+                        else:
+                            row.pop("aqua_candidates", None)
+                    aqua_out = {
+                        "aqua_pkg_found": row.get("aqua_pkg_found"),
+                        "aqua_package_name": row.get("aqua_package_name"),
+                        "aqua_candidates": row.get("aqua_candidates"),
+                        "affected_resource": row.get("affected_resource"),
+                        "package_by_image_entry": new_entry if bn else None,
+                        "package_by_image": row.get("package_by_image"),
+                    }
+            patched = True
         if not patched:
             raise HTTPException(status_code=404, detail="cve_id not found in run")
         data["cve_rows"] = rows
         run.result_json = json.dumps(data)
         db.add(run)
         db.commit()
-    return {"ok": True}
+    out: dict = {"ok": True}
+    if aqua_out:
+        out.update(aqua_out)
+    return out
+
+
+@app.get("/api/aqua-packages")
+def aqua_packages_catalog():
+    return list_aqua_package_catalog()
+
+
+@app.get("/api/aqua-packages/settings")
+def aqua_packages_settings_get():
+    return get_aqua_packages_settings()
+
+
+@app.patch("/api/aqua-packages/settings")
+def aqua_packages_settings_patch(payload: AquaPackagesSettingsIn):
+    return patch_aqua_packages_settings(payload)
+
+
+@app.get("/api/aqua-packages/entry")
+def aqua_packages_entry(
+    registry: str = Query(...),
+    repository: str = Query(...),
+    tag: str = Query(...),
+):
+    return get_aqua_package_entry(registry, repository, tag)
+
+
+@app.delete("/api/aqua-packages/entry")
+def aqua_packages_entry_delete(
+    registry: str = Query(...),
+    repository: str = Query(...),
+    tag: str = Query(...),
+):
+    return delete_aqua_cache_entry(registry, repository, tag)
+
+
+@app.post("/api/aqua-packages/refresh")
+def aqua_packages_refresh(payload: AquaPackagesRefreshIn):
+    return refresh_aqua_cache_entry(payload)
 
 
 @app.get("/api/jobs/{run_id}")

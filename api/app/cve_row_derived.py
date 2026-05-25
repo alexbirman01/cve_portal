@@ -307,6 +307,7 @@ def collect_customer_status_slots(row: dict[str, Any]) -> list[dict[str, str]]:
 _REMEDIATION_STATUSES = (
     "error",
     "processing",
+    "package_not_matched",
     "needs_plat",
     "initialized",
     "waiting_release_date",
@@ -323,7 +324,7 @@ def derive_ticket_remediation_status(
     """
     Ticket-level remediation status for the dashboard.
 
-    Priority: error → processing → needs_plat → initialized →
+    Priority: error → processing → package_not_matched → needs_plat → initialized →
               waiting_release_date → waiting_tags → done
     """
     # Error: run failed, sync errors present, or any CVE has nvd_state=error
@@ -337,6 +338,28 @@ def derive_ticket_remediation_status(
     # Processing: pipeline not finished
     if run_status != "done":
         return "processing"
+
+    # Package not matched: any image entry in package_by_image (or legacy aqua_pkg_by_image) failed
+    def _any_image_not_matched(r: dict) -> bool:
+        pbi = r.get("package_by_image") or {}
+        if pbi:
+            return any(
+                e.get("aqua_checked") and e.get("aqua_pkg_found") is False
+                for e in pbi.values()
+                if isinstance(e, dict)
+            )
+        # Fallback to legacy map
+        legacy = r.get("aqua_pkg_by_image") or {}
+        if legacy:
+            return any(
+                e.get("aqua_checked") and e.get("found") is False
+                for e in legacy.values()
+                if isinstance(e, dict)
+            )
+        return r.get("aqua_pkg_found") is False
+
+    if any(_any_image_not_matched(r) for r in rows if isinstance(r, dict)):
+        return "package_not_matched"
 
     # Needs PLAT: any Security-Vuln slot missing
     for row in rows:

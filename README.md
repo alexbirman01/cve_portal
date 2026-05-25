@@ -1,5 +1,7 @@
 # CVE Portal (Jira + NVD)
 
+**Full documentation**: [docs/CVE-Portal.md](docs/CVE-Portal.md) — covers Product Manager design, architecture, and deployment perspectives.
+
 ## What's in the box (PM view)
 
 - **Single place to see risk** — Pull a Jira security ticket, extract CVEs from description and attachments, enrich with NVD, and correlate existing **PLAT** work (bugs + Security Vulnerability tickets).
