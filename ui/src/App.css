@@ -2114,12 +2114,10 @@ button.platCreateBugPill:disabled:hover {
 .dashIssueSummary::-webkit-details-marker { display: none; }
 
 .dashIssueSummaryMain {
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) 80px 200px 140px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  min-width: 0;
-  flex: 1;
 }
 
 .dashIssueSummaryAside {
@@ -2152,26 +2150,30 @@ button.platCreateBugPill:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 0;
+  min-width: 120px;
+  max-width: 220px;
   overflow: hidden;
 }
 
 .dashIssueCveCol {
   display: flex;
   align-items: center;
+  width: 72px;
+  flex-shrink: 0;
 }
 
 .dashIssueStatusCol {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  width: 200px;
+  flex-shrink: 0;
 }
 
 .dashIssueLastSyncCol {
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 160px;
+  flex-shrink: 0;
 }
 
 .dashIssueCustomer {

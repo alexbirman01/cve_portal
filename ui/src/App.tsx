@@ -98,6 +98,21 @@ function formatSyncDate(iso?: string | null): string {
   return `${day}-${mon}-${yr} ${hh}:${mm}`
 }
 
+function timeAgo(iso?: string | null): string {
+  if (!iso) return '—'
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (secs < 60) return 'just now'
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days}d ago`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}mo ago`
+  return `${Math.floor(months / 12)}y ago`
+}
+
 function formatIssueCreatedDate(iso?: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -2797,8 +2812,8 @@ function DashboardView({
                         </span>
                         {wf === 'processing' && <StatusBadge status={s.run_status} />}
                       </span>
-                      <span className="dashIssueLastSyncCol muted small">
-                        {s.updated_at ? formatSyncDate(s.updated_at) : '—'}
+                      <span className="dashIssueLastSyncCol muted small" title={s.updated_at ? formatSyncDate(s.updated_at) : undefined}>
+                        Last sync: {timeAgo(s.updated_at)}
                       </span>
                     </span>
                     <span className="dashIssueSummaryAside">
@@ -2838,7 +2853,7 @@ function DashboardView({
                             title="Open in Jira"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            Open on Jira
+                            Open in Jira
                           </a>
                         ) : (
                           <button
@@ -2847,7 +2862,7 @@ function DashboardView({
                             disabled
                             title="Jira URL not configured on server"
                           >
-                            Open on Jira
+                            Open in Jira
                           </button>
                         )}
                         <button
