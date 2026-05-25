@@ -238,6 +238,15 @@ export type IssueCveStatusEntry = {
 
 export type DashboardTicketStatus = 'processing' | 'failed' | 'in_progress' | 'done'
 
+export type DashboardRemediationStatus =
+  | 'error'
+  | 'processing'
+  | 'needs_plat'
+  | 'initialized'
+  | 'waiting_release_date'
+  | 'waiting_tags'
+  | 'done'
+
 export type IssueCveStatusSummary = {
   issue_key: string
   /** Parent security ticket (e.g. PLATFORM-1234); may mirror issue_key */
@@ -248,6 +257,8 @@ export type IssueCveStatusSummary = {
   run_status: string
   /** PLAT workflow: done = all CVE PLAT tickets created; in_progress = some still missing. */
   ticket_status?: DashboardTicketStatus | string
+  /** Richer remediation readiness status from the API (preferred over ticket_status). */
+  remediation_status?: DashboardRemediationStatus | string
   created_at?: string | null
   updated_at?: string | null
   cve_count?: number | null
@@ -295,6 +306,33 @@ export function ticketStatusForSummary(s: IssueCveStatusSummary): DashboardTicke
   if (s.run_status !== 'done') return 'processing'
   if ((s.needs_plat_cve_count ?? 0) > 0) return 'in_progress'
   return 'done'
+}
+
+export function remediationStatusForSummary(s: IssueCveStatusSummary): DashboardRemediationStatus {
+  const rs = s.remediation_status
+  if (
+    rs === 'error' || rs === 'processing' || rs === 'needs_plat' ||
+    rs === 'initialized' || rs === 'waiting_release_date' || rs === 'waiting_tags' || rs === 'done'
+  ) return rs
+  // Fallback for old cached API responses that only have ticket_status
+  const ts = ticketStatusForSummary(s)
+  if (ts === 'failed') return 'error'
+  if (ts === 'processing') return 'processing'
+  if (ts === 'in_progress') return 'needs_plat'
+  return 'done'
+}
+
+export function dashboardRemediationStatusLabel(status: DashboardRemediationStatus | string): string {
+  const map: Record<string, string> = {
+    error: 'Error',
+    processing: 'Processing',
+    needs_plat: 'Needs PLAT',
+    initialized: 'Initialized',
+    waiting_release_date: 'Waiting for release date',
+    waiting_tags: 'Waiting for tags',
+    done: 'Done',
+  }
+  return map[status] ?? status
 }
 
 export type CreatePlatResponse =
@@ -998,182 +1036,250 @@ export function resolvePlatFixReleaseDateDisplay(
   return { display: '' }
 }
 
-/** PLAT fix / tag text for suggested Jira comment (per-image Security keys or row rollup). */
-function commentPlatMetaForKeys(r: CveRow, secKeys: string[]): { fix: string; tag: string } {
-  const hasMap = !!(r.plat_security_field_sync && Object.keys(r.plat_security_field_sync).length > 0)
+export const CUSTOMER_STATUS_COMMENT_MARKER = '<!-- CVE-Portal-Customer-Status v1 -->'
+
+const CUSTOMER_STATUS_DISCLAIMER =
+  'The "Potential Release Date" is an estimate and may be subject to change.'
+
+export const CUSTOMER_STATUS_IN_PROGRESS = 'In progress'
+
+function isPlatSyncUnavailableValue(raw: string): boolean {
+  const s = (raw ?? '').trim()
+  if (!s || s === '—') return true
+  if (s.startsWith('— (sync PLAT')) return true
+  return false
+}
+
+/** PlainID release date — same translation as findings PLAT fix version column. */
+export function plainIdExpectedReleaseDate(fix: string, tag: string): string {
+  const fixIn = isPlatSyncUnavailableValue(fix) ? '' : fix
+  const tagIn = isPlatSyncUnavailableValue(tag) ? '' : tag
+  const { display } = resolvePlatFixReleaseDateDisplay(fixIn, tagIn)
+  return display || CUSTOMER_STATUS_IN_PROGRESS
+}
+
+/** PlainID release version — same as findings Tag numbers column (raw tag, not translated). */
+export function plainIdReleaseVersion(tag: string): string {
+  if (isPlatSyncUnavailableValue(tag)) return CUSTOMER_STATUS_IN_PROGRESS
+  const v = normalizePlatSyncFieldValue(tag)
+  return v || CUSTOMER_STATUS_IN_PROGRESS
+}
+
+/** Raw PLAT sync fields for customer table (no pending-hint placeholders). */
+function commentPlatRawForKeys(r: CveRow, secKeys: string[]): { fix: string; tag: string } {
   let fix = platSecuritySyncFixForKeys(r, secKeys).trim()
   let tag = platSecuritySyncTagForKeys(r, secKeys).trim()
+  const hasMap = !!(r.plat_security_field_sync && Object.keys(r.plat_security_field_sync).length > 0)
   if (!hasMap && secKeys.length === 0) {
     const lf = normalizePlatSyncFieldValue(r.plat_app_fix_versions)
     const lt = normalizePlatSyncFieldValue(r.plat_tag_numbers)
     if (!fix && lf) fix = lf
     if (!tag && lt) tag = lt
   }
-  const pendingHint = '— (sync PLAT in CVE portal)'
-  if (!fix) fix = secKeys.length > 0 && !hasMap ? pendingHint : '—'
-  if (!tag) tag = secKeys.length > 0 && !hasMap ? pendingHint : '—'
   return { fix, tag }
 }
 
-function suggestedFixReleaseLabel(fix: string, tag: string): string {
-  const fixNorm = normalizePlatSyncFieldValue(fix)
-  const tagNorm = normalizePlatSyncFieldValue(tag)
-  const date =
-    (fixNorm && translateFixVersionToReleaseDate(fixNorm)) ||
-    (tagNorm && translateFixVersionToReleaseDate(tagNorm))
-  if (date) return `Potential fix release date: ${date}`
-  return `Expected fix release date: ${fixNorm || fix || '—'}`
+export type UpsertCustomerStatusCommentResponse = {
+  ok: boolean
+  action: 'created' | 'updated'
+  comment_id: string
 }
 
-function hasReleaseTagForComment(tag: string): boolean {
-  const tagNorm = normalizePlatSyncFieldValue(tag)
-  if (!tagNorm) return false
-  const raw = tag.trim()
-  if (raw === '—') return false
-  if (raw.startsWith('— (sync PLAT')) return false
-  return true
+export async function apiUpsertCustomerStatusComment(
+  issueKey: string,
+  body: string,
+): Promise<UpsertCustomerStatusCommentResponse> {
+  const res = await fetch(`/api/issues/${encodeURIComponent(issueKey)}/comment/status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body, internal: true }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return (await res.json()) as UpsertCustomerStatusCommentResponse
 }
 
-function suggestedImageCommentLine(label: string, fix: string, tag: string): string {
-  const fixLabelAndVal = suggestedFixReleaseLabel(fix, tag)
-  const tagNorm = normalizePlatSyncFieldValue(tag)
-  if (hasReleaseTagForComment(tag)) {
-    return `  Image:    ${label} -> ${fixLabelAndVal}. Release tag: ${tagNorm}`
-  }
-  return `  Image:    ${label} -> ${fixLabelAndVal}`
+type CustomerStatusTableRow = {
+  cve: string
+  severity: string
+  image: string
+  expectedRelease: string
+  fixVersion: string
 }
 
-function pushSuggestedPackageLines(lines: string[], r: CveRow): void {
-  const pkgs = r.all_packages ?? []
-  if (pkgs.length > 0) {
-    for (const p of pkgs) {
-      const product = (p.product ?? '').trim() || '—'
-      const affected = (p.version_start ?? '').trim() || '—'
-      const fv = (p.fixed_version ?? '').trim()
-      lines.push(
-        fv
-          ? `Package:  ${product} affected: ${affected} → fix: ${fv}`
-          : `Package:  ${product} affected: ${affected}`,
-      )
+function formatCveSeverityForComment(r: CveRow): string {
+  const sevRaw = (r.severity ?? '').trim()
+  if (!sevRaw) return 'Unknown'
+  const score = r.score != null && String(r.score).trim() !== '' ? ` (${String(r.score).trim()})` : ''
+  return `${sevRaw.toUpperCase()}${score}`
+}
+
+function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] {
+  const out: CustomerStatusTableRow[] = []
+  const rows = sortCveRows(result.cve_rows ?? [])
+
+  for (const r of rows) {
+    const severity = formatCveSeverityForComment(r)
+    const basenames = imageBasenamesForCveRow(r)
+
+    const pushRow = (imageLabel: string, secKeys: string[]) => {
+      const { fix, tag } = commentPlatRawForKeys(r, secKeys)
+      out.push({
+        cve: r.cve_id,
+        severity,
+        image: imageLabel,
+        expectedRelease: plainIdExpectedReleaseDate(fix, tag),
+        fixVersion: plainIdReleaseVersion(tag),
+      })
     }
-    return
+
+    if (basenames.length > 0) {
+      for (const bn of basenames) {
+        pushRow(platDisplayLabelForImage(r, bn), platSecKeysForImage(r, bn))
+      }
+      const orphan = platOrphanSecKeys(r)
+      if (orphan.length) {
+        pushRow('Unmapped Security PLAT', orphan)
+      }
+      continue
+    }
+
+    const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
+    const legacyPath =
+      !imgs.length && r.affected_image && r.affected_image !== 'NA'
+        ? `${r.affected_image.replace(/^plainid\//i, '')}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
+        : ''
+    if (legacyPath) {
+      pushRow(legacyPath, platSecurityKeys(r))
+    } else if (imgs.length) {
+      for (const img of imgs) {
+        const label = `${img.image.replace(/^plainid\//i, '')}${img.tag ? `:${String(img.tag).trim()}` : ''}`
+        pushRow(label, platSecurityKeys(r))
+      }
+    } else {
+      pushRow('—', platSecurityKeys(r))
+    }
   }
-  const res = (r.affected_resource ?? '').trim()
-  if (res) {
-    const av = (r.affected_version ?? '').trim() || '—'
-    const fv = (r.fixed_version ?? '').trim()
-    lines.push(
-      fv ? `Package:  ${res} affected: ${av} → fix: ${fv}` : `Package:  ${res} affected: ${av}`,
-    )
-  }
+
+  return out
 }
 
-export function buildSuggestedComment(result: JobResult): string {
-  const lines: string[] = []
+function padTableCell(value: string, width: number): string {
+  return (value.trim() || '—').padEnd(width)
+}
+
+function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[] {
+  const colHeaders = {
+    cve: 'CVE',
+    sev: 'Severity',
+    img: 'Image',
+    date: 'Expected release date',
+    ver: 'Fix Version',
+  }
+  const minW = { cve: 12, sev: 8, img: 5, date: 22, ver: 10 }
+  const w = {
+    cve: Math.max(minW.cve, colHeaders.cve.length, ...tableRows.map((r) => r.cve.length)),
+    sev: Math.max(minW.sev, colHeaders.sev.length, ...tableRows.map((r) => r.severity.length)),
+    img: Math.max(minW.img, colHeaders.img.length, ...tableRows.map((r) => r.image.length)),
+    date: Math.max(minW.date, colHeaders.date.length, ...tableRows.map((r) => r.expectedRelease.length)),
+    ver: Math.max(minW.ver, colHeaders.ver.length, ...tableRows.map((r) => r.fixVersion.length)),
+  }
+  const header = [
+    padTableCell(colHeaders.cve, w.cve),
+    padTableCell(colHeaders.sev, w.sev),
+    padTableCell(colHeaders.img, w.img),
+    padTableCell(colHeaders.date, w.date),
+    padTableCell(colHeaders.ver, w.ver),
+  ].join(' | ')
+  const rule = [
+    '-'.repeat(w.cve),
+    '-'.repeat(w.sev),
+    '-'.repeat(w.img),
+    '-'.repeat(w.date),
+    '-'.repeat(w.ver),
+  ].join('-+-')
+  const body = tableRows.map((row) =>
+    [
+      padTableCell(row.cve, w.cve),
+      padTableCell(row.severity, w.sev),
+      padTableCell(row.image, w.img),
+      padTableCell(row.expectedRelease, w.date),
+      padTableCell(row.fixVersion, w.ver),
+    ].join(' | '),
+  )
+  return [header, rule, ...body]
+}
+
+export function buildCustomerStatusComment(result: JobResult): string {
+  const lines: string[] = [CUSTOMER_STATUS_COMMENT_MARKER, CUSTOMER_STATUS_DISCLAIMER, '']
+
   const key = (result.issue_key ?? '').trim()
   if (key) {
-    lines.push(`${key} — CVE review (auto-generated draft)`)
-    lines.push('—'.repeat(56))
+    lines.push(`${key} — CVE remediation status`)
     lines.push('')
   }
 
-  const rows = sortCveRows(result.cve_rows ?? [])
-  for (const r of rows) {
-    const sevRaw = (r.severity ?? '').trim()
-    const sev = sevRaw
-      ? `${sevRaw.toUpperCase()}${r.score != null && String(r.score).trim() !== '' ? ` (${String(r.score).trim()})` : ''}`
-      : 'Unknown'
-    lines.push(`${r.cve_id}  [${sev}]`)
-    pushSuggestedPackageLines(lines, r)
-
-    const basenames = imageBasenamesForCveRow(r)
-    for (const bn of basenames) {
-      const label = platDisplayLabelForImage(r, bn)
-      const keys = platSecKeysForImage(r, bn)
-      const { fix, tag } = commentPlatMetaForKeys(r, keys)
-      lines.push(suggestedImageCommentLine(label, fix, tag))
-    }
-
-    const orphan = platOrphanSecKeys(r)
-    if (orphan.length) {
-      const { fix, tag } = commentPlatMetaForKeys(r, orphan)
-      lines.push(suggestedImageCommentLine('Unmapped Security PLAT', fix, tag))
-    }
-
-    if (!basenames.length) {
-      const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
-      const legacyPath =
-        !imgs.length && r.affected_image && r.affected_image !== 'NA'
-          ? `${r.affected_image.replace(/^plainid\//i, '')}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
-          : ''
-      if (legacyPath) {
-        const keys = platSecurityKeys(r)
-        const { fix, tag } = commentPlatMetaForKeys(r, keys)
-        lines.push(suggestedImageCommentLine(legacyPath, fix, tag))
-      }
-    }
-
-    lines.push('')
-  }
-
-  const attachments: any[] = result?.attachments ?? []
-  if (attachments.length) {
-    lines.push('Attachments parsed:')
-    for (const a of attachments) lines.push(`  • ${a.filename} (${a.status})`)
-    lines.push('')
+  const tableRows = collectCustomerStatusRows(result)
+  if (tableRows.length === 0) {
+    lines.push('No CVE rows to display.')
+  } else {
+    lines.push(...formatCustomerStatusTable(tableRows))
   }
 
   return lines.join('\n').trimEnd()
 }
 
+/** @deprecated Use buildCustomerStatusComment — kept for existing imports. */
+export function buildSuggestedComment(result: JobResult): string {
+  return buildCustomerStatusComment(result)
+}
+
 // ─── Excel export ─────────────────────────────────────────────────────────────
+
+const CUSTOMER_STATUS_EXCEL_HEADERS = [
+  'CVE',
+  'Severity',
+  'Image',
+  'Expected release date',
+  'Fix Version',
+] as const
+
+function customerStatusRowsFromCveRows(rows: CveRow[]): CustomerStatusTableRow[] {
+  return collectCustomerStatusRows({
+    issue_key: '',
+    cve_rows: rows,
+    cves: [],
+    nvd: [],
+    attachments: [],
+    images: [],
+  })
+}
 
 export function exportCvesToExcel(rows: CveRow[], filename = 'cve-findings.xlsx') {
   import('xlsx').then((XLSX) => {
-    const data = rows.map((r) => {
-      const secByImage = r.plat_security_for_images && Object.keys(r.plat_security_for_images).length
-        ? Object.entries(r.plat_security_for_images)
-            .map(([img, keys]) => `${img}: ${keys.join(', ')}`)
-            .join('\n')
-        : platSecurityKeys(r).join(', ') || '—'
+    const tableRows = customerStatusRowsFromCveRows(rows)
+    const data = tableRows.map((r) => ({
+      CVE: r.cve,
+      Severity: r.severity,
+      Image: r.image,
+      'Expected release date': r.expectedRelease,
+      'Fix Version': r.fixVersion,
+    }))
 
-      const tickets = (r.plat_tickets ?? (r.plat_ticket ? [{ key: r.plat_ticket, issue_type: 'Security Vulnerability' }] : []))
-        .map(t => `${t.key} (${t.issue_type})`)
-        .join(', ')
+    const ws =
+      data.length > 0
+        ? XLSX.utils.json_to_sheet(data)
+        : XLSX.utils.aoa_to_sheet([[...CUSTOMER_STATUS_EXCEL_HEADERS]])
 
-      const imgs = (r.affected_images ?? []).filter(i => i.image && i.image !== 'NA')
-      const imgList = imgs.length > 0
-        ? imgs.map(i => `${i.image.replace(/^plainid\//i, '')}${i.tag ? `:${i.tag}` : ''}`).join('\n')
-        : (r.affected_image && r.affected_image !== 'NA'
-            ? `${r.affected_image}${r.affected_tag ? `:${r.affected_tag}` : ''}`
-            : '')
-
-      return {
-        'CVE ID':          r.cve_id,
-        'PLAT Sec / image': secByImage,
-        'PLAT (all)':      tickets || '—',
-        'Severity':        r.severity ?? '—',
-        'CVSS Score':      r.score ?? '—',
-        'Affected Image':  imgList || '—',
-        'Resource':        r.affected_resource ?? '—',
-        'Affected Ver.':   r.affected_version ?? '—',
-        'Vendor Fix':      r.fixed_version ?? '—',
-        'Due Date':        r.sla_due_date ?? '—',
-        'PLAT fix version': platSecuritySyncFixColumnText(r) || '—',
-        'Tag numbers':      platSecuritySyncTagColumnText(r) || '—',
-        'NVD URL':         `https://nvd.nist.gov/vuln/detail/${r.cve_id}`,
-      }
-    })
-
-    const ws = XLSX.utils.json_to_sheet(data)
-    // Auto-width columns
-    const colWidths = Object.keys(data[0] ?? {}).map((key) => ({
-      wch: Math.max(key.length, ...data.map(row => String((row as Record<string,string>)[key] ?? '').split('\n')[0].length)) + 2,
+    const colWidths = CUSTOMER_STATUS_EXCEL_HEADERS.map((key) => ({
+      wch: Math.max(
+        key.length,
+        ...data.map((row) => String(row[key as keyof typeof row] ?? '').length),
+      ) + 2,
     }))
     ws['!cols'] = colWidths
 
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'CVE Findings')
+    XLSX.utils.book_append_sheet(wb, ws, 'Customer Status')
     XLSX.writeFile(wb, filename)
   })
 }

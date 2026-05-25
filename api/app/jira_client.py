@@ -208,6 +208,9 @@ def _image_basename_from_summary(summary: str | None, cve_id: str) -> str | None
     return None
 
 
+CUSTOMER_STATUS_COMMENT_MARKER = "<!-- CVE-Portal-Customer-Status v1 -->"
+
+
 def _basic_auth_header(email: str, token: str) -> str:
     raw = f"{email}:{token}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("ascii")
@@ -1540,4 +1543,87 @@ class JiraClient:
         r = self._client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
+
+    def list_issue_comments(self, issue_key: str) -> list[dict[str, Any]]:
+        """All issue comments (Jira REST API v3), paginated."""
+        out: list[dict[str, Any]] = []
+        start_at = 0
+        page_size = 100
+        while True:
+            url = f"{self._base}/rest/api/3/issue/{issue_key}/comment"
+            r = self._client.get(
+                url,
+                params={"startAt": start_at, "maxResults": page_size},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            data = r.json()
+            batch = data.get("comments") or []
+            out.extend(batch)
+            total = int(data.get("total") or len(out))
+            start_at += len(batch)
+            if start_at >= total or not batch:
+                break
+        return out
+
+    @staticmethod
+    def comment_body_to_plain_text(body: Any) -> str:
+        from api.app.parsing import _adf_node_to_text
+
+        if body is None:
+            return ""
+        if isinstance(body, dict) and body.get("type") == "doc":
+            return _adf_node_to_text(body)
+        return str(body)
+
+    def find_customer_status_comment_id(self, comments: list[dict[str, Any]]) -> str | None:
+        marker = CUSTOMER_STATUS_COMMENT_MARKER
+        for c in comments:
+            text = self.comment_body_to_plain_text(c.get("body"))
+            if marker in text:
+                cid = c.get("id")
+                if cid is not None:
+                    return str(cid)
+        return None
+
+    def update_comment(
+        self,
+        issue_key: str,
+        comment_id: str,
+        comment_text: str,
+        internal: bool = True,
+    ) -> dict[str, Any]:
+        url = f"{self._base}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
+        payload: dict[str, Any] = {"body": _text_to_adf(comment_text)}
+        if internal:
+            payload["properties"] = [
+                {"key": "sd.public.comment", "value": {"internal": True}},
+            ]
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/json"
+        r = self._client.put(url, json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def upsert_customer_status_comment(
+        self,
+        issue_key: str,
+        comment_text: str,
+        internal: bool = True,
+    ) -> dict[str, Any]:
+        """Create or update the portal-managed customer status table comment."""
+        if CUSTOMER_STATUS_COMMENT_MARKER not in comment_text:
+            comment_text = f"{CUSTOMER_STATUS_COMMENT_MARKER}\n{comment_text}"
+        comments = self.list_issue_comments(issue_key)
+        existing_id = self.find_customer_status_comment_id(comments)
+        if existing_id:
+            jira = self.update_comment(issue_key, existing_id, comment_text, internal=internal)
+            return {"action": "updated", "comment_id": existing_id, "jira": jira}
+        jira = self.add_comment(issue_key, comment_text, internal=internal)
+        new_id = jira.get("id")
+        return {
+            "action": "created",
+            "comment_id": str(new_id) if new_id is not None else "",
+            "jira": jira,
+        }
 

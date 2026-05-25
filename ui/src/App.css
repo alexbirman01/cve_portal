@@ -2028,6 +2028,64 @@ button.platCreateBugPill:disabled:hover {
   border: 1px solid rgba(248, 113, 113, 0.35);
 }
 
+/* ── Remediation status pills ────────────────────────────────────────── */
+.dashRemediation {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dashRemediationDone {
+  background: rgba(74, 222, 128, 0.15);
+  color: #86efac;
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+
+.dashRemediationWaitingTags {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.dashRemediationWaiting {
+  background: rgba(251, 146, 60, 0.14);
+  color: #fdba74;
+  border: 1px solid rgba(251, 146, 60, 0.4);
+}
+
+.dashRemediationInit {
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.dashRemediationNeedsPlat {
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
+
+.dashRemediationProcessing {
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+}
+
+.dashRemediationError {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.dashLastSync {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
 .dashIssueList {
   display: flex;
   flex-direction: column;
@@ -2056,11 +2114,12 @@ button.platCreateBugPill:disabled:hover {
 .dashIssueSummary::-webkit-details-marker { display: none; }
 
 .dashIssueSummaryMain {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 80px 200px 140px;
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1;
 }
 
 .dashIssueSummaryAside {
@@ -2089,6 +2148,32 @@ button.platCreateBugPill:disabled:hover {
   gap: 8px;
 }
 
+.dashIssueKeyCol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dashIssueCveCol {
+  display: flex;
+  align-items: center;
+}
+
+.dashIssueStatusCol {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dashIssueLastSyncCol {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .dashIssueCustomer {
   font-size: 12px;
   font-weight: 600;
@@ -2099,6 +2184,17 @@ button.platCreateBugPill:disabled:hover {
 .dashIssueOpenBtn {
   padding: 4px 12px !important;
   font-size: 12px !important;
+}
+
+.dashIssueOpenBtnBlue {
+  background: rgba(96, 165, 250, 0.15) !important;
+  color: #93c5fd !important;
+  border-color: rgba(96, 165, 250, 0.45) !important;
+}
+
+.dashIssueOpenBtnBlue:hover:not(:disabled) {
+  background: rgba(96, 165, 250, 0.28) !important;
+  border-color: rgba(96, 165, 250, 0.65) !important;
 }
 
 .dashDailySyncToggle {

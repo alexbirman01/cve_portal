@@ -21,7 +21,10 @@ import {
   apiListCustomerSlas,
   apiPost,
   apiUpdateCustomerSla,
+  apiUpsertCustomerStatusComment,
   buildSuggestedComment,
+  plainIdExpectedReleaseDate,
+  CUSTOMER_STATUS_IN_PROGRESS,
   exportCvesToExcel,
   formatStatus,
   imageBasenamesForCveRow,
@@ -48,14 +51,15 @@ import {
   sortCveRows,
   statusSteps,
   dashboardCveStateLabel,
-  dashboardTicketStatusLabel,
+  dashboardRemediationStatusLabel,
   ticketStatusForSummary,
+  remediationStatusForSummary,
   type AboutInfo,
   type AllowedImageRecord,
   type CreatePlatResponse,
   type CustomerSlaRecord,
   type CveRow,
-  type DashboardTicketStatus,
+  type DashboardRemediationStatus,
   type IssueCveStatusSummary,
   type IssueResponse,
   type JobResponse,
@@ -262,8 +266,9 @@ function PlatSyncStripCell({
   hasSyncMap: boolean
 }) {
   if (field === 'fix') {
-    const { display, title } = resolvePlatFixReleaseDateDisplay(strip.fix, strip.tag)
-    if (display) {
+    const { title } = resolvePlatFixReleaseDateDisplay(strip.fix, strip.tag)
+    const display = plainIdExpectedReleaseDate(strip.fix, strip.tag)
+    if (display !== CUSTOMER_STATUS_IN_PROGRESS) {
       return (
         <span className="platSyncStripText mono platAppMeta" title={title}>
           {display}
@@ -277,7 +282,11 @@ function PlatSyncStripCell({
         </span>
       )
     }
-    return <Dash />
+    return (
+      <span className="platSyncStripText muted small" title={title}>
+        In progress
+      </span>
+    )
   }
 
   const raw = normalizePlatSyncFieldValue(strip.tag)
@@ -1972,7 +1981,7 @@ function ResultsPanel({
   onReprocessTicket,
   onJobRefresh,
   onRefreshSuggestedComment,
-  commentPosted,
+  commentLastSyncedAt,
   allowedImageNames,
   onCancel,
 }: {
@@ -1987,7 +1996,7 @@ function ResultsPanel({
   onJobRefresh: () => Promise<JobResponse>
   /** Re-fetch saved run from the server and rebuild the suggested comment (e.g. after Sync PLAT). */
   onRefreshSuggestedComment: () => Promise<void>
-  commentPosted: boolean
+  commentLastSyncedAt: string | null
   allowedImageNames?: Set<string>
   onCancel?: () => void
 }) {
@@ -2409,9 +2418,9 @@ function ResultsPanel({
         <div className="cardHeader suggestedCommentCardHeader">
           <div className="suggestedCommentHeaderLeft">
             <span className="cardTitle">Suggested comment</span>
-            {commentPosted && (
+            {commentLastSyncedAt && (
               <span className="statusBadge statusDone" style={{ fontSize: 11 }}>
-                Posted to Jira
+                Last synced to Jira {formatSyncDate(commentLastSyncedAt)}
               </span>
             )}
           </div>
@@ -2438,7 +2447,7 @@ function ResultsPanel({
         <div className="btnRow">
           <button
             className="btn btnPrimary"
-            disabled={loading || !commentBody.trim() || commentPosted}
+            disabled={loading || !job.result}
             onClick={onPushComment}
           >
             Push to Jira as comment
@@ -2463,11 +2472,15 @@ function dashCveStatePillClass(state: string): string {
   return 'dashCveState'
 }
 
-function dashTicketWorkflowPillClass(status: DashboardTicketStatus): string {
-  if (status === 'done') return 'dashTicketWorkflow dashTicketWorkflowDone'
-  if (status === 'in_progress') return 'dashTicketWorkflow dashTicketWorkflowProgress'
-  if (status === 'processing') return 'dashTicketWorkflow dashTicketWorkflowProcessing'
-  return 'dashTicketWorkflow dashTicketWorkflowFailed'
+function dashRemediationPillClass(status: DashboardRemediationStatus | string): string {
+  if (status === 'done') return 'dashRemediation dashRemediationDone'
+  if (status === 'waiting_tags') return 'dashRemediation dashRemediationWaitingTags'
+  if (status === 'waiting_release_date') return 'dashRemediation dashRemediationWaiting'
+  if (status === 'initialized') return 'dashRemediation dashRemediationInit'
+  if (status === 'needs_plat') return 'dashRemediation dashRemediationNeedsPlat'
+  if (status === 'processing') return 'dashRemediation dashRemediationProcessing'
+  if (status === 'error') return 'dashRemediation dashRemediationError'
+  return 'dashRemediation'
 }
 
 /** Normalize dashboard search: lowercase, extract key from pasted Jira /browse/ URL. */
@@ -2489,11 +2502,14 @@ type DashSortOption =
   | 'cve_asc'
   | 'status'
 
-const DASH_STATUS_SORT_ORDER: Record<DashboardTicketStatus, number> = {
-  failed: 0,
+const DASH_STATUS_SORT_ORDER: Record<DashboardRemediationStatus, number> = {
+  error: 0,
   processing: 1,
-  in_progress: 2,
-  done: 3,
+  needs_plat: 2,
+  initialized: 3,
+  waiting_release_date: 4,
+  waiting_tags: 5,
+  done: 6,
 }
 
 function dashSummaryTimestamp(s: IssueCveStatusSummary): number {
@@ -2534,7 +2550,7 @@ function sortDashboardSummaries(
         return dashSummaryCveCount(a) - dashSummaryCveCount(b) || a.issue_key.localeCompare(b.issue_key)
       case 'status':
         return (
-          DASH_STATUS_SORT_ORDER[ticketStatusForSummary(a)] - DASH_STATUS_SORT_ORDER[ticketStatusForSummary(b)]
+          (DASH_STATUS_SORT_ORDER[remediationStatusForSummary(a)] ?? 99) - (DASH_STATUS_SORT_ORDER[remediationStatusForSummary(b)] ?? 99)
           || a.issue_key.localeCompare(b.issue_key)
         )
       default:
@@ -2600,10 +2616,12 @@ function DashboardView({
 
   const totalIssues = summaries.length
   const totalCves = summaries.reduce((s, x) => s + (x.cve_count ?? x.cves.length ?? 0), 0)
-  const wfInProgress = summaries.filter((x) => ticketStatusForSummary(x) === 'in_progress').length
-  const wfDone = summaries.filter((x) => ticketStatusForSummary(x) === 'done').length
-  const wfProcessing = summaries.filter((x) => ticketStatusForSummary(x) === 'processing').length
-  const wfFailed = summaries.filter((x) => ticketStatusForSummary(x) === 'failed').length
+  const remDone = summaries.filter((x) => remediationStatusForSummary(x) === 'done').length
+  const remWaitingTags = summaries.filter((x) => remediationStatusForSummary(x) === 'waiting_tags').length
+  const remWaitingDate = summaries.filter((x) => remediationStatusForSummary(x) === 'waiting_release_date').length
+  const remInit = summaries.filter((x) => remediationStatusForSummary(x) === 'initialized').length
+  const remNeedsPlat = summaries.filter((x) => remediationStatusForSummary(x) === 'needs_plat').length
+  const remError = summaries.filter((x) => remediationStatusForSummary(x) === 'error').length
 
   const filteredSummaries = useMemo(() => {
     const q = normalizeDashboardSearchQuery(dashSearch)
@@ -2666,20 +2684,28 @@ function DashboardView({
             <div className="statLabel">CVEs</div>
           </div>
           <div className="statCard">
-            <div className="statValue statValueAmber">{wfInProgress}</div>
-            <div className="statLabel">In progress</div>
-          </div>
-          <div className="statCard">
-            <div className="statValue statValueGreen">{wfDone}</div>
+            <div className="statValue statValueGreen">{remDone}</div>
             <div className="statLabel">Done</div>
           </div>
           <div className="statCard">
-            <div className="statValue">{wfProcessing}</div>
-            <div className="statLabel">Processing</div>
+            <div className="statValue statValueAmber">{remWaitingTags}</div>
+            <div className="statLabel">Waiting for tags</div>
           </div>
           <div className="statCard">
-            <div className="statValue statValueRed">{wfFailed}</div>
-            <div className="statLabel">Failed</div>
+            <div className="statValue statValueAmber">{remWaitingDate}</div>
+            <div className="statLabel">Waiting for date</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue">{remInit}</div>
+            <div className="statLabel">Initialized</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueAmber">{remNeedsPlat}</div>
+            <div className="statLabel">Needs PLAT</div>
+          </div>
+          <div className="statCard">
+            <div className="statValue statValueRed">{remError}</div>
+            <div className="statLabel">Error</div>
           </div>
         </div>
       )}
@@ -2748,36 +2774,32 @@ function DashboardView({
             <div className="dashIssueList">
               {pageSlice.map((s) => {
                 const wf = ticketStatusForSummary(s)
+                const rem = remediationStatusForSummary(s)
                 return (
                 <details key={s.issue_key} className="dashIssueDetails">
                   <summary className="dashIssueSummary">
                     <span className="dashIssueSummaryMain">
-                      <span className="dashIssueKeyRow">
+                      <span className="dashIssueKeyCol">
                         <span className="dashIssueKey mono">{s.issue_key}</span>
                         {(s.customer_names?.length ?? 0) > 0 && (
                           <span className="dashIssueCustomer">{s.customer_names!.join(', ')}</span>
                         )}
                       </span>
-                      {wf === 'done' ? (
-                        <span className="resultsDonePill">
-                          Last Sync: {formatSyncDate(s.updated_at)}
+                      <span className="dashIssueCveCol">
+                        {s.cve_count != null
+                          ? <span className="cvePill">{s.cve_count} CVE{s.cve_count !== 1 ? 's' : ''}</span>
+                          : <span className="muted">—</span>
+                        }
+                      </span>
+                      <span className="dashIssueStatusCol">
+                        <span className={dashRemediationPillClass(rem)} title="Remediation readiness">
+                          {dashboardRemediationStatusLabel(rem)}
                         </span>
-                      ) : (
-                        <>
-                          <span className={dashTicketWorkflowPillClass(wf)} title="PLAT ticket workflow (last run)">
-                            {dashboardTicketStatusLabel(wf)}
-                          </span>
-                          {wf === 'processing' && (
-                            <StatusBadge status={s.run_status} />
-                          )}
-                        </>
-                      )}
-                      {s.cve_count != null && (
-                        <span className="cvePill">{s.cve_count} CVE{s.cve_count !== 1 ? 's' : ''}</span>
-                      )}
-                      {(s.needs_plat_cve_count ?? 0) > 0 && (
-                        <span className="dashNeedsPlatPill">{s.needs_plat_cve_count} need PLAT</span>
-                      )}
+                        {wf === 'processing' && <StatusBadge status={s.run_status} />}
+                      </span>
+                      <span className="dashIssueLastSyncCol muted small">
+                        {s.updated_at ? formatSyncDate(s.updated_at) : '—'}
+                      </span>
                     </span>
                     <span className="dashIssueSummaryAside">
                       <label
@@ -2798,7 +2820,7 @@ function DashboardView({
                       <span className="dashIssueActionBtns">
                         <button
                           type="button"
-                          className="btn btnSecondary btnSm dashIssueOpenBtn"
+                          className="btn btnSecondary btnSm dashIssueOpenBtn dashIssueOpenBtnBlue"
                           onClick={(e) => {
                             e.preventDefault()
                             e.stopPropagation()
@@ -3097,7 +3119,7 @@ function App() {
   const [runId, setRunId]             = useState<string | null>(null)
   const [job, setJob]                 = useState<JobResponse | null>(null)
   const [commentBody, setCommentBody] = useState('')
-  const [commentPosted, setCommentPosted] = useState(false)
+  const [commentLastSyncedAt, setCommentLastSyncedAt] = useState<string | null>(null)
   const [viewMode, setViewMode]       = useState<'ticket' | 'results'>('ticket')
   const [slaToolbarOpen, setSlaToolbarOpen] = useState(false)
   const [allowedImagesOpen, setAllowedImagesOpen] = useState(false)
@@ -3178,7 +3200,7 @@ function App() {
     setRunId(null)
     setJob(null)
     setViewMode('ticket')
-    setCommentPosted(false)
+    setCommentLastSyncedAt(null)
     try {
       const data = await apiGet<IssueResponse>(`/api/issues/${key}`)
       if (!isSecurityIssueType(data.issuetype)) {
@@ -3210,7 +3232,7 @@ function App() {
     setRunId(null)
     setJob(null)
     setViewMode('ticket')
-    setCommentPosted(false)
+    setCommentLastSyncedAt(null)
     try {
       const res = await apiPost<ProcessResponse>(`/api/issues/${issueRow.key}/process`, {})
       setRunId(res.run_id)
@@ -3236,12 +3258,14 @@ function App() {
   }
 
   async function pushComment() {
-    if (!issue) return
+    if (!issue || !job?.result) return
     setError(null)
     setLoading(true)
     try {
-      await apiPost(`/api/issues/${issue.key}/comment`, { body: commentBody, internal: true })
-      setCommentPosted(true)
+      const body = buildSuggestedComment(job.result)
+      await apiUpsertCustomerStatusComment(issue.key, body)
+      setCommentBody(body)
+      setCommentLastSyncedAt(new Date().toISOString())
     } catch (e: any) {
       setError(e?.message ?? String(e))
     } finally {
@@ -3253,7 +3277,7 @@ function App() {
     setPage('new')
     setError(null)
     setIssueKey(key)
-    setCommentPosted(false)
+    setCommentLastSyncedAt(null)
     setLoading(true)
     try {
       const [issueData, jobData] = await Promise.all([
@@ -3283,7 +3307,7 @@ function App() {
     setError(null)
     try {
       const j = await refreshJob()
-      setCommentPosted(false)
+      setCommentLastSyncedAt(null)
       if (j.result) setCommentBody(buildSuggestedComment(j.result))
     } catch (e: any) {
       setError(e?.message ?? String(e))
@@ -3343,7 +3367,7 @@ function App() {
               setJob(null)
               setViewMode('ticket')
               setCommentBody('')
-              setCommentPosted(false)
+              setCommentLastSyncedAt(null)
               setError(null)
             }}
           >
@@ -3430,7 +3454,7 @@ function App() {
                 onReprocessTicket={reprocessTicket}
                 onJobRefresh={refreshJob}
                 onRefreshSuggestedComment={refreshSuggestedComment}
-                commentPosted={commentPosted}
+                commentLastSyncedAt={commentLastSyncedAt}
                 allowedImageNames={allowedImageNames}
                 onCancel={cancelRun}
               />
@@ -3469,7 +3493,7 @@ function App() {
               setJob(null)
               setViewMode('ticket')
               setCommentBody('')
-              setCommentPosted(false)
+              setCommentLastSyncedAt(null)
               setError(null)
               setPage('new')
             }}

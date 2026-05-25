@@ -161,3 +161,214 @@ def cve_rows_from_result(result: dict[str, Any] | None) -> list[dict[str, Any]]:
         return []
     rows = result.get("cve_rows")
     return list(rows) if isinstance(rows, list) else []
+
+
+# ── Remediation status helpers (mirrors ui/src/api.ts PLAT fix/tag/date logic) ─────────────
+
+import re as _re
+from datetime import date as _date
+
+
+def _normalize_plat_sync_field_value(raw: str | None) -> str:
+    s = (raw or "").strip()
+    if not s or s.lower() == "none":
+        return ""
+    return s
+
+
+def _translate_fix_version_to_release_date(fix_version: str) -> str | None:
+    """Return calendar date string for the first week-code found (e.g. '5.2627.x' → 'June 29, 2026')."""
+    if not fix_version:
+        return None
+    pattern = _re.compile(r"\b\d\.(\d{2})(\d{2})\.[xX\d]+\b")
+    months = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]
+    dates: list[str] = []
+    seen: set[str] = set()
+    for m in pattern.finditer(fix_version):
+        yy, ww = int(m.group(1)), int(m.group(2))
+        if ww < 1 or ww > 53:
+            continue
+        year = 2000 + yy
+        # ISO Week 1 is the week containing Jan 4; find its Monday.
+        jan4 = _date(year, 1, 4)
+        dow = jan4.isoweekday()  # Monday=1
+        week1_monday = _date.fromordinal(jan4.toordinal() - dow + 1)
+        monday = _date.fromordinal(week1_monday.toordinal() + (ww - 1) * 7)
+        formatted = f"{months[monday.month - 1]} {monday.day}, {monday.year}"
+        if formatted not in seen:
+            seen.add(formatted)
+            dates.append(formatted)
+    return dates[0] if dates else None
+
+
+def _plain_id_expected_release_date(fix: str, tag: str) -> str:
+    """'In progress' when no week-code can be resolved — mirrors plainIdExpectedReleaseDate in api.ts."""
+    fix_in = _normalize_plat_sync_field_value(fix)
+    tag_in = _normalize_plat_sync_field_value(tag)
+    if fix_in:
+        from_fix = _translate_fix_version_to_release_date(fix_in)
+        if from_fix:
+            return from_fix
+    if tag_in:
+        from_tag = _translate_fix_version_to_release_date(tag_in)
+        if from_tag:
+            return from_tag
+    if fix_in:
+        return fix_in
+    return "In progress"
+
+
+def _plat_orphan_sec_keys(row: dict[str, Any]) -> list[str]:
+    """Security keys not covered by any known image mapping."""
+    per_img: dict[str, list[str]] = row.get("plat_security_for_images") or {}
+    if not per_img:
+        return []
+    all_mapped: set[str] = set()
+    for keys in per_img.values():
+        all_mapped.update(k.upper() for k in (keys or []))
+    all_sec = [k.upper() for k in plat_security_keys(row)]
+    return [k for k in all_sec if k not in all_mapped]
+
+
+def _comment_plat_raw_for_keys(row: dict[str, Any], sec_keys: list[str]) -> tuple[str, str]:
+    """(fix, tag) for these security keys — mirrors commentPlatRawForKeys in api.ts."""
+    upper = sorted({k.strip().upper() for k in sec_keys if k.strip()})
+    sync_map: dict[str, Any] = row.get("plat_security_field_sync") or {}
+    has_map = bool(sync_map)
+
+    if has_map and upper:
+        if len(upper) == 1:
+            entry = sync_map.get(upper[0]) or {}
+            fix = _normalize_plat_sync_field_value(entry.get("fix_versions"))
+            tag = _normalize_plat_sync_field_value(entry.get("tag_numbers"))
+        else:
+            fix = "\n".join(
+                f"{k} · {_normalize_plat_sync_field_value((sync_map.get(k) or {}).get('fix_versions')) or '—'}"
+                for k in upper
+            )
+            tag = "\n".join(
+                f"{k} · {_normalize_plat_sync_field_value((sync_map.get(k) or {}).get('tag_numbers')) or '—'}"
+                for k in upper
+            )
+        return fix, tag
+
+    if not has_map and not sec_keys:
+        lf = _normalize_plat_sync_field_value(row.get("plat_app_fix_versions"))
+        lt = _normalize_plat_sync_field_value(row.get("plat_tag_numbers"))
+        return lf, lt
+
+    return "", ""
+
+
+def collect_customer_status_slots(row: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Return one slot dict per (CVE × image) — mirrors collectCustomerStatusRows in api.ts.
+
+    Each slot: {fix, tag, expected_release}
+    """
+    out: list[dict[str, str]] = []
+    per_img: dict[str, list[str]] = row.get("plat_security_for_images") or {}
+    basenames = image_basenames_for_cve_row(row)
+
+    if basenames:
+        for bn in basenames:
+            sec_keys = plat_sec_keys_for_image(row, bn)
+            fix, tag = _comment_plat_raw_for_keys(row, sec_keys)
+            out.append({"fix": fix, "tag": tag, "expected_release": _plain_id_expected_release_date(fix, tag)})
+        orphan = _plat_orphan_sec_keys(row)
+        if orphan:
+            fix, tag = _comment_plat_raw_for_keys(row, orphan)
+            out.append({"fix": fix, "tag": tag, "expected_release": _plain_id_expected_release_date(fix, tag)})
+        return out
+
+    imgs = [i for i in (row.get("affected_images") or []) if i.get("image") and i["image"] != "NA"]
+    legacy = ""
+    if not imgs and row.get("affected_image") and row["affected_image"] != "NA":
+        ai = str(row["affected_image"])
+        at = str(row.get("affected_tag") or "").strip()
+        legacy = f"{ai.replace('plainid/', '').replace('PLAINID/', '')}:{at}" if at else ai.replace("plainid/", "")
+
+    sec_keys = plat_security_keys(row)
+    if legacy or imgs:
+        targets = [legacy] if legacy else imgs
+        for _ in targets:
+            fix, tag = _comment_plat_raw_for_keys(row, sec_keys)
+            out.append({"fix": fix, "tag": tag, "expected_release": _plain_id_expected_release_date(fix, tag)})
+    else:
+        fix, tag = _comment_plat_raw_for_keys(row, sec_keys)
+        out.append({"fix": fix, "tag": tag, "expected_release": _plain_id_expected_release_date(fix, tag)})
+
+    return out
+
+
+_REMEDIATION_STATUSES = (
+    "error",
+    "processing",
+    "needs_plat",
+    "initialized",
+    "waiting_release_date",
+    "waiting_tags",
+    "done",
+)
+
+
+def derive_ticket_remediation_status(
+    rows: list[dict[str, Any]],
+    run_status: str,
+    result: dict[str, Any] | None,
+) -> str:
+    """
+    Ticket-level remediation status for the dashboard.
+
+    Priority: error → processing → needs_plat → initialized →
+              waiting_release_date → waiting_tags → done
+    """
+    # Error: run failed, sync errors present, or any CVE has nvd_state=error
+    if run_status.startswith("failed"):
+        return "error"
+    if result and result.get("_plat_sync_errors"):
+        return "error"
+    if any(r.get("nvd_state") == "error" for r in rows if isinstance(r, dict)):
+        return "error"
+
+    # Processing: pipeline not finished
+    if run_status != "done":
+        return "processing"
+
+    # Needs PLAT: any Security-Vuln slot missing
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if plat_missing_cve_create_slots_for_row(row):
+            return "needs_plat"
+
+    # Initialized: no plat_security_field_sync on any row
+    has_any_sync = any(
+        bool(r.get("plat_security_field_sync"))
+        for r in rows
+        if isinstance(r, dict)
+    )
+    if not has_any_sync:
+        return "initialized"
+
+    # Collect all slots across all rows
+    all_slots: list[dict[str, str]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            all_slots.extend(collect_customer_status_slots(row))
+
+    if not all_slots:
+        return "initialized"
+
+    # Waiting for release date: any slot has no resolved date
+    if any(s["expected_release"] == "In progress" for s in all_slots):
+        return "waiting_release_date"
+
+    # Waiting for tags: at least one slot missing tag numbers
+    if any(not _normalize_plat_sync_field_value(s["tag"]) for s in all_slots):
+        return "waiting_tags"
+
+    return "done"

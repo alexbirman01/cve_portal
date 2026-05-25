@@ -15,6 +15,7 @@ from api.app.config import settings
 from api.app.cve_row_derived import (
     cve_rows_from_result,
     derive_cve_state,
+    derive_ticket_remediation_status,
     plat_keys_aggregate_from_rows,
 )
 from api.app.jira_client import JiraClient
@@ -349,6 +350,21 @@ def post_comment(issue_key: str, payload: CommentIn):
         jira.close()
 
 
+@app.put("/api/issues/{issue_key}/comment/status")
+def upsert_customer_status_comment(issue_key: str, payload: CommentIn):
+    """Create or update the single portal-managed customer status table comment."""
+    jira = JiraClient()
+    try:
+        res = jira.upsert_customer_status_comment(
+            issue_key, payload.body, internal=payload.internal
+        )
+        return {"ok": True, **res}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        jira.close()
+
+
 @app.post("/api/issues/{issue_key}/process")
 def start_processing(issue_key: str):
     jira = JiraClient()
@@ -488,6 +504,11 @@ def list_jobs_cve_status(limit: int = 50):
             ticket_status = "in_progress"
         else:
             ticket_status = "done"
+        remediation_status = derive_ticket_remediation_status(
+            rows_clean,
+            r.status,
+            result if isinstance(result, dict) else None,
+        )
         customer_names: list[str] = []
         if isinstance(result, dict):
             raw_orgs = result.get("organizations")
@@ -506,6 +527,7 @@ def list_jobs_cve_status(limit: int = 50):
                 "run_id": str(r.id),
                 "run_status": r.status,
                 "ticket_status": ticket_status,
+                "remediation_status": remediation_status,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                 "cve_count": cve_count,
