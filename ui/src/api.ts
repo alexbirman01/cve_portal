@@ -52,6 +52,9 @@ export type AffectedImage = {
 export type PlatSecurityFieldSyncEntry = {
   fix_versions: string
   tag_numbers: string
+  package_name?: string
+  package_vuln_version?: string
+  vendor_fix_version?: string
 }
 
 export type CveRow = {
@@ -156,6 +159,10 @@ export type JobResult = {
     duedates_updated?: number
     links_checked?: number
     links_created?: number
+    package_names_rewritten?: number
+    aqua_rows_rechecked?: number
+    packages_checked?: number
+    packages_updated?: number
     // legacy (pre-accurate-stats) — may be present on old stored runs
     label_date_pushed?: number
     linked?: number
@@ -279,6 +286,21 @@ export type AquaPackagesSettingsResponse = {
   ttl_hours: number
   default_ttl_hours: number
   aqua_configured: boolean
+  rewrite_plat_package_name_on_sync: boolean
+  /** @deprecated Legacy alias — same as rewrite_plat_package_name_on_sync */
+  recheck_on_sync: boolean
+  preferred_registry: string
+  default_preferred_registry: string
+  default_image_tag: string
+  default_default_image_tag: string
+}
+
+export type AquaPackagesSettingsPatch = {
+  ttl_hours?: number
+  rewrite_plat_package_name_on_sync?: boolean
+  recheck_on_sync?: boolean
+  preferred_registry?: string
+  default_image_tag?: string
 }
 
 export async function apiListAquaPackages(): Promise<AquaPackagesCatalogResponse> {
@@ -289,14 +311,14 @@ export async function apiGetAquaPackagesSettings(): Promise<AquaPackagesSettings
   return apiGet('/api/aqua-packages/settings')
 }
 
-export async function apiPatchAquaPackagesSettings(ttl_hours: number): Promise<{ ok: boolean; ttl_hours: number }> {
+export async function apiPatchAquaPackagesSettings(patch: AquaPackagesSettingsPatch): Promise<AquaPackagesSettingsResponse> {
   const res = await fetch('/api/aqua-packages/settings', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ttl_hours }),
+    body: JSON.stringify(patch),
   })
   if (!res.ok) throw new Error(await res.text())
-  return (await res.json()) as { ok: boolean; ttl_hours: number }
+  return (await res.json()) as AquaPackagesSettingsResponse
 }
 
 export async function apiGetAquaPackageEntry(
@@ -469,6 +491,8 @@ export function formatStatus(status?: string | null): string {
     enriching_aqua: 'Cross-checking packages in Aqua',
     done: 'Done',
     syncing_plat: 'Syncing PLAT with Jira',
+    syncing_plat_rewrite: 'Rewriting PLAT Package Name in Jira',
+    syncing_aqua: 'Rewriting PLAT Package Name in Jira',
     // Legacy (removed Aqua phase)
     querying_aqua: 'Building results',
   }
@@ -698,6 +722,13 @@ export type PackagePickOption = {
   label: string
 }
 
+/** True when any NVD package in the row has vendor 'golang'. */
+export function isNvdGoRow(row: CveRow): boolean {
+  return (row.all_packages ?? []).some(
+    (p) => (p.vendor ?? '').trim().toLowerCase() === 'golang',
+  )
+}
+
 /** Fixed-order pick list when Aqua did not confirm the package (aqua / customer / nvd). */
 export function packagePickOptions(
   row: CveRow,
@@ -712,6 +743,15 @@ export function packagePickOptions(
   const nvd =
     nameFor('nvd') ||
     (row.all_packages?.map((p) => (p.product ?? '').trim()).find(Boolean) ?? '')
+
+  if (isNvdGoRow(row)) {
+    return [
+      { source: 'aqua', value: 'stdlib', label: 'aqua — stdlib' },
+      { source: 'customer', value: customer, label: customer ? `customer — ${customer}` : 'customer — none' },
+      { source: 'nvd', value: nvd, label: nvd ? `nvd — ${nvd}` : 'nvd — none' },
+    ]
+  }
+
   const aqua = nameFor('aqua')
   const label = (source: string, name: string) => {
     if (name) return `${source} — ${name}`
@@ -730,8 +770,11 @@ export function platPackageNameForRow(r: CveRow, imageBasename?: string): string
   if (imageBasename) {
     const entry = packageEntryForImage(r, imageBasename)
     if (entry?.aqua_pkg_found && entry.aqua_package_name) return entry.aqua_package_name.trim()
+    if (isNvdGoRow(r)) return 'stdlib'
     if (entry?.affected_resource) return entry.affected_resource.trim()
   }
+  if (r.aqua_pkg_found && r.aqua_package_name?.trim()) return r.aqua_package_name.trim()
+  if (isNvdGoRow(r)) return 'stdlib'
   if (r.aqua_package_name?.trim()) return r.aqua_package_name.trim()
   const res = (r.affected_resource ?? '').trim()
   if (res) return res

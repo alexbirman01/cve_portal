@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     jira_plat_cf_internal_id: str = "customfield_10744"
     jira_plat_cf_package_name: str = "customfield_11243"
     jira_plat_cf_package_vuln_version: str = "customfield_11246"
+    jira_plat_cf_vendor_fix_version: str = "customfield_11247"
     # Fallback sent when affected_version is unknown but Jira requires the field.
     jira_plat_package_vuln_version_fallback: str = "N/A"
     # PLAT Security Vulnerability: “Tag numbers” (PlainID customer field) — read on sync.

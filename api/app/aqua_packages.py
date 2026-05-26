@@ -12,7 +12,27 @@ from sqlalchemy.orm import Session
 from api.app.aqua_client import AquaClient, AquaImageRef
 from api.app.config import settings
 from api.app.models import AquaImagePackages
-from api.app.portal_settings import get_aqua_packages_ttl_hours
+from api.app.portal_settings import (
+    get_aqua_default_image_tag,
+    get_aqua_packages_ttl_hours,
+)
+
+
+GO_AQUA_RESOURCE = "stdlib"
+
+
+def is_nvd_go_packages(packages: list[dict[str, Any]]) -> bool:
+    """Return True when any NVD package entry has vendor 'golang'."""
+    return any(
+        (p.get("vendor") or "").strip().lower() == "golang"
+        for p in packages
+        if isinstance(p, dict)
+    )
+
+
+def resolve_aqua_search_name(nvd_packages: list[dict[str, Any]], fallback: str) -> str:
+    """For Go CVEs (NVD vendor golang), always search Aqua for 'stdlib'."""
+    return GO_AQUA_RESOURCE if is_nvd_go_packages(nvd_packages) else (fallback or "").strip()
 
 
 @dataclass
@@ -39,14 +59,32 @@ def _resolve_image_ref(
     repository: str,
     tag: str,
 ) -> AquaImageRef | None:
-    """Resolve image in Aqua; fall back to default tag when the requested tag is not registered."""
-    ref = aqua.resolve_image(repository, tag)
+    """Resolve image in Aqua; fall back to default tag or alternate repository path when needed.
+
+    For external images (e.g. rclone) whose Aqua repository is ``<name>/<name>`` rather than
+    ``plainid/<name>``, a secondary lookup is attempted using the basename alone as both
+    org and image (e.g. ``rclone/rclone``).
+    """
+    fallback_tag = get_aqua_default_image_tag()
+
+    def _try(repo: str) -> AquaImageRef | None:
+        ref = aqua.resolve_image(repo, tag)
+        if ref:
+            return ref
+        if tag.lower() == fallback_tag.lower():
+            return None
+        return aqua.resolve_image(repo, fallback_tag)
+
+    ref = _try(repository)
     if ref:
         return ref
-    fallback = (settings.aqua_default_image_tag or "latest").strip() or "latest"
-    if tag.lower() == fallback.lower():
-        return None
-    return aqua.resolve_image(repository, fallback)
+
+    # When the primary repository is plainid/<name>, also try <name>/<name> for external images.
+    basename = repository.split("/")[-1]
+    alt = f"{basename}/{basename}"
+    if alt != repository:
+        return _try(alt)
+    return None
 
 
 def repository_for_basename(image_basename: str) -> str:
@@ -126,7 +164,7 @@ def get_or_fetch_image_packages(
     if not repository:
         return [], None
 
-    requested_tag = (tag or "").strip() or settings.aqua_default_image_tag.strip() or "latest"
+    requested_tag = (tag or "").strip() or get_aqua_default_image_tag()
     own_client = client is None
     aqua = client or AquaClient()
     try:
@@ -203,6 +241,7 @@ def match_package_in_catalog(
     *,
     customer_name: str | None = None,
     nvd_name: str | None = None,
+    is_go: bool = False,
 ) -> AquaCrossCheckResult:
     if not (search_name or "").strip():
         return AquaCrossCheckResult(found=False, aqua_checked=True)
@@ -229,10 +268,16 @@ def match_package_in_catalog(
         seen.add(k)
         candidates.append(AquaPackageCandidate(name=n, version=None, source=source))
 
-    add(customer_name or search_name, "customer")
-    add(nvd_name, "nvd")
-    aqua_hint = _aqua_hint_from_catalog(catalog, search_name)
-    add(aqua_hint, "aqua")
+    if is_go:
+        # For Go CVEs: stdlib is the Aqua-side resource; skip misleading substring hints.
+        add(GO_AQUA_RESOURCE, "aqua")
+        add(customer_name or search_name, "customer")
+        add(nvd_name, "nvd")
+    else:
+        add(customer_name or search_name, "customer")
+        add(nvd_name, "nvd")
+        aqua_hint = _aqua_hint_from_catalog(catalog, search_name)
+        add(aqua_hint, "aqua")
 
     return AquaCrossCheckResult(
         found=False,
@@ -249,13 +294,17 @@ def cross_check_package(
     tag: str | None = None,
     customer_name: str | None = None,
     nvd_name: str | None = None,
+    nvd_packages: list[dict[str, Any]] | None = None,
     force_refresh: bool = False,
     client: AquaClient | None = None,
 ) -> AquaCrossCheckResult:
     if not (settings.aqua_api_key or "").strip():
         return AquaCrossCheckResult(found=False, aqua_checked=False)
 
-    requested_tag = (tag or "").strip() or settings.aqua_default_image_tag.strip() or "latest"
+    go = is_nvd_go_packages(nvd_packages or [])
+    effective_search = GO_AQUA_RESOURCE if go else (search_name or "").strip()
+
+    requested_tag = (tag or "").strip() or get_aqua_default_image_tag()
     catalog, image_ref = get_or_fetch_image_packages(
         db,
         image_basename,
@@ -281,8 +330,13 @@ def cross_check_package(
             seen.add(k)
             candidates.append(AquaPackageCandidate(name=n, version=None, source=source))
 
-        add(customer_name or search_name, "customer")
-        add(nvd_name, "nvd")
+        if go:
+            add(GO_AQUA_RESOURCE, "aqua")
+            add(customer_name or search_name, "customer")
+            add(nvd_name, "nvd")
+        else:
+            add(customer_name or search_name, "customer")
+            add(nvd_name, "nvd")
         out = AquaCrossCheckResult(
             found=False,
             candidates=candidates[:3],
@@ -295,13 +349,14 @@ def cross_check_package(
 
     cust = (customer_name or "").strip() or None
     nvd = (nvd_name or "").strip() or None
-    if cust and cust.lower() == (nvd or "").lower():
+    if not go and cust and cust.lower() == (nvd or "").lower():
         nvd = None
     out = match_package_in_catalog(
         catalog,
-        search_name,
+        effective_search,
         customer_name=cust,
         nvd_name=nvd,
+        is_go=go,
     )
     if tag_fallback and image_ref:
         out.aqua_tag_requested = requested_tag

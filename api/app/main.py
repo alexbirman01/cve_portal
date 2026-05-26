@@ -20,7 +20,7 @@ from api.app.cve_row_derived import (
     image_basenames_for_cve_row,
     plat_keys_aggregate_from_rows,
 )
-from api.app.aqua_packages import candidates_to_json, cross_check_package
+from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
 from api.app.jira_client import JiraClient
 from api.app.db import engine, db_session
 from api.app.allowed_images import normalize_image_basename
@@ -1034,7 +1034,7 @@ def enqueue_sync_plat(run_id: str):
         run = db.get(ProcessingRun, rid)
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
-        if run.status == "syncing_plat":
+        if run.status in ("syncing_plat", "syncing_plat_rewrite", "syncing_aqua"):
             raise HTTPException(status_code=409, detail="PLAT sync already in progress")
         if not run.result_json:
             raise HTTPException(status_code=400, detail="no result to sync")
@@ -1121,13 +1121,15 @@ def patch_cve_row(run_id: str, payload: CveRowPatchIn):
                     pkgs = row.get("all_packages") or []
                     if pkgs and isinstance(pkgs[0], dict):
                         nvd_name = (pkgs[0].get("product") or "").strip() or None
+                    aqua_search = resolve_aqua_search_name(pkgs, search)
                     result = cross_check_package(
                         db,
                         bn,
-                        search,
+                        aqua_search,
                         tag=tag,
                         customer_name=search,
                         nvd_name=nvd_name,
+                        nvd_packages=pkgs,
                         force_refresh=payload.force_refresh_aqua,
                     )
                     # Update legacy shape

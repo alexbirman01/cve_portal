@@ -56,6 +56,144 @@ def image_path_for_basename(row: dict[str, Any], image_basename: str) -> str | N
     return None
 
 
+def package_entry_for_image(row: dict[str, Any], image_basename: str) -> dict[str, Any]:
+    """Per-image package/Aqua slice — mirrors packageEntryForImage in api.ts."""
+    pbi: dict[str, Any] = row.get("package_by_image") or {}
+    fold = image_basename.lower()
+    if image_basename in pbi:
+        entry = pbi[image_basename]
+        return entry if isinstance(entry, dict) else {}
+    for k, v in pbi.items():
+        if str(k).lower() == fold and isinstance(v, dict):
+            return v
+    return {}
+
+
+def plat_jira_package_name_for_row(row: dict[str, Any], image_basename: str | None = None) -> str:
+    """
+    Package Name for PLAT Jira (create + rewrite on sync).
+    Go CVEs always use stdlib; confirmed Aqua name wins when present.
+    """
+    from api.app.aqua_packages import GO_AQUA_RESOURCE, is_nvd_go_packages
+
+    nvd_pkgs = row.get("all_packages") or []
+    is_go = is_nvd_go_packages(nvd_pkgs if isinstance(nvd_pkgs, list) else [])
+
+    if image_basename:
+        entry = package_entry_for_image(row, image_basename)
+        apn = (entry.get("aqua_package_name") or "").strip()
+        if entry.get("aqua_pkg_found") and apn:
+            return apn
+        if is_go:
+            return GO_AQUA_RESOURCE
+        res = (entry.get("affected_resource") or "").strip()
+        if res:
+            return res
+
+    apn = (row.get("aqua_package_name") or "").strip()
+    if row.get("aqua_pkg_found") and apn:
+        return apn
+    if is_go:
+        return GO_AQUA_RESOURCE
+
+    res = (row.get("affected_resource") or "").strip()
+    if res:
+        return res
+    for p in nvd_pkgs:
+        if isinstance(p, dict):
+            product = (p.get("product") or "").strip()
+            if product:
+                return product
+    return str(row.get("cve_id") or "").strip()
+
+
+def plat_package_name_for_row(row: dict[str, Any], image_basename: str | None = None) -> str:
+    """Best-effort package name for PLAT Package Name — mirrors platPackageNameForRow in api.ts."""
+    return plat_jira_package_name_for_row(row, image_basename)
+
+
+def plat_sec_keys_scoped_to_run(row: dict[str, Any]) -> set[str]:
+    """
+    Security Vuln PLAT keys for this PLATFORM run only (CVE row × affected images).
+
+    Excludes other PLAT tickets in Jira that share the same CVE id but belong to
+    images not on this ticket (the global plat_security_keys list).
+    """
+    out: set[str] = set()
+    basenames = image_basenames_for_cve_row(row)
+    per_img: dict[str, list[str]] = row.get("plat_security_for_images") or {}
+
+    if per_img and basenames:
+        for bn in basenames:
+            for pk in plat_sec_keys_for_image(row, bn):
+                k = str(pk).strip().upper()
+                if k:
+                    out.add(k)
+        return out
+
+    keys = plat_security_keys(row)
+    if len(basenames) == 1 and len(keys) == 1:
+        out.add(keys[0].strip().upper())
+    return out
+
+
+def iter_plat_security_package_targets(row: dict[str, Any]) -> list[tuple[str | None, str]]:
+    """(image_basename, plat_key) pairs for updating Package Name on Security Vuln tickets."""
+    out: list[tuple[str | None, str]] = []
+    basenames = image_basenames_for_cve_row(row)
+    for bn in basenames:
+        for pk in plat_sec_keys_for_image(row, bn):
+            k = str(pk).strip().upper()
+            if not k:
+                continue
+            if any(existing[1] == k for existing in out):
+                continue
+            out.append((bn, k))
+    if not out:
+        keys = list(plat_sec_keys_scoped_to_run(row))
+        if len(basenames) == 1 and len(keys) == 1:
+            out.append((basenames[0], keys[0]))
+    return out
+
+
+def _plat_sync_field_usable(val: object) -> str:
+    s = str(val or "").strip()
+    if not s or s.casefold() == "none":
+        return ""
+    return s
+
+
+def plat_sync_entry_for_row_primary(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Best PLAT sync entry for row-level vendor fields (primary image / first linked key)."""
+    sync_map: dict[str, Any] = row.get("plat_security_field_sync") or {}
+    if not sync_map:
+        return None
+    for bn in image_basenames_for_cve_row(row):
+        for pk in plat_sec_keys_for_image(row, bn):
+            entry = sync_map.get(str(pk).strip().upper())
+            if isinstance(entry, dict):
+                return entry
+    for pk in plat_security_keys(row):
+        entry = sync_map.get(str(pk).strip().upper())
+        if isinstance(entry, dict):
+            return entry
+    first = next(iter(sync_map.values()), None)
+    return first if isinstance(first, dict) else None
+
+
+def apply_plat_vendor_fields_from_sync(row: dict[str, Any]) -> None:
+    """Overwrite row affected_version / fixed_version from Jira when PLAT sync has values."""
+    entry = plat_sync_entry_for_row_primary(row)
+    if not entry:
+        return
+    pv = _plat_sync_field_usable(entry.get("package_vuln_version"))
+    if pv:
+        row["affected_version"] = pv
+    vf = _plat_sync_field_usable(entry.get("vendor_fix_version"))
+    if vf:
+        row["fixed_version"] = vf
+
+
 def plat_sec_keys_for_image(row: dict[str, Any], image_basename: str) -> list[str]:
     m = row.get("plat_security_for_images") or {}
     if m and len(m) > 0:

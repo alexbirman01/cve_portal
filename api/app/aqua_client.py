@@ -105,7 +105,8 @@ class AquaClient:
         """Find registry/repository/tag in Aqua (search param does not filter — scan pages)."""
         repo_lower = repository.lower()
         tag_lower = tag.lower()
-        preferred = (settings.aqua_preferred_registry or "").strip()
+        from api.app.portal_settings import get_aqua_preferred_registry
+        preferred = get_aqua_preferred_registry()
         page = 1
         candidates: list[dict[str, Any]] = []
         while page <= 20:

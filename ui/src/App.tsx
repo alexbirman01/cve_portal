@@ -48,6 +48,7 @@ import {
   platDisplaySketchSummary,
   platOrgRefsFromIssue,
   aquaAllowsPlatCreate,
+  isNvdGoRow,
   packageEntryForImage,
   packagePickOptions,
   platPackageNameForRow,
@@ -66,6 +67,7 @@ import {
   type AboutInfo,
   type AllowedImageRecord,
   type AquaCachedImageSummary,
+  type AquaPackagesSettingsResponse,
   type AquaPackageEntryResponse,
   type CreatePlatResponse,
   type CustomerSlaRecord,
@@ -584,6 +586,7 @@ function PackageResourceCell({
   }
 
   if (found === false) {
+    const goRow = isNvdGoRow(row)
     const pickClass =
       selectValue === AQUA_DEFAULT_VALUE
         ? 'packageResourcePick packageResourcePickAquaDefault'
@@ -596,8 +599,10 @@ function PackageResourceCell({
           disabled={saving}
           title={
             tagFallbackHint
-              ? `${tagFallbackHint} — pick customer or NVD name to re-check Aqua`
-              : 'Not in Aqua — pick customer or NVD to re-check'
+              ? `${tagFallbackHint} — pick a name to re-check Aqua`
+              : goRow
+                ? 'Go CVE — select stdlib or a specific package name'
+                : 'Not in Aqua — pick customer or NVD to re-check'
           }
           onChange={(e) => {
             const name = e.target.value
@@ -610,7 +615,12 @@ function PackageResourceCell({
             {aquaDefaultOption?.label ?? 'aqua — not found'}
           </option>
           {pickOptions
-            .filter((o) => o.source !== 'aqua')
+            .filter((o) => {
+              // For Go rows, show the aqua (stdlib) option as selectable.
+              // For other rows, the aqua hint is only shown when it has a value.
+              if (o.source === 'aqua') return goRow && !!o.value
+              return true
+            })
             .map((o) => (
               <option key={o.source} value={o.value} disabled={!o.value}>
                 {o.label}
@@ -1729,10 +1739,17 @@ function AquaPackagesAdminPanelBody() {
   const [images, setImages] = useState<AquaCachedImageSummary[]>([])
   const [ttlHours, setTtlHours] = useState(168)
   const [defaultTtlHours, setDefaultTtlHours] = useState(168)
+  const [preferredRegistry, setPreferredRegistry] = useState('')
+  const [defaultPreferredRegistry, setDefaultPreferredRegistry] = useState('')
+  const [defaultImageTag, setDefaultImageTag] = useState('latest')
+  const [defaultDefaultImageTag, setDefaultDefaultImageTag] = useState('latest')
+  const [rewritePackageNameOnSync, setRewritePackageNameOnSync] = useState(false)
   const [aquaConfigured, setAquaConfigured] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [savingTtl, setSavingTtl] = useState(false)
+  const [savingRegistry, setSavingRegistry] = useState(false)
+  const [savingTag, setSavingTag] = useState(false)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [selected, setSelected] = useState<AquaCachedImageSummary | null>(null)
   const [detail, setDetail] = useState<AquaPackageEntryResponse | null>(null)
@@ -1742,18 +1759,29 @@ function AquaPackagesAdminPanelBody() {
   const imageKey = (img: AquaCachedImageSummary) =>
     `${img.registry}|${img.repository}|${img.tag}`
 
+  const applySettings = (s: AquaPackagesSettingsResponse) => {
+    setTtlHours(s.ttl_hours)
+    setDefaultTtlHours(s.default_ttl_hours)
+    setRewritePackageNameOnSync(
+      s.rewrite_plat_package_name_on_sync ?? s.recheck_on_sync ?? false,
+    )
+    setPreferredRegistry(s.preferred_registry ?? '')
+    setDefaultPreferredRegistry(s.default_preferred_registry ?? '')
+    setDefaultImageTag(s.default_image_tag ?? 'latest')
+    setDefaultDefaultImageTag(s.default_default_image_tag ?? 'latest')
+  }
+
   const load = useCallback(async () => {
     setErr(null)
     setLoading(true)
     try {
-      const [catalog, settings] = await Promise.all([
+      const [catalog, s] = await Promise.all([
         apiListAquaPackages(),
         apiGetAquaPackagesSettings(),
       ])
       setImages(catalog.images)
       setAquaConfigured(catalog.aqua_configured)
-      setTtlHours(settings.ttl_hours)
-      setDefaultTtlHours(settings.default_ttl_hours)
+      applySettings(s)
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1785,13 +1813,53 @@ function AquaPackagesAdminPanelBody() {
     setErr(null)
     setSavingTtl(true)
     try {
-      const out = await apiPatchAquaPackagesSettings(ttlHours)
-      setTtlHours(out.ttl_hours)
+      const out = await apiPatchAquaPackagesSettings({ ttl_hours: ttlHours })
+      applySettings(out)
       await load()
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setSavingTtl(false)
+    }
+  }
+
+  async function saveRegistry() {
+    setErr(null)
+    setSavingRegistry(true)
+    try {
+      const out = await apiPatchAquaPackagesSettings({ preferred_registry: preferredRegistry })
+      applySettings(out)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingRegistry(false)
+    }
+  }
+
+  async function saveTag() {
+    setErr(null)
+    setSavingTag(true)
+    try {
+      const out = await apiPatchAquaPackagesSettings({ default_image_tag: defaultImageTag })
+      applySettings(out)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingTag(false)
+    }
+  }
+
+  async function toggleRewritePackageName(enabled: boolean) {
+    setRewritePackageNameOnSync(enabled)
+    setErr(null)
+    try {
+      const out = await apiPatchAquaPackagesSettings({
+        rewrite_plat_package_name_on_sync: enabled,
+      })
+      applySettings(out)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+      setRewritePackageNameOnSync(!enabled)
     }
   }
 
@@ -1880,8 +1948,65 @@ function AquaPackagesAdminPanelBody() {
           {savingTtl ? 'Saving…' : 'Save TTL'}
         </button>
         <span className="muted small">
-          Env default: {defaultTtlHours}h · stale entries are ignored until refreshed
+          Env default: {defaultTtlHours}h
         </span>
+
+        <label className="aquaCacheSettingsLabel">
+          Preferred registry
+          <input
+            type="text"
+            className="inlineEditInput aquaCacheRegistryInput"
+            value={preferredRegistry}
+            disabled={savingRegistry}
+            onChange={(e) => setPreferredRegistry(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void saveRegistry() }}
+            placeholder={defaultPreferredRegistry || 'e.g. PlainID DHub'}
+          />
+        </label>
+        <button
+          type="button"
+          className="btn btnSecondary btnSm"
+          disabled={savingRegistry}
+          onClick={() => void saveRegistry()}
+        >
+          {savingRegistry ? 'Saving…' : 'Save'}
+        </button>
+        {defaultPreferredRegistry && (
+          <span className="muted small">Env default: {defaultPreferredRegistry}</span>
+        )}
+
+        <label className="aquaCacheSettingsLabel">
+          Default image tag
+          <input
+            type="text"
+            className="inlineEditInput aquaCacheTagInput"
+            value={defaultImageTag}
+            disabled={savingTag}
+            onChange={(e) => setDefaultImageTag(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void saveTag() }}
+            placeholder="latest"
+          />
+        </label>
+        <button
+          type="button"
+          className="btn btnSecondary btnSm"
+          disabled={savingTag}
+          onClick={() => void saveTag()}
+        >
+          {savingTag ? 'Saving…' : 'Save'}
+        </button>
+        {defaultDefaultImageTag && (
+          <span className="muted small">Env default: {defaultDefaultImageTag}</span>
+        )}
+
+        <label className="aquaCacheSettingsLabel aquaCacheRecheckLabel">
+          <input
+            type="checkbox"
+            checked={rewritePackageNameOnSync}
+            onChange={(e) => void toggleRewritePackageName(e.target.checked)}
+          />
+          Rewrite Package Name on PLAT CVE tickets during Sync PLAT (portal/Aqua rules; Go → stdlib)
+        </label>
       </div>
 
       <div className="slaAdminToolbar">
@@ -2461,16 +2586,32 @@ function PlatSyncSummaryModal({
   if (!open) return null
 
   const fieldsRead = stats.fields_read ?? 0
+  const packagesChecked = stats.packages_checked ?? 0
+  const packagesUpdated = stats.packages_updated ?? 0
+  const rowsPrepared =
+    stats.package_names_rewritten ?? stats.aqua_rows_rechecked ?? 0
 
   const rows: { step: number; operation: string; checked: string; changed: string; details: string }[] = [
     {
       step: 1,
-      operation: 'Read fix version & tag',
+      operation: 'Read PLAT fields from Jira',
       checked: `${fieldsRead}`,
       changed: `${fieldsRead}`,
-      details: 'Security Vuln fields fetched',
+      details: 'Fix/tag, package name, vuln version, vendor fix',
     },
   ]
+  if (rowsPrepared > 0 || packagesChecked > 0) {
+    rows.push({
+      step: 2,
+      operation: 'Rewrite Package Name in Jira',
+      checked: `${packagesChecked}`,
+      changed: `${packagesUpdated}`,
+      details:
+        rowsPrepared > 0
+          ? `${rowsPrepared} CVE row(s) prepared from Aqua cache`
+          : 'Package Name when changed',
+    })
+  }
 
   return (
     <div className="modalOverlay" onClick={onClose} role="presentation">
@@ -2781,7 +2922,11 @@ function ResultsPanel({
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise((r) => setTimeout(r, 1500))
         const j = await onJobRefresh()
-        if (j.status === 'syncing_plat') {
+        if (
+          j.status === 'syncing_plat' ||
+          j.status === 'syncing_plat_rewrite' ||
+          j.status === 'syncing_aqua'
+        ) {
           setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
           continue
         }
@@ -2926,7 +3071,13 @@ function ResultsPanel({
             </div>
             <div className="resultsFindingsToolbarActions">
               <ResultsActionsMenu
-                disabled={loading || platBulkBusy || job.status === 'syncing_plat'}
+                disabled={
+                  loading ||
+                  platBulkBusy ||
+                  job.status === 'syncing_plat' ||
+                  job.status === 'syncing_plat_rewrite' ||
+                  job.status === 'syncing_aqua'
+                }
                 onReprocess={() => { void onReprocessTicket() }}
                 onCreateAllCve={() => { void createAllMissingPlatCves() }}
                 onCreateAllBug={() => { void createAllMissingPlatBugs() }}
@@ -2939,7 +3090,11 @@ function ResultsPanel({
                   Creating… {platBulkProgress.done}/{platBulkProgress.total}
                 </span>
               )}
-              {(platBulkBusy || job.status === 'syncing_plat') && !platBulkProgress && (
+              {(platBulkBusy ||
+                job.status === 'syncing_plat' ||
+                job.status === 'syncing_plat_rewrite' ||
+                job.status === 'syncing_aqua') &&
+                !platBulkProgress && (
                 <span className="platSyncProgressPill" role="status">
                   Syncing PLAT
                   {platSyncProgress ? (

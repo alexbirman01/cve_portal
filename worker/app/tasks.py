@@ -20,8 +20,16 @@ from api.app.redhat_client import RedHatClient
 from api.app.cve5_client import Cve5Client
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
 from api.app.aqua_client import AquaClient
-from api.app.aqua_packages import candidates_to_json, cross_check_package
-from api.app.cve_row_derived import _image_path_basename, image_basenames_for_cve_row
+from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
+from api.app.portal_settings import get_aqua_default_image_tag, get_rewrite_plat_package_name_on_sync
+from api.app.cve_row_derived import (
+    _image_path_basename,
+    apply_plat_vendor_fields_from_sync,
+    image_basenames_for_cve_row,
+    iter_plat_security_package_targets,
+    plat_jira_package_name_for_row,
+    plat_sec_keys_scoped_to_run,
+)
 from worker.app.celery_app import celery_app
 
 
@@ -602,6 +610,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         if not basenames:
                             continue
 
+                        aqua_search = resolve_aqua_search_name(nvd_pkgs, search_name)
+
                         by_image: dict[str, Any] = {}
                         pkg_by_image: dict[str, Any] = {}
                         row_ok = True
@@ -621,10 +631,11 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                             result = cross_check_package(
                                 db,
                                 bn,
-                                search_name,
+                                aqua_search,
                                 tag=tag,
                                 customer_name=customer_name,
                                 nvd_name=nvd_name,
+                                nvd_packages=nvd_pkgs,
                                 client=aqua,
                             )
                             # Legacy shape (backward compat)
@@ -787,21 +798,6 @@ def _link_plat_rows(
     return counts
 
 
-def _plat_sec_keys_for_row(row: dict[str, Any]) -> set[str]:
-    s: set[str] = set()
-    for k in row.get("plat_security_keys") or []:
-        if isinstance(k, str) and k.strip():
-            s.add(k.strip().upper())
-    for vs in (row.get("plat_security_for_images") or {}).values():
-        for k in vs or []:
-            if isinstance(k, str) and k.strip():
-                s.add(k.strip().upper())
-    for t in row.get("plat_tickets") or []:
-        if t.get("issue_type") == "Security Vulnerability" and t.get("key"):
-            s.add(str(t["key"]).strip().upper())
-    return s
-
-
 @celery_app.task(name="sync_plat_for_run")
 def sync_plat_for_run(run_id: str) -> dict[str, Any]:
     """Re-fetch PLAT Security issue fields into cve_rows."""
@@ -837,14 +833,17 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             "duedates_updated": 0,
             "links_checked": 0,
             "links_created": 0,
+            "packages_checked": 0,
+            "packages_updated": 0,
+            "package_names_rewritten": 0,
         }
         try:
-            # Collect existing Security Vulnerability (PLAT CVE) keys from cve_rows
+            # PLAT Sec-Vuln keys for this PLATFORM ticket only (per CVE × affected image).
             all_keys: set[str] = set()
             for row in cve_rows:
-                all_keys |= _plat_sec_keys_for_row(row)
+                all_keys |= plat_sec_keys_scoped_to_run(row)
 
-            progress.set_phase("Reading fix/tag from Jira", len(all_keys), 1)
+            progress.set_phase("Reading PLAT fields from Jira", len(all_keys), 1)
 
             for pk in sorted(all_keys):
                 try:
@@ -861,23 +860,130 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 row.pop("plat_app_fix_versions", None)
                 row.pop("plat_tag_numbers", None)
                 sync_map: dict[str, dict[str, str]] = {}
-                for pk in _plat_sec_keys_for_row(row):
+                for pk in plat_sec_keys_scoped_to_run(row):
                     m = plat_meta.get(pk)
                     if not m:
                         continue
-                    fix_s = (m.get("fix_versions") or "").strip()
-                    tag_s = (m.get("tag_numbers") or "").strip()
+                    def _sync_val(raw: object) -> str:
+                        s = str(raw or "").strip()
+                        return s if s else "None"
+
                     sync_map[pk] = {
-                        "fix_versions": fix_s if fix_s else "None",
-                        "tag_numbers": tag_s if tag_s else "None",
+                        "fix_versions": _sync_val(m.get("fix_versions")),
+                        "tag_numbers": _sync_val(m.get("tag_numbers")),
+                        "package_name": _sync_val(m.get("package_name")),
+                        "package_vuln_version": _sync_val(m.get("package_vuln_version")),
+                        "vendor_fix_version": _sync_val(m.get("vendor_fix_version")),
                     }
                 if sync_map:
                     row["plat_security_field_sync"] = sync_map
+                    apply_plat_vendor_fields_from_sync(row)
                 else:
                     row.pop("plat_security_field_sync", None)
 
         finally:
             jira.close()
+
+        # Optional rewrite of wrong historical Package Name on PLAT CVE tickets in Jira.
+        if get_rewrite_plat_package_name_on_sync():
+            _set_run_status(run_id, "syncing_plat_rewrite")
+            rows_prepared = 0
+            with db_session() as db:
+                aqua = AquaClient()
+                try:
+                    for row in cve_rows:
+                        nvd_pkgs = row.get("all_packages") or []
+                        search_name = (row.get("affected_resource") or "").strip()
+                        if not search_name and nvd_pkgs and isinstance(nvd_pkgs[0], dict):
+                            search_name = (nvd_pkgs[0].get("product") or "").strip()
+                        basenames = image_basenames_for_cve_row(row)
+                        if not basenames:
+                            continue
+                        if not search_name and not nvd_pkgs:
+                            continue
+                        aqua_search = resolve_aqua_search_name(nvd_pkgs, search_name)
+                        nvd_name: str | None = None
+                        if nvd_pkgs and isinstance(nvd_pkgs[0], dict):
+                            nvd_name = (nvd_pkgs[0].get("product") or "").strip() or None
+                        by_image: dict[str, Any] = dict(row.get("aqua_pkg_by_image") or {})
+                        pkg_by_image: dict[str, Any] = dict(row.get("package_by_image") or {})
+                        row_ok = True
+                        row_checked = False
+                        primary_bn = basenames[0]
+                        primary_result = None
+                        for bn in basenames:
+                            tag = get_aqua_default_image_tag()
+                            for img in row.get("affected_images") or []:
+                                if _image_path_basename(str(img.get("image") or "")).lower() == bn.lower():
+                                    t = (img.get("tag") or "").strip()
+                                    if t:
+                                        tag = t
+                                    break
+                            result_ck = cross_check_package(
+                                db,
+                                bn,
+                                aqua_search,
+                                tag=tag,
+                                nvd_name=nvd_name,
+                                nvd_packages=nvd_pkgs,
+                                force_refresh=False,
+                                client=aqua,
+                            )
+                            by_image[bn] = {
+                                "found": result_ck.found,
+                                "aqua_package_name": result_ck.aqua_package_name,
+                                "aqua_package_version": result_ck.aqua_package_version,
+                                "candidates": candidates_to_json(result_ck.candidates),
+                                "aqua_checked": result_ck.aqua_checked,
+                            }
+                            pkg_by_image[bn] = {
+                                "affected_resource": search_name,
+                                "aqua_pkg_found": result_ck.found if result_ck.aqua_checked else None,
+                                "aqua_package_name": result_ck.aqua_package_name,
+                                "aqua_package_version": result_ck.aqua_package_version,
+                                "aqua_candidates": candidates_to_json(result_ck.candidates),
+                                "aqua_checked": result_ck.aqua_checked,
+                                "aqua_tag_requested": result_ck.aqua_tag_requested,
+                                "aqua_tag_used": result_ck.aqua_tag_used,
+                            }
+                            if result_ck.aqua_checked:
+                                row_checked = True
+                                if not result_ck.found:
+                                    row_ok = False
+                            if bn == primary_bn:
+                                primary_result = result_ck
+                        if by_image:
+                            row["aqua_pkg_by_image"] = by_image
+                            row["package_by_image"] = pkg_by_image
+                        if row_checked:
+                            row["aqua_pkg_found"] = row_ok
+                            if primary_result:
+                                row["aqua_package_name"] = primary_result.aqua_package_name
+                                if not primary_result.found:
+                                    row["aqua_candidates"] = candidates_to_json(primary_result.candidates)
+                                else:
+                                    row.pop("aqua_candidates", None)
+                            rows_prepared += 1
+                finally:
+                    aqua.close()
+            stats["package_names_rewritten"] = rows_prepared
+
+            jira_pkg = JiraClient()
+            try:
+                for row in cve_rows:
+                    for bn, pk in iter_plat_security_package_targets(row):
+                        pkg = plat_jira_package_name_for_row(row, bn)
+                        if not pkg:
+                            continue
+                        stats["packages_checked"] += 1
+                        try:
+                            wr = jira_pkg.update_plat_security_package_name(pk, pkg)
+                            if wr.package_name_updated:
+                                stats["packages_updated"] += 1
+                        except Exception as ex:
+                            sync_errors.append(f"{pk} package rewrite: {ex}")
+            finally:
+                jira_pkg.close()
 
         if sync_errors:
             result["_plat_sync_errors"] = sync_errors

@@ -14,11 +14,24 @@ from api.app.config import settings
 from api.app.aqua_packages import catalog_fresh
 from api.app.db import db_session
 from api.app.models import AquaImagePackages
-from api.app.portal_settings import get_aqua_packages_ttl_hours, set_aqua_packages_ttl_hours
+from api.app.portal_settings import (
+    get_aqua_default_image_tag,
+    get_aqua_packages_ttl_hours,
+    get_aqua_preferred_registry,
+    get_rewrite_plat_package_name_on_sync,
+    set_aqua_default_image_tag,
+    set_aqua_packages_ttl_hours,
+    set_aqua_preferred_registry,
+    set_rewrite_plat_package_name_on_sync,
+)
 
 
 class AquaPackagesSettingsIn(BaseModel):
-    ttl_hours: int = Field(ge=1, le=8760)
+    ttl_hours: int | None = Field(default=None, ge=1, le=8760)
+    rewrite_plat_package_name_on_sync: bool | None = None
+    recheck_on_sync: bool | None = None  # legacy alias
+    preferred_registry: str | None = None
+    default_image_tag: str | None = None
 
 
 class AquaPackagesRefreshIn(BaseModel):
@@ -96,17 +109,36 @@ def get_aqua_package_entry(registry: str, repository: str, tag: str) -> dict[str
 def get_aqua_packages_settings() -> dict[str, Any]:
     with db_session() as db:
         ttl_hours = get_aqua_packages_ttl_hours(db)
+        rewrite = get_rewrite_plat_package_name_on_sync(db)
+        preferred_registry = get_aqua_preferred_registry(db)
+        default_image_tag = get_aqua_default_image_tag(db)
     return {
         "ttl_hours": ttl_hours,
         "default_ttl_hours": max(1, int(settings.aqua_packages_ttl_hours or 168)),
         "aqua_configured": bool((settings.aqua_api_key or "").strip()),
+        "rewrite_plat_package_name_on_sync": rewrite,
+        "recheck_on_sync": rewrite,
+        "preferred_registry": preferred_registry,
+        "default_preferred_registry": (settings.aqua_preferred_registry or "").strip(),
+        "default_image_tag": default_image_tag,
+        "default_default_image_tag": (settings.aqua_default_image_tag or "latest").strip() or "latest",
     }
 
 
 def patch_aqua_packages_settings(payload: AquaPackagesSettingsIn) -> dict[str, Any]:
     with db_session() as db:
-        ttl_hours = set_aqua_packages_ttl_hours(db, payload.ttl_hours)
-    return {"ok": True, "ttl_hours": ttl_hours}
+        if payload.ttl_hours is not None:
+            set_aqua_packages_ttl_hours(db, payload.ttl_hours)
+        rewrite_flag = payload.rewrite_plat_package_name_on_sync
+        if rewrite_flag is None and payload.recheck_on_sync is not None:
+            rewrite_flag = payload.recheck_on_sync
+        if rewrite_flag is not None:
+            set_rewrite_plat_package_name_on_sync(db, rewrite_flag)
+        if payload.preferred_registry is not None:
+            set_aqua_preferred_registry(db, payload.preferred_registry)
+        if payload.default_image_tag is not None:
+            set_aqua_default_image_tag(db, payload.default_image_tag)
+    return get_aqua_packages_settings()
 
 
 def delete_aqua_cache_entry(registry: str, repository: str, tag: str) -> dict[str, bool]:

@@ -20,10 +20,17 @@ class PlatSyncWriteResult:
 
     label_added: bool = False
     duedate_updated: bool = False
+    package_name_updated: bool = False
+    package_version_updated: bool = False
 
     @property
     def any_change(self) -> bool:
-        return self.label_added or self.duedate_updated
+        return (
+            self.label_added
+            or self.duedate_updated
+            or self.package_name_updated
+            or self.package_version_updated
+        )
 
 
 @dataclass
@@ -1219,15 +1226,35 @@ class JiraClient:
         err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
         raise RuntimeError(f"Jira could not set components on {key}: {err}")
 
+    def _jira_custom_field_text(self, raw: Any) -> str:
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw.strip()
+        if isinstance(raw, dict):
+            return str(raw.get("value") or raw.get("name") or "").strip()
+        if isinstance(raw, list) and raw:
+            return self._jira_custom_field_text(raw[0])
+        return str(raw).strip()
+
     def get_issue_platsync_fields(self, issue_key: str) -> dict[str, Any]:
         """Read fixVersions, tag CF, labels, duedate, issuetype for PLAT↔portal sync."""
         key = (issue_key or "").strip()
         if not key:
             return {}
         tag_fid = (settings.jira_plat_tag_numbers_field_id or "").strip()
+        pkg_fid = (settings.jira_plat_cf_package_name or "").strip()
+        ver_fid = (settings.jira_plat_cf_package_vuln_version or "").strip()
+        vf_fid = (settings.jira_plat_cf_vendor_fix_version or "").strip()
         field_list = ["fixVersions", "labels", "duedate", "issuetype"]
         if tag_fid:
             field_list.append(tag_fid)
+        if pkg_fid:
+            field_list.append(pkg_fid)
+        if ver_fid:
+            field_list.append(ver_fid)
+        if vf_fid:
+            field_list.append(vf_fid)
         params = {"fields": ",".join(field_list)}
         for path in (f"/rest/api/3/issue/{key}", f"/rest/api/2/issue/{key}"):
             try:
@@ -1242,10 +1269,56 @@ class JiraClient:
                     "labels": [str(x) for x in (fields.get("labels") or [])],
                     "duedate": fields.get("duedate"),
                     "issuetype": (fields.get("issuetype") or {}).get("name"),
+                    "package_name": self._jira_custom_field_text(fields.get(pkg_fid)) if pkg_fid else "",
+                    "package_vuln_version": self._jira_custom_field_text(fields.get(ver_fid)) if ver_fid else "",
+                    "vendor_fix_version": self._jira_custom_field_text(fields.get(vf_fid)) if vf_fid else "",
                 }
             except Exception:
                 continue
         return {}
+
+    def update_plat_security_package_name(
+        self,
+        issue_key: str,
+        package_name: str,
+    ) -> PlatSyncWriteResult:
+        """
+        Set Package Name on an existing PLAT Security Vulnerability when it differs from Jira.
+        Package vulnerable version is not written here (maintained by an offline process).
+        """
+        result = PlatSyncWriteResult()
+        key = (issue_key or "").strip().upper()
+        pkg = (package_name or "").strip()
+        if not key or not pkg:
+            return result
+
+        meta = self.get_issue_platsync_fields(key)
+        if not meta:
+            return result
+        want_type = (settings.jira_plat_issuetype_name or "").strip()
+        it = (meta.get("issuetype") or "").strip()
+        if want_type and it.casefold() != want_type.casefold():
+            return result
+
+        pkg_fid = (settings.jira_plat_cf_package_name or "").strip()
+        fields: dict[str, Any] = {}
+        cur_pkg = (meta.get("package_name") or "").strip()
+        if pkg_fid and pkg != cur_pkg:
+            fields[pkg_fid] = pkg
+            result.package_name_updated = True
+        if not fields:
+            return result
+
+        body = {"fields": fields}
+        headers = {"Content-Type": "application/json"}
+        last: httpx.Response | None = None
+        for path in (f"/rest/api/3/issue/{key}", f"/rest/api/2/issue/{key}"):
+            put_url = f"{self._base}{path}"
+            last = self._client.put(put_url, json=body, headers=headers)
+            if last.is_success:
+                return result
+        err = (last.text if last is not None else "") or "unknown error"
+        raise RuntimeError(f"Jira could not update package fields on {key}: {err}")
 
     def ensure_plat_security_issue_sync(
         self, issue_key: str, desired_duedate_iso: str | None
