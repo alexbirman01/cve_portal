@@ -208,16 +208,19 @@
   opacity: 0.5;
 }
 
-.suggestedCommentCardHeader {
-  align-items: center;
-}
-
 .suggestedCommentHeaderLeft {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
   min-width: 0;
+}
+
+.suggestedCommentHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 /* ─── ticket header ──────────────────────────────────────────────────────── */

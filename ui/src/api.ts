@@ -52,6 +52,8 @@ export type AffectedImage = {
 export type PlatSecurityFieldSyncEntry = {
   fix_versions: string
   tag_numbers: string
+  /** Jira workflow status.name after Sync PLAT (e.g. Invalid). */
+  issue_status?: string
   package_name?: string
   package_vuln_version?: string
   vendor_fix_version?: string
@@ -811,6 +813,23 @@ export function platSecurityKeys(r: CveRow): string[] {
     .map((t) => t.key)
 }
 
+/** True when PLAT Security workflow status is Invalid (case-insensitive). */
+export function isPlatIssueStatusInvalid(status: string | null | undefined): boolean {
+  return (status ?? '').trim().toLowerCase() === 'invalid'
+}
+
+/** Any scoped Security PLAT key on this row has Invalid workflow status. */
+export function platIssueStatusInvalidForKeys(r: CveRow, secKeys: string[]): boolean {
+  const m = r.plat_security_field_sync
+  if (!m) return false
+  for (const k of secKeys) {
+    const pk = k.trim().toUpperCase()
+    if (!pk) continue
+    if (isPlatIssueStatusInvalid(m[pk]?.issue_status)) return true
+  }
+  return false
+}
+
 /** Jira app fields for one Security PLAT key after Sync (keys stored uppercase). */
 export function platSecuritySyncForKey(r: CveRow, issueKey: string): PlatSecurityFieldSyncEntry | null {
   const m = r.plat_security_field_sync
@@ -884,6 +903,27 @@ export function imagePathBasename(imagePath: string): string {
   return imagePath.replace(/^plainid\//i, '').split('/').pop()?.trim() ?? ''
 }
 
+/**
+ * Aqua ECR transactional tags use `{version}_{Service}_{DDMonYYYY}`.
+ * UI shows the release version only; the full tag is kept in row data for Aqua lookups.
+ */
+const AQUA_TRANSACTIONAL_TAG_RE = /^([\d.]+)_.+_\d{2}[A-Za-z]{3}\d{4}$/
+
+export function imageTagForDisplay(tag: string | null | undefined): string {
+  const t = (tag ?? '').trim()
+  if (!t) return ''
+  const m = AQUA_TRANSACTIONAL_TAG_RE.exec(t)
+  return m ? m[1] : t
+}
+
+/** `basename:displayTag` or basename alone. */
+export function imageBasenameTagLabel(basename: string, tag: string | null | undefined): string {
+  const bn = basename.trim()
+  if (!bn) return ''
+  const dt = imageTagForDisplay(tag)
+  return dt ? `${bn}:${dt}` : bn
+}
+
 /** Distinct image basenames for this CVE row (from affected_images or legacy single). */
 export function imageBasenamesForCveRow(r: CveRow): string[] {
   const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
@@ -910,13 +950,11 @@ export function platDisplayLabelForImage(r: CveRow, imageBasename: string): stri
   const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
   for (const i of imgs) {
     if (imagePathBasename(i.image).toLowerCase() === fold) {
-      const t = (i.tag ?? '').trim()
-      return t ? `${imageBasename}:${t}` : imageBasename
+      return imageBasenameTagLabel(imageBasename, i.tag)
     }
   }
   if (r.affected_image && r.affected_image !== 'NA' && imagePathBasename(r.affected_image).toLowerCase() === fold) {
-    const t = (r.affected_tag ?? '').trim()
-    return t ? `${imageBasename}:${t}` : imageBasename
+    return imageBasenameTagLabel(imageBasename, r.affected_tag)
   }
   const v = (r.affected_version ?? '').trim()
   return v ? `${imageBasename}:${v}` : imageBasename
@@ -932,7 +970,8 @@ export function platDisplaySketchSummary(r: CveRow): string {
     const bn = imagePathBasename(r.affected_image)
     if (bn) return platDisplayLabelForImage(r, bn)
     const tail = r.affected_image.replace(/^plainid\//i, '').trim()
-    return r.affected_tag ? `${tail}:${String(r.affected_tag).trim()}` : tail
+    const dt = imageTagForDisplay(r.affected_tag)
+    return dt ? `${tail}:${dt}` : tail
   }
   return ''
 }
@@ -948,13 +987,13 @@ export function platDisplayFullImageForRow(r: CveRow, imageBasename: string): st
   const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
   for (const i of imgs) {
     if (imagePathBasename(i.image).toLowerCase() === fold) {
-      const t = (i.tag ?? '').trim()
-      return t ? `${normalized}:${t}` : normalized
+      const dt = imageTagForDisplay(i.tag)
+      return dt ? `${normalized}:${dt}` : normalized
     }
   }
   if (r.affected_image && r.affected_image !== 'NA' && imagePathBasename(r.affected_image).toLowerCase() === fold) {
-    const t = (r.affected_tag ?? '').trim()
-    return t ? `${normalized}:${t}` : normalized
+    const dt = imageTagForDisplay(r.affected_tag)
+    return dt ? `${normalized}:${dt}` : normalized
   }
   const v = (r.affected_version ?? '').trim()
   return v ? `${normalized}:${v}` : normalized
@@ -965,12 +1004,18 @@ export function platDisplayFullImagesSummary(r: CveRow): string {
   const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
   if (imgs.length > 0) {
     return imgs
-      .map((i) => `${i.image.replace(/^plainid\//i, '').trim()}${i.tag ? `:${i.tag.trim()}` : ''}`)
+      .map((i) => {
+        const path = i.image.replace(/^plainid\//i, '').trim()
+        const dt = imageTagForDisplay(i.tag)
+        return dt ? `${path}:${dt}` : path
+      })
       .filter(Boolean)
       .join('; ')
   }
   if (r.affected_image && r.affected_image !== 'NA') {
-    return `${r.affected_image.replace(/^plainid\//i, '').trim()}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
+    const path = r.affected_image.replace(/^plainid\//i, '').trim()
+    const dt = imageTagForDisplay(r.affected_tag)
+    return dt ? `${path}:${dt}` : path
   }
   return ''
 }
@@ -1316,10 +1361,33 @@ export function resolvePlatFixReleaseDateDisplay(
 
 export const CUSTOMER_STATUS_COMMENT_MARKER = '<!-- CVE-Portal-Customer-Status v1 -->'
 
-const CUSTOMER_STATUS_DISCLAIMER =
-  'The "Potential Release Date" is an estimate and may be subject to change.'
-
 export const CUSTOMER_STATUS_IN_PROGRESS = 'In progress'
+
+export const CUSTOMER_STATUS_NOTE =
+  'Note: The "Expected Release Date" is an estimate and may be subject to change.'
+
+/** Bullet lines under "Status definitions:" in the Jira customer status comment. */
+export const CUSTOMER_STATUS_DEFINITIONS = [
+  'In progress: CVE is under evaluation or no vendor fix is available yet',
+  'N/A: Package not present in this image',
+] as const
+
+function formatCustomerStatusReportDate(d: Date = new Date()): string {
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+}
+
+/** Title, note, and status definitions included before the CVE table in the comment. */
+export function formatCustomerStatusCommentIntro(reportDate: Date = new Date()): string[] {
+  return [
+    `CVE Status Report - ${formatCustomerStatusReportDate(reportDate)}`,
+    '',
+    CUSTOMER_STATUS_NOTE,
+    '',
+    'Status definitions:',
+    ...CUSTOMER_STATUS_DEFINITIONS.map((line) => `- ${line}`),
+    '',
+  ]
+}
 
 function isPlatSyncUnavailableValue(raw: string): boolean {
   const s = (raw ?? '').trim()
@@ -1385,8 +1453,8 @@ type CustomerStatusTableRow = {
   fixVersion: string
 }
 
-/** Package column for customer comment: name when verified in image, else Package not found. */
-function formatPackageForComment(r: CveRow, imageBasename: string): string {
+/** Package label for an image (findings table, comment, PLAT fix/tag N/A gate). */
+export function packageDisplayForImage(r: CveRow, imageBasename: string): string {
   const entry = packageEntryForImage(r, imageBasename)
   const checked =
     entry?.aqua_checked === true ||
@@ -1414,6 +1482,14 @@ function formatPackageForComment(r: CveRow, imageBasename: string): string {
   return name || '—'
 }
 
+export function isPackageNotFoundForImage(r: CveRow, imageBasename: string): boolean {
+  return packageDisplayForImage(r, imageBasename) === 'Package not found'
+}
+
+function formatPackageForComment(r: CveRow, imageBasename: string): string {
+  return packageDisplayForImage(r, imageBasename)
+}
+
 function formatCveSeverityForComment(r: CveRow): string {
   const sevRaw = (r.severity ?? '').trim()
   if (!sevRaw) return 'Unknown'
@@ -1434,13 +1510,14 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
       const bn = imageBasename ?? ''
       const packageName = bn ? formatPackageForComment(r, bn) : '—'
       const packageMissing = packageName === 'Package not found'
+      const platInvalid = platIssueStatusInvalidForKeys(r, secKeys)
       out.push({
         cve: r.cve_id,
         severity,
         image: imageLabel,
         packageName,
-        expectedRelease: packageMissing ? 'N/A' : plainIdExpectedReleaseDate(fix, tag),
-        fixVersion: packageMissing ? 'N/A' : plainIdReleaseVersion(tag),
+        expectedRelease: packageMissing || platInvalid ? 'N/A' : plainIdExpectedReleaseDate(fix, tag),
+        fixVersion: packageMissing || platInvalid ? 'N/A' : plainIdReleaseVersion(tag),
       })
     }
 
@@ -1456,20 +1533,21 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
     }
 
     const imgs = (r.affected_images ?? []).filter((i) => i.image && i.image !== 'NA')
-    const legacyPath =
-      !imgs.length && r.affected_image && r.affected_image !== 'NA'
-        ? `${r.affected_image.replace(/^plainid\//i, '')}${r.affected_tag ? `:${String(r.affected_tag).trim()}` : ''}`
-        : ''
-    if (legacyPath) {
+    if (!imgs.length && r.affected_image && r.affected_image !== 'NA') {
       const legacyBn = imageBasenamesForCveRow(r)[0]
-      pushRow(legacyPath, platSecurityKeys(r), legacyBn)
+      pushRow(
+        legacyBn ? platDisplayLabelForImage(r, legacyBn) : platDisplayFullImagesSummary(r),
+        platSecurityKeys(r),
+        legacyBn,
+      )
     } else if (imgs.length) {
       for (const img of imgs) {
-        const label = `${img.image.replace(/^plainid\//i, '')}${img.tag ? `:${String(img.tag).trim()}` : ''}`
-        const bn = imageBasenamesForCveRow(r).find(
-          (b) => platDisplayLabelForImage(r, b) === label,
+        const bn = imagePathBasename(img.image)
+        pushRow(
+          bn ? platDisplayLabelForImage(r, bn) : platDisplayFullImagesSummary(r),
+          platSecurityKeys(r),
+          bn || undefined,
         )
-        pushRow(label, platSecurityKeys(r), bn)
       }
     } else {
       pushRow('—', platSecurityKeys(r))
@@ -1479,71 +1557,107 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
   return out
 }
 
+// ─── Comment column visibility ────────────────────────────────────────────────
+
+export type CustomerStatusCommentColumnKey =
+  | 'cve'
+  | 'severity'
+  | 'image'
+  | 'package'
+  | 'expectedRelease'
+  | 'fixVersion'
+
+export type CustomerStatusCommentColumnVisibility = Record<CustomerStatusCommentColumnKey, boolean>
+
+export const CUSTOMER_STATUS_COMMENT_COLUMN_LABELS: Record<CustomerStatusCommentColumnKey, string> = {
+  cve: 'CVE',
+  severity: 'Severity',
+  image: 'Image',
+  package: 'Package',
+  expectedRelease: 'Expected release date',
+  fixVersion: 'Fix Version',
+}
+
+export const CUSTOMER_STATUS_COMMENT_COLUMN_KEYS: CustomerStatusCommentColumnKey[] = [
+  'cve',
+  'severity',
+  'image',
+  'package',
+  'expectedRelease',
+  'fixVersion',
+]
+
+export const DEFAULT_CUSTOMER_STATUS_COMMENT_COLUMN_VISIBILITY: CustomerStatusCommentColumnVisibility = {
+  cve: true,
+  severity: true,
+  image: true,
+  package: true,
+  expectedRelease: true,
+  fixVersion: true,
+}
+
+/** Merge a partial visibility override with defaults; CVE is always forced on. */
+export function resolveCustomerStatusCommentColumns(
+  partial?: Partial<CustomerStatusCommentColumnVisibility>,
+): CustomerStatusCommentColumnVisibility {
+  const resolved = { ...DEFAULT_CUSTOMER_STATUS_COMMENT_COLUMN_VISIBILITY, ...partial, cve: true }
+  return resolved
+}
+
+// ─── Comment table formatting ─────────────────────────────────────────────────
+
 function padTableCell(value: string, width: number): string {
   return (value.trim() || '—').padEnd(width)
 }
 
-function formatCustomerStatusTable(tableRows: CustomerStatusTableRow[]): string[] {
-  const colHeaders = {
-    cve: 'CVE',
-    sev: 'Severity',
-    img: 'Image',
-    pkg: 'Package',
-    date: 'Expected release date',
-    ver: 'Fix Version',
-  }
-  const minW = { cve: 12, sev: 8, img: 5, pkg: 7, date: 22, ver: 10 }
-  const w = {
-    cve: Math.max(minW.cve, colHeaders.cve.length, ...tableRows.map((r) => r.cve.length)),
-    sev: Math.max(minW.sev, colHeaders.sev.length, ...tableRows.map((r) => r.severity.length)),
-    img: Math.max(minW.img, colHeaders.img.length, ...tableRows.map((r) => r.image.length)),
-    pkg: Math.max(minW.pkg, colHeaders.pkg.length, ...tableRows.map((r) => r.packageName.length)),
-    date: Math.max(minW.date, colHeaders.date.length, ...tableRows.map((r) => r.expectedRelease.length)),
-    ver: Math.max(minW.ver, colHeaders.ver.length, ...tableRows.map((r) => r.fixVersion.length)),
-  }
-  const header = [
-    padTableCell(colHeaders.cve, w.cve),
-    padTableCell(colHeaders.sev, w.sev),
-    padTableCell(colHeaders.img, w.img),
-    padTableCell(colHeaders.pkg, w.pkg),
-    padTableCell(colHeaders.date, w.date),
-    padTableCell(colHeaders.ver, w.ver),
-  ].join(' | ')
-  const rule = [
-    '-'.repeat(w.cve),
-    '-'.repeat(w.sev),
-    '-'.repeat(w.img),
-    '-'.repeat(w.pkg),
-    '-'.repeat(w.date),
-    '-'.repeat(w.ver),
-  ].join('-+-')
+type ColSpec = {
+  key: CustomerStatusCommentColumnKey
+  header: string
+  minW: number
+  getValue: (row: CustomerStatusTableRow) => string
+}
+
+const COMMENT_COL_SPECS: ColSpec[] = [
+  { key: 'cve',           header: 'CVE',                  minW: 12, getValue: (r) => r.cve },
+  { key: 'severity',      header: 'Severity',             minW: 8,  getValue: (r) => r.severity },
+  { key: 'image',         header: 'Image',                minW: 5,  getValue: (r) => r.image },
+  { key: 'package',       header: 'Package',              minW: 7,  getValue: (r) => r.packageName },
+  { key: 'expectedRelease', header: 'Expected release date', minW: 22, getValue: (r) => r.expectedRelease },
+  { key: 'fixVersion',    header: 'Fix Version',          minW: 10, getValue: (r) => r.fixVersion },
+]
+
+function formatCustomerStatusTable(
+  tableRows: CustomerStatusTableRow[],
+  columns: CustomerStatusCommentColumnVisibility,
+): string[] {
+  const visibleSpecs = COMMENT_COL_SPECS.filter((s) => columns[s.key])
+  if (visibleSpecs.length === 0) return []
+
+  const widths = visibleSpecs.map((s) =>
+    Math.max(s.minW, s.header.length, ...tableRows.map((r) => s.getValue(r).length)),
+  )
+
+  const header = visibleSpecs.map((s, i) => padTableCell(s.header, widths[i])).join(' | ')
+  const rule = widths.map((w) => '-'.repeat(w)).join('-+-')
   const body = tableRows.map((row) =>
-    [
-      padTableCell(row.cve, w.cve),
-      padTableCell(row.severity, w.sev),
-      padTableCell(row.image, w.img),
-      padTableCell(row.packageName, w.pkg),
-      padTableCell(row.expectedRelease, w.date),
-      padTableCell(row.fixVersion, w.ver),
-    ].join(' | '),
+    visibleSpecs.map((s, i) => padTableCell(s.getValue(row), widths[i])).join(' | '),
   )
   return [header, rule, ...body]
 }
 
-export function buildCustomerStatusComment(result: JobResult): string {
-  const lines: string[] = [CUSTOMER_STATUS_COMMENT_MARKER, CUSTOMER_STATUS_DISCLAIMER, '']
-
-  const key = (result.issue_key ?? '').trim()
-  if (key) {
-    lines.push(`${key} — CVE remediation status`)
-    lines.push('')
-  }
+export function buildCustomerStatusComment(
+  result: JobResult,
+  columns?: Partial<CustomerStatusCommentColumnVisibility>,
+): string {
+  const vis = resolveCustomerStatusCommentColumns(columns)
+  const lines: string[] = [CUSTOMER_STATUS_COMMENT_MARKER, '']
+  lines.push(...formatCustomerStatusCommentIntro())
 
   const tableRows = collectCustomerStatusRows(result)
   if (tableRows.length === 0) {
     lines.push('No CVE rows to display.')
   } else {
-    lines.push(...formatCustomerStatusTable(tableRows))
+    lines.push(...formatCustomerStatusTable(tableRows, vis))
   }
 
   return lines.join('\n').trimEnd()

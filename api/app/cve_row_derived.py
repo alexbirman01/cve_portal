@@ -314,6 +314,24 @@ def _normalize_plat_sync_field_value(raw: str | None) -> str:
     return s
 
 
+def plat_issue_status_is_invalid(status: str | None) -> bool:
+    """True when PLAT Security workflow status is Invalid (case-insensitive)."""
+    return (status or "").strip().casefold() == "invalid"
+
+
+def plat_issue_status_invalid_for_keys(row: dict[str, Any], sec_keys: list[str]) -> bool:
+    """Any scoped Security PLAT key on this row has Invalid workflow status."""
+    sync_map: dict[str, Any] = row.get("plat_security_field_sync") or {}
+    for k in sec_keys:
+        pk = k.strip().upper()
+        if not pk:
+            continue
+        entry = sync_map.get(pk) or {}
+        if plat_issue_status_is_invalid(str(entry.get("issue_status") or "")):
+            return True
+    return False
+
+
 def _translate_fix_version_to_release_date(fix_version: str) -> str | None:
     """Return calendar date string for the first week-code found (e.g. '5.2627.x' → 'June 29, 2026')."""
     if not fix_version:

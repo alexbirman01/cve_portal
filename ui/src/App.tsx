@@ -28,7 +28,13 @@ import {
   apiPost,
   apiUpdateCustomerSla,
   apiUpsertCustomerStatusComment,
-  buildSuggestedComment,
+  buildCustomerStatusComment,
+  CUSTOMER_STATUS_COMMENT_COLUMN_KEYS,
+  CUSTOMER_STATUS_COMMENT_COLUMN_LABELS,
+  DEFAULT_CUSTOMER_STATUS_COMMENT_COLUMN_VISIBILITY,
+  resolveCustomerStatusCommentColumns,
+  type CustomerStatusCommentColumnKey,
+  type CustomerStatusCommentColumnVisibility,
   plainIdExpectedReleaseDate,
   CUSTOMER_STATUS_IN_PROGRESS,
   exportCvesToExcel,
@@ -49,10 +55,12 @@ import {
   platOrgRefsFromIssue,
   aquaAllowsPlatCreate,
   isNvdGoRow,
+  isPackageNotFoundForImage,
   packageEntryForImage,
   packagePickOptions,
   platPackageNameForRow,
   platSecurityKeys,
+  platIssueStatusInvalidForKeys,
   platSecuritySyncFixForKeys,
   platSecuritySyncTagForKeys,
   platSecuritySyncSearchBlob,
@@ -228,7 +236,13 @@ function formatSeverityTitleCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase()
 }
 
-type PlatSyncStrip = { fix: string; tag: string; secKeyCount: number }
+type PlatSyncStrip = {
+  fix: string
+  tag: string
+  secKeyCount: number
+  packageMissing?: boolean
+  platInvalid?: boolean
+}
 
 function rowHasPlatSecuritySyncMap(r: CveRow): boolean {
   const m = r.plat_security_field_sync
@@ -264,10 +278,18 @@ function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
   if (perImages.length > 0) {
     const out: PlatSyncStrip[] = []
     for (const img of perImages) {
-      out.push(platSyncStripForKeys(r, platSecKeysForImage(r, img), false))
+      const secKeys = platSecKeysForImage(r, img)
+      out.push({
+        ...platSyncStripForKeys(r, secKeys, false),
+        packageMissing: isPackageNotFoundForImage(r, img),
+        platInvalid: platIssueStatusInvalidForKeys(r, secKeys),
+      })
     }
     if (orphanSec.length) {
-      out.push(platSyncStripForKeys(r, orphanSec, false))
+      out.push({
+        ...platSyncStripForKeys(r, orphanSec, false),
+        platInvalid: platIssueStatusInvalidForKeys(r, orphanSec),
+      })
     }
     return out
   }
@@ -279,7 +301,12 @@ function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
     !!platDisplaySketchSummary(r)
 
   if (showAggregated) {
-    return [platSyncStripForKeys(r, allSecKeys, true)]
+    return [
+      {
+        ...platSyncStripForKeys(r, allSecKeys, true),
+        platInvalid: platIssueStatusInvalidForKeys(r, allSecKeys),
+      },
+    ]
   }
 
   return null
@@ -295,6 +322,9 @@ function PlatSyncStripCell({
   field: 'fix' | 'tag'
   hasSyncMap: boolean
 }) {
+  if (strip.packageMissing || strip.platInvalid) {
+    return <span className="platSyncStripText muted small">N/A</span>
+  }
   if (field === 'fix') {
     const { title } = resolvePlatFixReleaseDateDisplay(strip.fix, strip.tag)
     const display = plainIdExpectedReleaseDate(strip.fix, strip.tag)
@@ -2430,6 +2460,59 @@ function FindingsColumnsMenu({
   )
 }
 
+function CommentColumnsMenu({
+  visibility,
+  onChange,
+}: {
+  visibility: CustomerStatusCommentColumnVisibility
+  onChange: (v: CustomerStatusCommentColumnVisibility) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const fn = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', fn)
+    return () => document.removeEventListener('mousedown', fn)
+  }, [open])
+
+  function toggle(key: CustomerStatusCommentColumnKey) {
+    if (key === 'cve') return
+    onChange({ ...visibility, [key]: !visibility[key] })
+  }
+
+  return (
+    <div className="findingsColumnsWrap" ref={ref}>
+      <button
+        type="button"
+        className="findingsColumnsBtn"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => setOpen(!open)}
+      >
+        Columns <span className="findingsColumnsChev" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="findingsColumnsPopover" role="menu" aria-label="Comment columns">
+          {CUSTOMER_STATUS_COMMENT_COLUMN_KEYS.map((key) => (
+            <label key={key} className="findingsColumnsRow">
+              <input
+                type="checkbox"
+                checked={visibility[key]}
+                disabled={key === 'cve'}
+                onChange={() => toggle(key)}
+              />
+              <span>{CUSTOMER_STATUS_COMMENT_COLUMN_LABELS[key]}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ResultsActionsMenu({
   disabled,
   onReprocess,
@@ -2692,6 +2775,8 @@ function ResultsPanel({
   onJobRefresh,
   onRefreshSuggestedComment,
   commentLastSyncedAt,
+  commentColumnVisibility,
+  onCommentColumnVisibilityChange,
   allowedImageNames,
   onCancel,
 }: {
@@ -2707,6 +2792,8 @@ function ResultsPanel({
   /** Re-fetch saved run from the server and rebuild the suggested comment (e.g. after Sync PLAT). */
   onRefreshSuggestedComment: () => Promise<void>
   commentLastSyncedAt: string | null
+  commentColumnVisibility: CustomerStatusCommentColumnVisibility
+  onCommentColumnVisibilityChange: (v: CustomerStatusCommentColumnVisibility) => void
   allowedImageNames?: Set<string>
   onCancel?: () => void
 }) {
@@ -3153,20 +3240,26 @@ function ResultsPanel({
               </span>
             )}
           </div>
-          <button
-            type="button"
-            className="btn btnSecondary btnSm"
-            disabled={
-              loading ||
-              suggestedCommentRefreshing ||
-              !job.result ||
-              job.status.startsWith('failed')
-            }
-            title="Reload the saved analysis run from the server and rebuild this draft (includes latest PLAT sync fields)."
-            onClick={() => void handleRefreshSuggestedComment()}
-          >
-            {suggestedCommentRefreshing ? 'Refreshing…' : 'Refresh draft'}
-          </button>
+          <div className="suggestedCommentHeaderActions">
+            <CommentColumnsMenu
+              visibility={commentColumnVisibility}
+              onChange={onCommentColumnVisibilityChange}
+            />
+            <button
+              type="button"
+              className="btn btnSecondary btnSm"
+              disabled={
+                loading ||
+                suggestedCommentRefreshing ||
+                !job.result ||
+                job.status.startsWith('failed')
+              }
+              title="Reload the saved analysis run from the server and rebuild this draft (includes latest PLAT sync fields)."
+              onClick={() => void handleRefreshSuggestedComment()}
+            >
+              {suggestedCommentRefreshing ? 'Refreshing…' : 'Refresh draft'}
+            </button>
+          </div>
         </div>
         <textarea
           className="commentTextarea"
@@ -3890,10 +3983,25 @@ function App() {
 
   const closeSlaModal = useCallback(() => setSlaToolbarOpen(false), [])
 
+  const [commentColumnVisibility, setCommentColumnVisibility] =
+    useState<CustomerStatusCommentColumnVisibility>(() => {
+      try {
+        const saved = localStorage.getItem('cve-portal-comment-columns')
+        if (saved) return resolveCustomerStatusCommentColumns(JSON.parse(saved) as Partial<CustomerStatusCommentColumnVisibility>)
+      } catch { /* ignore */ }
+      return DEFAULT_CUSTOMER_STATUS_COMMENT_COLUMN_VISIBILITY
+    })
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('cve-portal-comment-columns', JSON.stringify(commentColumnVisibility))
+    } catch { /* ignore */ }
+  }, [commentColumnVisibility])
+
   const suggested = useMemo(
-    () => (job?.result ? buildSuggestedComment(job.result) : ''),
+    () => (job?.result ? buildCustomerStatusComment(job.result, commentColumnVisibility) : ''),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [job?.result],
+    [job?.result, commentColumnVisibility],
   )
 
   useEffect(() => {
@@ -3999,9 +4107,7 @@ function App() {
     setError(null)
     setLoading(true)
     try {
-      const body = buildSuggestedComment(job.result)
-      await apiUpsertCustomerStatusComment(issue.key, body)
-      setCommentBody(body)
+      await apiUpsertCustomerStatusComment(issue.key, commentBody.trim())
       setCommentLastSyncedAt(new Date().toISOString())
     } catch (e: any) {
       setError(e?.message ?? String(e))
@@ -4045,11 +4151,11 @@ function App() {
     try {
       const j = await refreshJob()
       setCommentLastSyncedAt(null)
-      if (j.result) setCommentBody(buildSuggestedComment(j.result))
+      if (j.result) setCommentBody(buildCustomerStatusComment(j.result, commentColumnVisibility))
     } catch (e: any) {
       setError(e?.message ?? String(e))
     }
-  }, [runId, refreshJob])
+  }, [runId, refreshJob, commentColumnVisibility])
 
   const cancelRun = useCallback(async () => {
     if (!runId) return
@@ -4203,6 +4309,8 @@ function App() {
                 onJobRefresh={refreshJob}
                 onRefreshSuggestedComment={refreshSuggestedComment}
                 commentLastSyncedAt={commentLastSyncedAt}
+                commentColumnVisibility={commentColumnVisibility}
+                onCommentColumnVisibilityChange={setCommentColumnVisibility}
                 allowedImageNames={allowedImageNames}
                 onCancel={cancelRun}
               />

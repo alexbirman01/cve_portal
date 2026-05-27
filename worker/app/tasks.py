@@ -27,6 +27,7 @@ from api.app.cve_row_derived import (
     apply_plat_vendor_fields_from_sync,
     image_basenames_for_cve_row,
     iter_plat_security_package_targets,
+    plat_issue_status_is_invalid,
     plat_jira_package_name_for_row,
     plat_sec_keys_scoped_to_run,
 )
@@ -868,9 +869,16 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                         s = str(raw or "").strip()
                         return s if s else "None"
 
+                    issue_status = _sync_val(m.get("issue_status"))
+                    fix_versions = _sync_val(m.get("fix_versions"))
+                    tag_numbers = _sync_val(m.get("tag_numbers"))
+                    if plat_issue_status_is_invalid(issue_status):
+                        fix_versions = "N/A"
+                        tag_numbers = "N/A"
                     sync_map[pk] = {
-                        "fix_versions": _sync_val(m.get("fix_versions")),
-                        "tag_numbers": _sync_val(m.get("tag_numbers")),
+                        "fix_versions": fix_versions,
+                        "tag_numbers": tag_numbers,
+                        "issue_status": issue_status,
                         "package_name": _sync_val(m.get("package_name")),
                         "package_vuln_version": _sync_val(m.get("package_vuln_version")),
                         "vendor_fix_version": _sync_val(m.get("vendor_fix_version")),

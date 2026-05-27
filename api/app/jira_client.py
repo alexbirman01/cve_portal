@@ -1238,7 +1238,7 @@ class JiraClient:
         return str(raw).strip()
 
     def get_issue_platsync_fields(self, issue_key: str) -> dict[str, Any]:
-        """Read fixVersions, tag CF, labels, duedate, issuetype for PLAT↔portal sync."""
+        """Read fixVersions, tag CF, labels, duedate, issuetype, workflow status for PLAT↔portal sync."""
         key = (issue_key or "").strip()
         if not key:
             return {}
@@ -1246,7 +1246,7 @@ class JiraClient:
         pkg_fid = (settings.jira_plat_cf_package_name or "").strip()
         ver_fid = (settings.jira_plat_cf_package_vuln_version or "").strip()
         vf_fid = (settings.jira_plat_cf_vendor_fix_version or "").strip()
-        field_list = ["fixVersions", "labels", "duedate", "issuetype"]
+        field_list = ["fixVersions", "labels", "duedate", "issuetype", "status"]
         if tag_fid:
             field_list.append(tag_fid)
         if pkg_fid:
@@ -1269,6 +1269,7 @@ class JiraClient:
                     "labels": [str(x) for x in (fields.get("labels") or [])],
                     "duedate": fields.get("duedate"),
                     "issuetype": (fields.get("issuetype") or {}).get("name"),
+                    "issue_status": (fields.get("status") or {}).get("name") or "",
                     "package_name": self._jira_custom_field_text(fields.get(pkg_fid)) if pkg_fid else "",
                     "package_vuln_version": self._jira_custom_field_text(fields.get(ver_fid)) if ver_fid else "",
                     "vendor_fix_version": self._jira_custom_field_text(fields.get(vf_fid)) if vf_fid else "",
