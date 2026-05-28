@@ -61,6 +61,7 @@ import {
   platPackageNameForRow,
   platSecurityKeys,
   platIssueStatusInvalidForKeys,
+  platIssueStatusPendingVendorFixForKeys,
   platSecuritySyncFixForKeys,
   platSecuritySyncTagForKeys,
   platSecuritySyncSearchBlob,
@@ -68,6 +69,8 @@ import {
   normalizePlatSyncFieldValue,
   sortCveRows,
   statusSteps,
+  jobIsSyncingPlat,
+  type PlatSyncLogEntry,
   dashboardCveStateLabel,
   dashboardRemediationStatusLabel,
   ticketStatusForSummary,
@@ -149,14 +152,30 @@ function isSecurityIssueType(issuetype?: string | null): boolean {
   return (issuetype ?? '').trim().toLowerCase() === 'security'
 }
 
-function StepList({ status }: { status?: string | null }) {
-  const steps = statusSteps(status)
+function StepList({
+  status,
+  aquaProcessingEnabled,
+}: {
+  status?: string | null
+  aquaProcessingEnabled?: boolean
+}) {
+  const steps = statusSteps(status, { aquaProcessingEnabled })
   return (
     <div className="steps">
       {steps.map((s) => (
         <div
           key={s.id}
-          className={`step ${s.state === 'done' ? 'stepDone' : s.state === 'current' ? 'stepCurrent' : s.state === 'failed' ? 'stepFailed' : ''}`}
+          className={`step ${
+            s.state === 'done'
+              ? 'stepDone'
+              : s.state === 'current'
+                ? 'stepCurrent'
+                : s.state === 'failed'
+                  ? 'stepFailed'
+                  : s.state === 'skipped'
+                    ? 'stepSkipped'
+                    : ''
+          }`}
         >
           <span className="stepDot" />
           {s.label}
@@ -242,6 +261,7 @@ type PlatSyncStrip = {
   secKeyCount: number
   packageMissing?: boolean
   platInvalid?: boolean
+  platPendingVendorFix?: boolean
 }
 
 function rowHasPlatSecuritySyncMap(r: CveRow): boolean {
@@ -283,12 +303,14 @@ function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
         ...platSyncStripForKeys(r, secKeys, false),
         packageMissing: isPackageNotFoundForImage(r, img),
         platInvalid: platIssueStatusInvalidForKeys(r, secKeys),
+        platPendingVendorFix: platIssueStatusPendingVendorFixForKeys(r, secKeys),
       })
     }
     if (orphanSec.length) {
       out.push({
         ...platSyncStripForKeys(r, orphanSec, false),
         platInvalid: platIssueStatusInvalidForKeys(r, orphanSec),
+        platPendingVendorFix: platIssueStatusPendingVendorFixForKeys(r, orphanSec),
       })
     }
     return out
@@ -305,6 +327,7 @@ function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
       {
         ...platSyncStripForKeys(r, allSecKeys, true),
         platInvalid: platIssueStatusInvalidForKeys(r, allSecKeys),
+        platPendingVendorFix: platIssueStatusPendingVendorFixForKeys(r, allSecKeys),
       },
     ]
   }
@@ -322,8 +345,11 @@ function PlatSyncStripCell({
   field: 'fix' | 'tag'
   hasSyncMap: boolean
 }) {
-  if (strip.packageMissing || strip.platInvalid) {
+  if (strip.platInvalid || (strip.platPendingVendorFix && field === 'tag')) {
     return <span className="platSyncStripText muted small">N/A</span>
+  }
+  if (strip.platPendingVendorFix && field === 'fix') {
+    return <span className="platSyncStripText muted small">Pending Vendor Fix</span>
   }
   if (field === 'fix') {
     const { title } = resolvePlatFixReleaseDateDisplay(strip.fix, strip.tag)
@@ -387,7 +413,7 @@ const CVE_TABLE_COLUMN_LABELS: Record<CveTableColumnKey, string> = {
   platImage: 'Affected image',
   platBug: 'PLAT bug',
   platCve: 'PLAT CVE',
-  platFix: 'PLAT fix version',
+  platFix: 'Expected release date',
   platTags: 'Tag numbers',
   severity: 'Severity',
   resource: 'Resource',
@@ -1774,6 +1800,7 @@ function AquaPackagesAdminPanelBody() {
   const [defaultImageTag, setDefaultImageTag] = useState('latest')
   const [defaultDefaultImageTag, setDefaultDefaultImageTag] = useState('latest')
   const [rewritePackageNameOnSync, setRewritePackageNameOnSync] = useState(false)
+  const [aquaProcessingEnabled, setAquaProcessingEnabled] = useState(false)
   const [aquaConfigured, setAquaConfigured] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -1795,6 +1822,7 @@ function AquaPackagesAdminPanelBody() {
     setRewritePackageNameOnSync(
       s.rewrite_plat_package_name_on_sync ?? s.recheck_on_sync ?? false,
     )
+    setAquaProcessingEnabled(s.aqua_processing_enabled ?? false)
     setPreferredRegistry(s.preferred_registry ?? '')
     setDefaultPreferredRegistry(s.default_preferred_registry ?? '')
     setDefaultImageTag(s.default_image_tag ?? 'latest')
@@ -1893,6 +1921,18 @@ function AquaPackagesAdminPanelBody() {
     }
   }
 
+  async function toggleAquaProcessing(enabled: boolean) {
+    setAquaProcessingEnabled(enabled)
+    setErr(null)
+    try {
+      const out = await apiPatchAquaPackagesSettings({ aqua_processing_enabled: enabled })
+      applySettings(out)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+      setAquaProcessingEnabled(!enabled)
+    }
+  }
+
   async function refreshImage(img: AquaCachedImageSummary) {
     const key = imageKey(img)
     setBusyKey(key)
@@ -1948,8 +1988,8 @@ function AquaPackagesAdminPanelBody() {
   return (
     <div className="aquaCacheAdmin">
       <p className="muted small slaAdminHint">
-        Read-only catalogs fetched from Aqua during CVE processing. Adjust cache TTL to control how
-        long entries are reused before re-fetching from Aqua (no scans triggered from this screen).
+        Cached Aqua catalogs and processing options. Manual refresh below does not require the
+        processing toggle. Adjust cache TTL to control how long entries are reused.
       </p>
       {!aquaConfigured && (
         <div className="errorBox slaAdminErr">Aqua API credentials are not configured.</div>
@@ -2032,7 +2072,17 @@ function AquaPackagesAdminPanelBody() {
         <label className="aquaCacheSettingsLabel aquaCacheRecheckLabel">
           <input
             type="checkbox"
+            checked={aquaProcessingEnabled}
+            onChange={(e) => void toggleAquaProcessing(e.target.checked)}
+          />
+          Run Aqua package cross-check during CVE processing (requires Aqua API credentials)
+        </label>
+
+        <label className="aquaCacheSettingsLabel aquaCacheRecheckLabel">
+          <input
+            type="checkbox"
             checked={rewritePackageNameOnSync}
+            disabled={!aquaProcessingEnabled}
             onChange={(e) => void toggleRewritePackageName(e.target.checked)}
           />
           Rewrite Package Name on PLAT CVE tickets during Sync PLAT (portal/Aqua rules; Go → stdlib)
@@ -2062,7 +2112,7 @@ function AquaPackagesAdminPanelBody() {
               {images.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="muted small">
-                    No cached catalogs yet — process a ticket with Aqua configured.
+                    No cached catalogs yet — enable Aqua processing and run a ticket with credentials configured.
                   </td>
                 </tr>
               ) : (
@@ -2220,6 +2270,25 @@ function TicketPanel({
   onViewResults: () => void
   onCancel?: () => void
 }) {
+  const [aquaProcessingSetting, setAquaProcessingSetting] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void apiGetAquaPackagesSettings()
+      .then((s) => {
+        if (!cancelled) setAquaProcessingSetting(s.aqua_processing_enabled)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const aquaForSteps =
+    job?.result?._aqua_processing_enabled != null
+      ? Boolean(job.result._aqua_processing_enabled)
+      : aquaProcessingSetting
+
   const isDone = job?.status === 'done'
   const isCancelled = job?.status === 'cancelled'
   const isActive = !!job?.status && !isDone && !isCancelled && !job.status.startsWith('failed')
@@ -2274,7 +2343,9 @@ function TicketPanel({
         </div>
       </div>
 
-      {job?.status && <StepList status={job.status} />}
+      {job?.status && (
+        <StepList status={job.status} aquaProcessingEnabled={aquaForSteps} />
+      )}
 
       {job?.status && job.status.startsWith('failed') && (
         <div className="errorBox" style={{ marginTop: '16px', fontFamily: 'inherit', color: '#f87171' }}>
@@ -2640,10 +2711,54 @@ function platSyncProgressCounter(p: NonNullable<JobResult['_plat_sync_progress']
 function platSyncProgressPhaseLabel(p: NonNullable<JobResult['_plat_sync_progress']>): string {
   const phase = p.phase || ''
   if (phase.includes('Refreshing')) return 'Refreshing CVEs'
+  if (phase.includes('Reading')) return 'Reading PLAT fields'
   if (phase.includes('Reading fix')) return 'Reading fix/tag'
   if (phase.includes('label')) return 'Label & due date'
   if (phase.includes('Linking')) return 'Linking to PLATFORM'
   return phase
+}
+
+function formatPlatSyncLogTime(ts: string): string {
+  try {
+    const d = new Date(ts)
+    if (Number.isNaN(d.getTime())) return ts
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch {
+    return ts
+  }
+}
+
+function PlatSyncActivityPanel({
+  entries,
+  defaultOpen,
+}: {
+  entries: PlatSyncLogEntry[]
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? true)
+  if (!entries.length) return null
+  return (
+    <div className="platSyncActivity">
+      <button
+        type="button"
+        className="platSyncActivityToggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {open ? '▼' : '▶'} Sync activity ({entries.length})
+      </button>
+      {open && (
+        <ul className="platSyncActivityList" role="log" aria-live="polite">
+          {entries.map((e, i) => (
+            <li key={`${e.ts}-${i}`} className={`platSyncActivityLine platSyncActivity-${e.level}`}>
+              <span className="platSyncActivityTs">{formatPlatSyncLogTime(e.ts)}</span>
+              <span className="platSyncActivityMsg">{e.msg}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 function PlatSyncSummaryModal({
@@ -2810,7 +2925,50 @@ function ResultsPanel({
   const [platSyncModalOpen, setPlatSyncModalOpen] = useState(false)
   const [platSyncWarnings, setPlatSyncWarnings] = useState<string[]>([])
   const [platSyncProgress, setPlatSyncProgress] = useState<JobResult['_plat_sync_progress'] | null>(null)
+  const [platSyncLog, setPlatSyncLog] = useState<PlatSyncLogEntry[]>(
+    () => job.result?._plat_sync_log ?? [],
+  )
   const [suggestedCommentRefreshing, setSuggestedCommentRefreshing] = useState(false)
+
+  const syncingPlat = jobIsSyncingPlat(job.status)
+
+  useEffect(() => {
+    if (syncingPlat) {
+      setPlatSyncProgress(job.result?._plat_sync_progress ?? null)
+    } else {
+      setPlatSyncProgress(null)
+    }
+    setPlatSyncLog(job.result?._plat_sync_log ?? [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.run_id, job.status, job.result?._plat_sync_progress, job.result?._plat_sync_log, syncingPlat])
+
+  // Parent polling stops after initial processing; poll while PLAT sync is in flight.
+  useEffect(() => {
+    if (!syncingPlat) return
+    let cancelled = false
+    const t = setInterval(() => {
+      void onJobRefresh()
+        .then((j) => {
+          if (cancelled) return
+          if (jobIsSyncingPlat(j.status)) {
+            setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
+            setPlatSyncLog(j.result?._plat_sync_log ?? [])
+          } else {
+            setPlatSyncProgress(null)
+            setPlatSyncLog(j.result?._plat_sync_log ?? [])
+            const rs = j.result?.cve_rows
+            if (rs && Array.isArray(rs) && j.status === 'done') {
+              setRows(rs)
+            }
+          }
+        })
+        .catch(() => {})
+    }, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [syncingPlat, onJobRefresh])
 
   useEffect(() => {
     const rs = job.result?.cve_rows
@@ -3003,22 +3161,22 @@ function ResultsPanel({
     setPlatSyncModalOpen(false)
     setPlatSyncWarnings([])
     setPlatSyncProgress(null)
+    setPlatSyncLog([])
     setPlatBulkBusy(true)
     try {
       await apiEnqueuePlatSync(job.run_id)
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise((r) => setTimeout(r, 1500))
         const j = await onJobRefresh()
-        if (
-          j.status === 'syncing_plat' ||
-          j.status === 'syncing_plat_rewrite' ||
-          j.status === 'syncing_aqua'
-        ) {
+        setPlatSyncLog(j.result?._plat_sync_log ?? [])
+        if (jobIsSyncingPlat(j.status)) {
           setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
           continue
         }
         setPlatSyncProgress(null)
         if (j.status === 'done') {
+          const rs = j.result?.cve_rows
+          if (rs && Array.isArray(rs)) setRows(rs)
           const pe = j.result?._plat_sync_errors
           const ss = j.result?._plat_sync_stats
           if (ss) {
@@ -3039,8 +3197,22 @@ function ResultsPanel({
     } catch (e) {
       setPlatBulkErr(e instanceof Error ? e.message : String(e))
       setPlatSyncProgress(null)
+      setPlatSyncLog([])
     } finally {
       setPlatBulkBusy(false)
+      try {
+        const j = await onJobRefresh()
+        if (!jobIsSyncingPlat(j.status)) {
+          setPlatSyncProgress(null)
+        }
+        setPlatSyncLog(j.result?._plat_sync_log ?? [])
+        if (j.status === 'done') {
+          const rs = j.result?.cve_rows
+          if (rs && Array.isArray(rs)) setRows(rs)
+        }
+      } catch {
+        /* keep last polled state */
+      }
     }
   }
 
@@ -3158,13 +3330,7 @@ function ResultsPanel({
             </div>
             <div className="resultsFindingsToolbarActions">
               <ResultsActionsMenu
-                disabled={
-                  loading ||
-                  platBulkBusy ||
-                  job.status === 'syncing_plat' ||
-                  job.status === 'syncing_plat_rewrite' ||
-                  job.status === 'syncing_aqua'
-                }
+                disabled={loading || platBulkBusy || syncingPlat}
                 onReprocess={() => { void onReprocessTicket() }}
                 onCreateAllCve={() => { void createAllMissingPlatCves() }}
                 onCreateAllBug={() => { void createAllMissingPlatBugs() }}
@@ -3177,11 +3343,7 @@ function ResultsPanel({
                   Creating… {platBulkProgress.done}/{platBulkProgress.total}
                 </span>
               )}
-              {(platBulkBusy ||
-                job.status === 'syncing_plat' ||
-                job.status === 'syncing_plat_rewrite' ||
-                job.status === 'syncing_aqua') &&
-                !platBulkProgress && (
+              {syncingPlat ? (
                 <span className="platSyncProgressPill" role="status">
                   Syncing PLAT
                   {platSyncProgress ? (
@@ -3196,7 +3358,7 @@ function ResultsPanel({
                     ' in Jira…'
                   )}
                 </span>
-              )}
+              ) : null}
               <button
                 type="button"
                 className="btnExport"
@@ -3212,6 +3374,9 @@ function ResultsPanel({
           <div className={`resultsPlatBulkErr small${platBulkErrIsWarn ? '' : ' resultsPlatBulkInfo'}`} role="status">
             {platBulkErr}
           </div>
+        )}
+        {findingsReady && platSyncLog.length > 0 && (
+          <PlatSyncActivityPanel entries={platSyncLog} defaultOpen={syncingPlat} />
         )}
         <CveTable
           rows={filteredRows}
@@ -4016,18 +4181,22 @@ function App() {
         const j = await apiGet<JobResponse>(`/api/jobs/${runId}`)
         if (!alive) return
         setJob(j)
-        if (j.status === 'done') {
+        if (j.status === 'done' && viewMode !== 'results') {
           setViewMode('results')
-          clearInterval(t)
         }
-        if (j.status.startsWith('failed') || j.status === 'cancelled') clearInterval(t)
+        const terminal =
+          j.status === 'done' ||
+          j.status.startsWith('failed') ||
+          j.status === 'cancelled'
+        const platSyncing = jobIsSyncingPlat(j.status)
+        if (terminal && !platSyncing) clearInterval(t)
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? String(e))
       }
     }, 2000)
     return () => { alive = false; clearInterval(t) }
-  }, [runId])
+  }, [runId, viewMode])
 
   function normalizeIssueKey(raw: string): string {
     const trimmed = raw.trim()
@@ -4117,9 +4286,15 @@ function App() {
   }
 
   async function openFromHistory(key: string, rid: string) {
+    // Clear previous ticket immediately so no stale content flashes while loading.
     setPage('new')
     setError(null)
     setIssueKey(key)
+    setIssue(null)
+    setJob(null)
+    setRunId(null)
+    setViewMode('results')
+    setCommentBody('')
     setCommentLastSyncedAt(null)
     setLoading(true)
     try {
@@ -4130,7 +4305,6 @@ function App() {
       setIssue(issueData)
       setJob(jobData)
       setRunId(rid)
-      setViewMode('results')
     } catch (e: any) {
       setError(e?.message ?? String(e))
     } finally {
@@ -4168,6 +4342,7 @@ function App() {
   }, [runId, refreshJob])
 
   const showResults = issue && job && viewMode === 'results'
+  const showResultsLoading = loading && !issue && viewMode === 'results' && !!issueKey
   const showTicket  = issue && viewMode === 'ticket'
 
   return (
@@ -4296,8 +4471,15 @@ function App() {
               </div>
             )}
 
+            {showResultsLoading && (
+              <div className="resultsLoadingPlaceholder">
+                <span className="muted small">Loading findings for {issueKey}…</span>
+              </div>
+            )}
+
             {showResults && (
               <ResultsPanel
+                key={runId ?? undefined}
                 issue={issue}
                 job={job}
                 loading={loading}

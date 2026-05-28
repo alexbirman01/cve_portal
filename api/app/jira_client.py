@@ -244,6 +244,134 @@ def _text_to_adf(text: str) -> dict[str, Any]:
     return {"type": "doc", "version": 1, "content": content}
 
 
+# ── ADF helpers for structured comments ──────────────────────────────────────
+
+def _adf_para(text: str) -> dict[str, Any]:
+    """Single ADF paragraph node."""
+    if not text:
+        return {"type": "paragraph", "content": []}
+    return {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+
+
+def _adf_table_row(cells: list[str], header: bool = False) -> dict[str, Any]:
+    cell_type = "tableHeader" if header else "tableCell"
+    return {
+        "type": "tableRow",
+        "content": [
+            {
+                "type": cell_type,
+                "attrs": {},
+                "content": [_adf_para(c.strip())],
+            }
+            for c in cells
+        ],
+    }
+
+
+def _adf_table(headers: list[str], rows: list[list[str]]) -> dict[str, Any]:
+    return {
+        "type": "table",
+        "attrs": {"isNumberColumnEnabled": False, "layout": "default"},
+        "content": [_adf_table_row(headers, header=True)]
+        + [_adf_table_row(r, header=False) for r in rows],
+    }
+
+
+def _parse_pipe_table(
+    lines: list[str],
+) -> tuple[list[str], list[list[str]]] | None:
+    """
+    Parse a pipe-separated table produced by formatCustomerStatusTable.
+
+    Returns (headers, data_rows) or None if no table found.
+    The expected structure is:
+        Header col1 | Header col2 | ...
+        ---+---------+---
+        cell1        | cell2       | ...
+    """
+    # Find first header line (contains " | ")
+    header_idx: int | None = None
+    for i, line in enumerate(lines):
+        if " | " in line:
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+
+    # Next line must be the separator (contains "-+-")
+    sep_idx = header_idx + 1
+    if sep_idx >= len(lines) or "-+-" not in lines[sep_idx]:
+        return None
+
+    headers = [c.strip() for c in lines[header_idx].split(" | ")]
+
+    data_rows: list[list[str]] = []
+    for line in lines[sep_idx + 1 :]:
+        if not line.strip():
+            break
+        if " | " not in line:
+            break
+        data_rows.append([c.strip() for c in line.split(" | ")])
+
+    return headers, data_rows
+
+
+def customer_status_comment_to_adf(comment_text: str) -> dict[str, Any]:
+    """
+    Convert a plain-text customer-status comment to ADF with a native table.
+
+    Lines before the table (marker, title, note, bullets) become individual
+    paragraphs; the pipe table becomes an ADF table node; any trailing text
+    becomes paragraphs.  This produces proper column alignment in Jira.
+    """
+    lines = comment_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    content: list[dict[str, Any]] = []
+
+    # Find table boundaries
+    header_idx: int | None = None
+    sep_idx: int | None = None
+    for i, line in enumerate(lines):
+        if " | " in line and header_idx is None:
+            header_idx = i
+        if header_idx is not None and sep_idx is None and "-+-" in line:
+            sep_idx = i
+            break
+
+    if header_idx is None or sep_idx is None:
+        # No table detected — fall back to paragraph-per-line rendering
+        return _text_to_adf(comment_text)
+
+    # Lines before the table — skip blank lines (each ADF paragraph adds spacing in Jira)
+    for line in lines[:header_idx]:
+        if line.strip():
+            content.append(_adf_para(line))
+
+    # Table
+    table_lines = lines[header_idx:]
+    parsed = _parse_pipe_table(table_lines)
+    if parsed is not None:
+        headers, rows = parsed
+        content.append(_adf_table(headers, rows))
+        # Determine how many lines the table occupied
+        table_line_count = 2 + len(rows)  # header + separator + data rows
+        after_lines = lines[header_idx + table_line_count :]
+    else:
+        after_lines = lines[header_idx:]
+
+    # Lines after the table (normally empty or trailing whitespace)
+    for line in after_lines:
+        if line.strip():
+            content.append(_adf_para(line))
+
+    if not content:
+        content.append(_adf_para(""))
+
+    return {"type": "doc", "version": 1, "content": content}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def _plat_bug_description_text(
     *,
     image_display: str,
@@ -1679,6 +1807,36 @@ class JiraClient:
         r.raise_for_status()
         return r.json()
 
+    def _push_customer_status_adf(
+        self,
+        issue_key: str,
+        comment_text: str,
+        comment_id: str | None,
+        internal: bool,
+    ) -> dict[str, Any]:
+        """Create (POST) or update (PUT) the customer-status comment using REST v3 + ADF table.
+
+        Always uses /rest/api/3 regardless of JIRA_USE_JSM_INTERNAL_COMMENTS so that the
+        ADF table structure is preserved.  Internal visibility is set via the
+        sd.public.comment property when internal=True.
+        """
+        adf_body = customer_status_comment_to_adf(comment_text)
+        payload: dict[str, Any] = {"body": adf_body}
+        if internal:
+            payload["properties"] = [
+                {"key": "sd.public.comment", "value": {"internal": True}},
+            ]
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/json"
+        if comment_id:
+            url = f"{self._base}/rest/api/3/issue/{issue_key}/comment/{comment_id}"
+            r = self._client.put(url, json=payload, headers=headers)
+        else:
+            url = f"{self._base}/rest/api/3/issue/{issue_key}/comment"
+            r = self._client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
     def upsert_customer_status_comment(
         self,
         issue_key: str,
@@ -1691,9 +1849,9 @@ class JiraClient:
         comments = self.list_issue_comments(issue_key)
         existing_id = self.find_customer_status_comment_id(comments)
         if existing_id:
-            jira = self.update_comment(issue_key, existing_id, comment_text, internal=internal)
+            jira = self._push_customer_status_adf(issue_key, comment_text, existing_id, internal)
             return {"action": "updated", "comment_id": existing_id, "jira": jira}
-        jira = self.add_comment(issue_key, comment_text, internal=internal)
+        jira = self._push_customer_status_adf(issue_key, comment_text, None, internal)
         new_id = jira.get("id")
         return {
             "action": "created",

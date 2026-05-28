@@ -319,6 +319,11 @@ def plat_issue_status_is_invalid(status: str | None) -> bool:
     return (status or "").strip().casefold() == "invalid"
 
 
+def plat_issue_status_is_pending_vendor_fix(status: str | None) -> bool:
+    """True when PLAT Security workflow status is Pending Vendor Fix (case-insensitive)."""
+    return (status or "").strip().casefold() == "pending vendor fix"
+
+
 def plat_issue_status_invalid_for_keys(row: dict[str, Any], sec_keys: list[str]) -> bool:
     """Any scoped Security PLAT key on this row has Invalid workflow status."""
     sync_map: dict[str, Any] = row.get("plat_security_field_sync") or {}

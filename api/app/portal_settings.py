@@ -10,6 +10,7 @@ from api.app.models import PortalSetting
 AQUA_PACKAGES_TTL_KEY       = "aqua_packages_ttl_hours"
 AQUA_RECHECK_ON_SYNC_KEY    = "aqua_recheck_on_sync"  # legacy
 REWRITE_PLAT_PACKAGE_NAME_ON_SYNC_KEY = "rewrite_plat_package_name_on_sync"
+AQUA_PROCESSING_ENABLED_KEY = "aqua_processing_enabled"
 AQUA_PREFERRED_REGISTRY_KEY = "aqua_preferred_registry"
 AQUA_DEFAULT_IMAGE_TAG_KEY  = "aqua_default_image_tag"
 
@@ -99,6 +100,30 @@ def get_rewrite_plat_package_name_on_sync(db: Session | None = None) -> bool:
 
 def set_rewrite_plat_package_name_on_sync(db: Session, enabled: bool) -> bool:
     _set_str(db, REWRITE_PLAT_PACKAGE_NAME_ON_SYNC_KEY, "1" if enabled else "0")
+    return enabled
+
+
+def _bool_flag_from_db(db: Session | None, key: str, *, default: bool) -> bool:
+    def _read(session: Session) -> bool:
+        row = session.get(PortalSetting, key)
+        if not row or not (row.value or "").strip():
+            return default
+        return row.value.strip() == "1"
+
+    if db is not None:
+        return _read(db)
+    from api.app.db import db_session
+    with db_session() as session:
+        return _read(session)
+
+
+def get_aqua_processing_enabled(db: Session | None = None) -> bool:
+    """Whether CVE processing runs Aqua package cross-check (default off)."""
+    return _bool_flag_from_db(db, AQUA_PROCESSING_ENABLED_KEY, default=False)
+
+
+def set_aqua_processing_enabled(db: Session, enabled: bool) -> bool:
+    _set_str(db, AQUA_PROCESSING_ENABLED_KEY, "1" if enabled else "0")
     return enabled
 
 

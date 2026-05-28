@@ -424,6 +424,13 @@ def _adf_node_to_text(node: Any) -> str:
     if ntype == "hardBreak":
         return "\n"
     children = node.get("content") or []
+    if ntype == "tableRow":
+        cells = [_adf_node_to_text(c).rstrip("\n") for c in children]
+        return " | ".join(cells) + "\n"
+    if ntype in ("tableHeader", "tableCell"):
+        return "".join(_adf_node_to_text(c) for c in children)
+    if ntype == "table":
+        return "".join(_adf_node_to_text(r) for r in children)
     inner = "".join(_adf_node_to_text(c) for c in children)
     if ntype in ("paragraph", "heading", "listItem"):
         return inner + "\n"

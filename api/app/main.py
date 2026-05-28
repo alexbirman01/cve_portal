@@ -1024,6 +1024,48 @@ def delete_allowed_image(image_id: str):
     return {"ok": True}
 
 
+_PLAT_SYNC_IN_PROGRESS = frozenset({"syncing_plat", "syncing_plat_rewrite", "syncing_aqua"})
+
+# Celery pipeline statuses — PLAT sync requires a stored findings payload first.
+_PIPELINE_ACTIVE = frozenset(
+    {
+        "queued",
+        "fetching_issue",
+        "extracting_from_description",
+        "downloading_attachments",
+        "parsing_attachments",
+        "enriching_nvd",
+        "enriching_rh",
+        "enriching_cve5",
+        "looking_up_plat_tickets",
+        "building_results",
+        "enriching_aqua",
+    }
+)
+
+
+def _run_has_cve_rows(run: ProcessingRun) -> bool:
+    if not run.result_json:
+        return False
+    try:
+        data = json.loads(run.result_json)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data.get("cve_rows"), list)
+
+
+def _run_ready_for_plat_sync(run: ProcessingRun) -> bool:
+    """True when findings exist and the run is not mid-pipeline or mid-sync."""
+    st = (run.status or "").strip()
+    if st in _PLAT_SYNC_IN_PROGRESS or st in _PIPELINE_ACTIVE:
+        return False
+    if not _run_has_cve_rows(run):
+        return False
+    if st == "done" or st == "cancelled":
+        return True
+    return st.startswith("failed")
+
+
 @app.post("/api/jobs/{run_id}/sync-plat")
 def enqueue_sync_plat(run_id: str):
     try:
@@ -1034,12 +1076,21 @@ def enqueue_sync_plat(run_id: str):
         run = db.get(ProcessingRun, rid)
         if not run:
             raise HTTPException(status_code=404, detail="run not found")
-        if run.status in ("syncing_plat", "syncing_plat_rewrite", "syncing_aqua"):
+        if (run.status or "") in _PLAT_SYNC_IN_PROGRESS:
             raise HTTPException(status_code=409, detail="PLAT sync already in progress")
-        if not run.result_json:
-            raise HTTPException(status_code=400, detail="no result to sync")
-        if run.status != "done":
-            raise HTTPException(status_code=400, detail="run must be finished before PLAT sync")
+        if not _run_ready_for_plat_sync(run):
+            st = (run.status or "").strip()
+            if not _run_has_cve_rows(run):
+                raise HTTPException(status_code=400, detail="no result to sync")
+            if st in _PIPELINE_ACTIVE or st == "queued":
+                raise HTTPException(
+                    status_code=400,
+                    detail="run must be finished before PLAT sync",
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"cannot sync PLAT for run status {st!r}",
+            )
     async_result = sync_plat_for_run.delay(str(rid))
     with db_session() as db:
         run = db.get(ProcessingRun, rid)
@@ -1068,7 +1119,18 @@ def cancel_run(run_id: str):
         if task_id:
             from worker.app.celery_app import celery_app as _celery
             _celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
-        run.status = "cancelled"
+        st = (run.status or "").strip()
+        if st in _PLAT_SYNC_IN_PROGRESS and _run_has_cve_rows(run):
+            # Findings are already built; cancelling sync should not block the next sync.
+            try:
+                data = json.loads(run.result_json or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            data.pop("_plat_sync_progress", None)
+            run.result_json = json.dumps(data)
+            run.status = "done"
+        else:
+            run.status = "cancelled"
         db.add(run)
         db.commit()
     return {"ok": True}

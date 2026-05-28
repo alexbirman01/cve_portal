@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import re
 import uuid
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import func
 
@@ -21,7 +24,11 @@ from api.app.cve5_client import Cve5Client
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
 from api.app.aqua_client import AquaClient
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
-from api.app.portal_settings import get_aqua_default_image_tag, get_rewrite_plat_package_name_on_sync
+from api.app.portal_settings import (
+    get_aqua_default_image_tag,
+    get_aqua_processing_enabled,
+    get_rewrite_plat_package_name_on_sync,
+)
 from api.app.cve_row_derived import (
     _image_path_basename,
     apply_plat_vendor_fields_from_sync,
@@ -44,6 +51,58 @@ def _set_run_status(run_id: str, status: str) -> None:
 
 
 _PLAT_SYNC_PHASE_COUNT = 1
+_PLAT_SYNC_LOG_MAX = 150
+
+
+def _init_plat_sync_log(run_id: str) -> None:
+    """Clear in-flight PLAT sync activity log (UI + worker stdout)."""
+    rid = uuid.UUID(run_id)
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return
+        data = json.loads(run.result_json)
+        data["_plat_sync_log"] = []
+        run.result_json = json.dumps(data)
+        db.add(run)
+        db.commit()
+
+
+def _append_plat_sync_log(run_id: str, level: str, msg: str) -> None:
+    """Append one line to _plat_sync_log in result_json for UI polling."""
+    text = (msg or "").strip()
+    if not text:
+        return
+    lvl = (level or "info").strip().lower()
+    if lvl not in ("info", "warn", "error"):
+        lvl = "info"
+    entry = {
+        "ts": dt.datetime.now(dt.UTC).isoformat(),
+        "level": lvl,
+        "msg": text,
+    }
+    logger.log(
+        logging.WARNING if lvl == "warn" else logging.ERROR if lvl == "error" else logging.INFO,
+        "plat_sync run_id=%s %s",
+        run_id,
+        text,
+    )
+    rid = uuid.UUID(run_id)
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return
+        data = json.loads(run.result_json)
+        log = data.get("_plat_sync_log")
+        if not isinstance(log, list):
+            log = []
+        log.append(entry)
+        if len(log) > _PLAT_SYNC_LOG_MAX:
+            log = log[-_PLAT_SYNC_LOG_MAX:]
+        data["_plat_sync_log"] = log
+        run.result_json = json.dumps(data)
+        db.add(run)
+        db.commit()
 
 
 def _write_plat_sync_progress(
@@ -385,15 +444,12 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         pkg["version_start"] = tp["version_start"]
                     if not pkg.get("fixed_version") and tp.get("fixed_version"):
                         pkg["fixed_version"] = tp["fixed_version"]
-                # No name match (e.g. NVD "gnutls" vs scan "libgnutls30") — primary
-                # row fields come from the attachment, not NVD metadata.
-                if not matched_ticket:
-                    tp = t_with_product[0]
-                    entry["attachment_primary"] = {
-                        "product": tp["product"],
-                        "version_start": tp.get("version_start"),
-                        "fixed_version": tp.get("fixed_version"),
-                    }
+                # No name match — store the attachment name as a candidate hint only.
+                # NVD is the source of truth for the package identity; the attachment
+                # product (e.g. "aws-java-sdk-core" for a JDK CVE) surfaces in the
+                # Aqua dropdown as the "customer" option but never overrides affected_resource.
+                if not matched_ticket and t_with_product:
+                    entry["attachment_product"] = t_with_product[0].get("product") or ""
 
 
         # Look up associated PLAT tickets (Security Vulnerability + Bug) for each CVE.
@@ -525,8 +581,6 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         seen_img_keys.add(key)
                         cve_to_images[cve_id].append({**img_dict, "image": canonical})
 
-        _set_run_status(run_id, "building_results")
-
         cve_rows = []
         for cve_id in cve_ids:
             nvd_entry = nvd_by_id.get(cve_id, {})
@@ -589,16 +643,16 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 }
             )
 
-        _set_run_status(run_id, "enriching_aqua")
-        if (settings.aqua_api_key or "").strip():
+        aqua_processing_on = get_aqua_processing_enabled()
+        if aqua_processing_on and (settings.aqua_api_key or "").strip():
+            _set_run_status(run_id, "enriching_aqua")
             with db_session() as db:
                 aqua = AquaClient()
                 try:
                     for row in cve_rows:
                         cve_id = row.get("cve_id") or ""
                         nvd_entry = nvd_by_id.get(cve_id, {})
-                        attach_primary = nvd_entry.get("attachment_primary") or {}
-                        customer_name = (attach_primary.get("product") or "").strip() or None
+                        customer_name = (nvd_entry.get("attachment_product") or "").strip() or None
                         nvd_pkgs = row.get("all_packages") or []
                         nvd_name = None
                         if nvd_pkgs and isinstance(nvd_pkgs[0], dict):
@@ -714,7 +768,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 _jira_link.close()
 
         for entry in enriched:
-            entry.pop("attachment_primary", None)
+            entry.pop("attachment_product", None)
 
         result = {
             "issue_key": issue.key,
@@ -729,6 +783,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "attachments": parsed_attachments,
             "images": images,
             "_plat_link_counts": link_counts,
+            "_aqua_processing_enabled": aqua_processing_on,
         }
     except Exception as e:
         import traceback
@@ -812,7 +867,9 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             result = json.loads(run.result_json)
             source_issue_key: str = (run.issue_key or "").strip()
         cve_rows: list[dict[str, Any]] = result.get("cve_rows") or []
+        _init_plat_sync_log(run_id)
         if not cve_rows:
+            _append_plat_sync_log(run_id, "info", "Sync finished: no CVE rows in run")
             with db_session() as db:
                 run = db.get(ProcessingRun, rid)
                 if run:
@@ -844,7 +901,18 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             for row in cve_rows:
                 all_keys |= plat_sec_keys_scoped_to_run(row)
 
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Sync started for {source_issue_key or run_id} "
+                f"({len(cve_rows)} CVE row(s), {len(all_keys)} PLAT Security ticket(s))",
+            )
             progress.set_phase("Reading PLAT fields from Jira", len(all_keys), 1)
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Phase 1: reading {len(all_keys)} PLAT Security ticket(s) from Jira",
+            )
 
             for pk in sorted(all_keys):
                 try:
@@ -853,8 +921,16 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                         plat_meta[pk] = m
                         stats["fields_read"] += 1
                 except Exception as ex:
-                    sync_errors.append(f"{pk} read field error: {ex}")
+                    err = f"{pk} read field error: {ex}"
+                    sync_errors.append(err)
+                    _append_plat_sync_log(run_id, "warn", err)
                 progress.bump()
+
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Phase 1 done: {stats['fields_read']} ticket(s) read, {len(sync_errors)} error(s)",
+            )
 
             # Update plat_security_field_sync mapping on each row with the retrieved values
             for row in cve_rows:
@@ -893,8 +969,13 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             jira.close()
 
         # Optional rewrite of wrong historical Package Name on PLAT CVE tickets in Jira.
-        if get_rewrite_plat_package_name_on_sync():
+        if get_aqua_processing_enabled() and get_rewrite_plat_package_name_on_sync():
             _set_run_status(run_id, "syncing_plat_rewrite")
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                "Phase 2: preparing package names from Aqua cache",
+            )
             rows_prepared = 0
             with db_session() as db:
                 aqua = AquaClient()
@@ -975,6 +1056,11 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 finally:
                     aqua.close()
             stats["package_names_rewritten"] = rows_prepared
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Phase 2: {rows_prepared} CVE row(s) prepared; updating Package Name in Jira",
+            )
 
             jira_pkg = JiraClient()
             try:
@@ -989,9 +1075,19 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                             if wr.package_name_updated:
                                 stats["packages_updated"] += 1
                         except Exception as ex:
-                            sync_errors.append(f"{pk} package rewrite: {ex}")
+                            err = f"{pk} package rewrite: {ex}"
+                            sync_errors.append(err)
+                            _append_plat_sync_log(run_id, "warn", err)
             finally:
                 jira_pkg.close()
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Phase 2 done: {stats['packages_checked']} checked, "
+                f"{stats['packages_updated']} updated in Jira",
+            )
+        else:
+            _append_plat_sync_log(run_id, "info", "Phase 2 skipped (rewrite Package Name on sync is off)")
 
         if sync_errors:
             result["_plat_sync_errors"] = sync_errors
@@ -1000,11 +1096,28 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
         result.pop("_plat_sync_progress", None)
         result["_plat_sync_stats"] = stats
         result["cve_rows"] = cve_rows
+        summary = (
+            f"Sync finished: {stats['fields_read']} field read(s)"
+            + (
+                f", {stats['packages_updated']} package name(s) updated"
+                if get_rewrite_plat_package_name_on_sync()
+                else ""
+            )
+            + (f", {len(sync_errors)} warning(s)" if sync_errors else "")
+        )
+        _append_plat_sync_log(run_id, "info", summary)
         with db_session() as db:
             run = db.get(ProcessingRun, rid)
             if run:
+                try:
+                    merged = json.loads(run.result_json) if run.result_json else {}
+                except json.JSONDecodeError:
+                    merged = {}
+                merged.update(result)
+                # Progress is written only to DB during sync; drop stale copy from merged.
+                merged.pop("_plat_sync_progress", None)
                 run.status = "done"
-                run.result_json = json.dumps(result)
+                run.result_json = json.dumps(merged)
                 db.add(run)
                 db.commit()
         return result
@@ -1012,6 +1125,7 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
         import traceback
         err_msg = str(e)
         tb_str = traceback.format_exc()
+        _append_plat_sync_log(run_id, "error", f"Sync failed: {err_msg}")
         with db_session() as db:
             run = db.get(ProcessingRun, rid)
             if run:
@@ -1022,6 +1136,7 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                     res = {}
                 res["error"] = err_msg
                 res["traceback"] = tb_str
+                res.pop("_plat_sync_progress", None)
                 run.result_json = json.dumps(res)
                 db.add(run)
                 db.commit()
@@ -1066,7 +1181,7 @@ def run_due_plat_syncs() -> dict[str, Any]:
                 skipped.append(issue_key)
                 continue
 
-        sync_plat_for_run.delay(str(run.id))
+        sync_plat_for_run.apply_async(args=[str(run.id)], queue="plat_sync")
         with db_session() as db:
             row = db.get(IssueSyncSchedule, issue_key)
             if row:

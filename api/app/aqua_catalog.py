@@ -18,16 +18,19 @@ from api.app.portal_settings import (
     get_aqua_default_image_tag,
     get_aqua_packages_ttl_hours,
     get_aqua_preferred_registry,
+    get_aqua_processing_enabled,
     get_rewrite_plat_package_name_on_sync,
     set_aqua_default_image_tag,
     set_aqua_packages_ttl_hours,
     set_aqua_preferred_registry,
+    set_aqua_processing_enabled,
     set_rewrite_plat_package_name_on_sync,
 )
 
 
 class AquaPackagesSettingsIn(BaseModel):
     ttl_hours: int | None = Field(default=None, ge=1, le=8760)
+    aqua_processing_enabled: bool | None = None
     rewrite_plat_package_name_on_sync: bool | None = None
     recheck_on_sync: bool | None = None  # legacy alias
     preferred_registry: str | None = None
@@ -109,6 +112,7 @@ def get_aqua_package_entry(registry: str, repository: str, tag: str) -> dict[str
 def get_aqua_packages_settings() -> dict[str, Any]:
     with db_session() as db:
         ttl_hours = get_aqua_packages_ttl_hours(db)
+        aqua_processing = get_aqua_processing_enabled(db)
         rewrite = get_rewrite_plat_package_name_on_sync(db)
         preferred_registry = get_aqua_preferred_registry(db)
         default_image_tag = get_aqua_default_image_tag(db)
@@ -116,6 +120,7 @@ def get_aqua_packages_settings() -> dict[str, Any]:
         "ttl_hours": ttl_hours,
         "default_ttl_hours": max(1, int(settings.aqua_packages_ttl_hours or 168)),
         "aqua_configured": bool((settings.aqua_api_key or "").strip()),
+        "aqua_processing_enabled": aqua_processing,
         "rewrite_plat_package_name_on_sync": rewrite,
         "recheck_on_sync": rewrite,
         "preferred_registry": preferred_registry,
@@ -134,6 +139,8 @@ def patch_aqua_packages_settings(payload: AquaPackagesSettingsIn) -> dict[str, A
             rewrite_flag = payload.recheck_on_sync
         if rewrite_flag is not None:
             set_rewrite_plat_package_name_on_sync(db, rewrite_flag)
+        if payload.aqua_processing_enabled is not None:
+            set_aqua_processing_enabled(db, payload.aqua_processing_enabled)
         if payload.preferred_registry is not None:
             set_aqua_preferred_registry(db, payload.preferred_registry)
         if payload.default_image_tag is not None:

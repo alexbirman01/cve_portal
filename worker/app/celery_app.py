@@ -14,10 +14,15 @@ celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
+    # Route sync_plat_for_run to its own queue so a dedicated concurrency=1
+    # worker processes auto-syncs sequentially without blocking process_issue.
+    task_routes={
+        "sync_plat_for_run": {"queue": "plat_sync"},
+    },
     beat_schedule={
         "run-due-plat-syncs": {
             "task": "run_due_plat_syncs",
-            "schedule": 900.0,  # every 15 minutes
+            "schedule": 3600.0,  # every 1 hour (24h window, no need to poll every 15 min)
         },
     },
 )

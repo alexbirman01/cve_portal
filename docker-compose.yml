@@ -24,6 +24,26 @@ services:
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         APP_VERSION: ${APP_VERSION:-dev}
+    command: ["celery", "-A", "worker.app.celery_app.celery_app", "worker", "-Q", "celery", "--loglevel=INFO"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: postgresql+psycopg://${POSTGRES_USER:-cve_portal}:${POSTGRES_PASSWORD:-cve_portal}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-cve_portal}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      portal:
+        condition: service_started
+
+  plat-sync-worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        APP_VERSION: ${APP_VERSION:-dev}
+    command: ["celery", "-A", "worker.app.celery_app.celery_app", "worker", "-Q", "plat_sync", "--concurrency=1", "--loglevel=INFO"]
     env_file:
       - .env
     environment:

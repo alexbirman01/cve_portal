@@ -128,6 +128,12 @@ export type PackageByImageEntry = {
   aqua_tag_used?: string | null
 }
 
+export type PlatSyncLogEntry = {
+  ts: string
+  level: 'info' | 'warn' | 'error' | string
+  msg: string
+}
+
 export type JobResult = {
   issue_key: string
   cves: string[]
@@ -139,6 +145,8 @@ export type JobResult = {
   sla_anchor_issue_key?: string | null
   /** Set when some Jira writes during PLAT sync fail (partial success). */
   _plat_sync_errors?: string[] | null
+  /** Append-only activity log during/after Sync PLAT (polled from result_json). */
+  _plat_sync_log?: PlatSyncLogEntry[] | null
   /** In-flight progress while status is syncing_plat (polled from result_json). */
   _plat_sync_progress?: {
     phase: string
@@ -151,6 +159,8 @@ export type JobResult = {
     /** @deprecated Legacy cumulative counter — prefer phase_current/phase_total */
     total?: number
   } | null
+  /** Whether Aqua cross-check ran for this run (portal setting at processing time). */
+  _aqua_processing_enabled?: boolean | null
   /** Counters from the last Sync PLAT run. */
   _plat_sync_stats?: {
     tickets_refreshed: number
@@ -288,6 +298,8 @@ export type AquaPackagesSettingsResponse = {
   ttl_hours: number
   default_ttl_hours: number
   aqua_configured: boolean
+  /** When true, CVE processing cross-checks packages against Aqua (default off). */
+  aqua_processing_enabled: boolean
   rewrite_plat_package_name_on_sync: boolean
   /** @deprecated Legacy alias — same as rewrite_plat_package_name_on_sync */
   recheck_on_sync: boolean
@@ -299,6 +311,7 @@ export type AquaPackagesSettingsResponse = {
 
 export type AquaPackagesSettingsPatch = {
   ttl_hours?: number
+  aqua_processing_enabled?: boolean
   rewrite_plat_package_name_on_sync?: boolean
   recheck_on_sync?: boolean
   preferred_registry?: string
@@ -477,6 +490,14 @@ export type CreatePlatResponse =
   | { exists: true; keys: string[]; link_warnings?: string[] }
   | { exists: false; key: string; summary?: string; link_warnings?: string[] }
 
+export function jobIsSyncingPlat(status?: string | null): boolean {
+  return (
+    status === 'syncing_plat' ||
+    status === 'syncing_plat_rewrite' ||
+    status === 'syncing_aqua'
+  )
+}
+
 export function formatStatus(status?: string | null): string {
   if (!status) return ''
   const map: Record<string, string> = {
@@ -491,6 +512,7 @@ export function formatStatus(status?: string | null): string {
     looking_up_plat_tickets: 'Looking up PLAT tickets',
     building_results: 'Building results',
     enriching_aqua: 'Cross-checking packages in Aqua',
+    skipping_aqua: 'Skipping Aqua (disabled)',
     done: 'Done',
     syncing_plat: 'Syncing PLAT with Jira',
     syncing_plat_rewrite: 'Rewriting PLAT Package Name in Jira',
@@ -510,7 +532,13 @@ function normalizeStatusForSteps(status?: string | null): string | undefined | n
   return status
 }
 
-export function statusSteps(status?: string | null) {
+export type StatusStepState = 'done' | 'current' | 'todo' | 'failed' | 'skipped'
+
+export function statusSteps(
+  status?: string | null,
+  opts?: { aquaProcessingEnabled?: boolean },
+): Array<{ id: string; label: string; state: StatusStepState }> {
+  const aquaOn = opts?.aquaProcessingEnabled ?? false
   const steps = [
     { id: 'fetching_issue', label: 'Fetch issue' },
     { id: 'extracting_from_description', label: 'Extract description' },
@@ -518,23 +546,40 @@ export function statusSteps(status?: string | null) {
     { id: 'parsing_attachments', label: 'Parse attachments' },
     { id: 'enriching_nvd', label: 'NVD enrichment' },
     { id: 'looking_up_plat_tickets', label: 'Look up PLAT tickets' },
+    { id: 'enriching_aqua', label: aquaOn ? 'Aqua package check' : 'Aqua package check (off)' },
     { id: 'building_results', label: 'Build results' },
-    { id: 'enriching_aqua', label: 'Aqua package check' },
     { id: 'syncing_plat', label: 'Sync PLAT (Jira)' },
     { id: 'done', label: 'Done' },
   ]
   const norm = normalizeStatusForSteps(status)
+  const aquaIdx = steps.findIndex((s) => s.id === 'enriching_aqua')
   const idx = steps.findIndex((s) => s.id === norm)
-  return steps.map((s, i) => ({
-    ...s,
-    state: status?.startsWith('failed')
-      ? 'failed'
-      : i < idx
-        ? 'done'
-        : i === idx
-          ? 'current'
-          : 'todo',
-  }))
+
+  return steps.map((s, i) => {
+    if (s.id === 'enriching_aqua' && !aquaOn) {
+      const pastAqua =
+        norm === 'building_results' ||
+        norm === 'syncing_plat' ||
+        norm === 'syncing_plat_rewrite' ||
+        norm === 'syncing_aqua' ||
+        norm === 'done' ||
+        (idx >= 0 && idx > aquaIdx)
+      return {
+        ...s,
+        state: (pastAqua ? 'skipped' : 'todo') as StatusStepState,
+      }
+    }
+
+    let state: StatusStepState = 'todo'
+    if (status?.startsWith('failed')) {
+      state = 'failed'
+    } else if (idx >= 0) {
+      if (i < idx) state = 'done'
+      else if (i === idx) state = 'current'
+    }
+
+    return { ...s, state }
+  })
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -826,6 +871,23 @@ export function platIssueStatusInvalidForKeys(r: CveRow, secKeys: string[]): boo
     const pk = k.trim().toUpperCase()
     if (!pk) continue
     if (isPlatIssueStatusInvalid(m[pk]?.issue_status)) return true
+  }
+  return false
+}
+
+/** True when PLAT Security workflow status is Pending Vendor Fix (case-insensitive). */
+export function isPlatIssueStatusPendingVendorFix(status: string | null | undefined): boolean {
+  return (status ?? '').trim().toLowerCase() === 'pending vendor fix'
+}
+
+/** Any scoped Security PLAT key on this row has Pending Vendor Fix workflow status. */
+export function platIssueStatusPendingVendorFixForKeys(r: CveRow, secKeys: string[]): boolean {
+  const m = r.plat_security_field_sync
+  if (!m) return false
+  for (const k of secKeys) {
+    const pk = k.trim().toUpperCase()
+    if (!pk) continue
+    if (isPlatIssueStatusPendingVendorFix(m[pk]?.issue_status)) return true
   }
   return false
 }
@@ -1369,7 +1431,9 @@ export const CUSTOMER_STATUS_NOTE =
 /** Bullet lines under "Status definitions:" in the Jira customer status comment. */
 export const CUSTOMER_STATUS_DEFINITIONS = [
   'In progress: CVE is under evaluation or no vendor fix is available yet',
-  'N/A: Package not present in this image',
+  'Pending Vendor Fix: Awaiting an upstream vendor patch; no PlainID fix date available yet',
+  'Package not found: Package not present in this image when PLAT CVE is Invalid (Expected release date column)',
+  'N/A: PLAT CVE marked Invalid',
 ] as const
 
 function formatCustomerStatusReportDate(d: Date = new Date()): string {
@@ -1486,8 +1550,16 @@ export function isPackageNotFoundForImage(r: CveRow, imageBasename: string): boo
   return packageDisplayForImage(r, imageBasename) === 'Package not found'
 }
 
-function formatPackageForComment(r: CveRow, imageBasename: string): string {
-  return packageDisplayForImage(r, imageBasename)
+/** Package name for customer comment (NVD/Aqua name; never the "Package not found" label). */
+export function packageNameForComment(r: CveRow, imageBasename: string): string {
+  const entry = packageEntryForImage(r, imageBasename)
+  const name = (
+    entry?.aqua_package_name ||
+    entry?.affected_resource ||
+    r.affected_resource ||
+    ''
+  ).trim()
+  return name || '—'
 }
 
 function formatCveSeverityForComment(r: CveRow): string {
@@ -1508,16 +1580,24 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
     const pushRow = (imageLabel: string, secKeys: string[], imageBasename?: string) => {
       const { fix, tag } = commentPlatRawForKeys(r, secKeys)
       const bn = imageBasename ?? ''
-      const packageName = bn ? formatPackageForComment(r, bn) : '—'
-      const packageMissing = packageName === 'Package not found'
+      const packageMissing = bn ? isPackageNotFoundForImage(r, bn) : false
+      const packageName = bn ? packageNameForComment(r, bn) : '—'
       const platInvalid = platIssueStatusInvalidForKeys(r, secKeys)
+      const platPendingVendorFix = platIssueStatusPendingVendorFixForKeys(r, secKeys)
       out.push({
         cve: r.cve_id,
         severity,
         image: imageLabel,
         packageName,
-        expectedRelease: packageMissing || platInvalid ? 'N/A' : plainIdExpectedReleaseDate(fix, tag),
-        fixVersion: packageMissing || platInvalid ? 'N/A' : plainIdReleaseVersion(tag),
+        expectedRelease: platInvalid
+          ? packageMissing
+            ? 'Package not found'
+            : 'N/A'
+          : platPendingVendorFix
+            ? 'Pending Vendor Fix'
+            : plainIdExpectedReleaseDate(fix, tag),
+        fixVersion:
+          platInvalid || platPendingVendorFix ? 'N/A' : plainIdReleaseVersion(tag),
       })
     }
 
