@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import func, text
 
 from api.app.config import settings
+from api.app.package_name import canonical_single_package_name
 from api.app.cve_row_derived import (
     _image_path_basename,
     cve_rows_from_result,
@@ -186,29 +187,17 @@ def _persist_plat_key_into_run(
                 continue
             tickets: list[dict] = list(row.get("plat_tickets") or [])
             existing = next((t for t in tickets if t.get("key") == key), None)
-            if issue_type == "Security Vulnerability":
-                if existing is None:
-                    tickets.append({"key": key, "issue_type": issue_type})
-                if img:
-                    by_img: dict[str, list[str]] = dict(row.get("plat_security_for_images") or {})
-                    cur = set(by_img.get(img) or [])
-                    cur.add(key)
-                    by_img[img] = sorted(cur)
-                    row["plat_security_for_images"] = by_img
-                sec_keys: set[str] = set(row.get("plat_security_keys") or [])
-                sec_keys.add(key)
-                row["plat_security_keys"] = sorted(sec_keys)
-            else:
-                bug_summary = (summary or "").strip() or (
-                    f"[{cve_id}] - [{img}]" if img else ""
-                )
-                if existing is None:
-                    entry: dict[str, str] = {"key": key, "issue_type": issue_type}
-                    if bug_summary:
-                        entry["summary"] = bug_summary
-                    tickets.append(entry)
-                elif bug_summary and not (existing.get("summary") or "").strip():
-                    existing["summary"] = bug_summary
+            if existing is None:
+                tickets.append({"key": key, "issue_type": issue_type})
+            if img:
+                by_img: dict[str, list[str]] = dict(row.get("plat_security_for_images") or {})
+                cur = set(by_img.get(img) or [])
+                cur.add(key)
+                by_img[img] = sorted(cur)
+                row["plat_security_for_images"] = by_img
+            sec_keys: set[str] = set(row.get("plat_security_keys") or [])
+            sec_keys.add(key)
+            row["plat_security_keys"] = sorted(sec_keys)
             row["plat_tickets"] = tickets
             break
         run.result_json = json.dumps(data)
@@ -346,68 +335,6 @@ def create_plat_ticket(payload: CreatePlatIn):
             image_basename=payload.image_basename.strip(),
         )
         out = {"exists": False, "key": key}
-        if warnings:
-            out["link_warnings"] = warnings
-        return out
-    except httpx.HTTPStatusError as e:
-        detail = e.response.text if e.response is not None else str(e)
-        raise HTTPException(status_code=400, detail=detail) from e
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    finally:
-        jira.close()
-
-
-@app.post("/api/plat/bug")
-def create_plat_bug_ticket(payload: CreatePlatIn):
-    jira = JiraClient()
-    try:
-        cve_id = payload.cve_id.strip()
-        image_basename = payload.image_basename.strip()
-        existing = jira.find_plat_bug_for_image(cve_id, image_basename)
-        if existing:
-            warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
-            out: dict = {"exists": True, "keys": existing}
-            if warnings:
-                out["link_warnings"] = warnings
-            bug_summary = f"[{cve_id}] - [{image_basename}]"
-            for k in existing:
-                _persist_plat_key_into_run(
-                    payload.run_id,
-                    cve_id,
-                    k,
-                    "Bug",
-                    image_basename=image_basename,
-                    summary=bug_summary,
-                )
-            return out
-        org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
-        key = jira.create_plat_bug(
-            cve_id,
-            image_basename,
-            payload.package_name.strip(),
-            payload.package_version.strip(),
-            priority_name=_jira_priority_name(payload.severity),
-            organization_refs=org_refs or None,
-            source_issue_key=payload.source_issue_key,
-            image_display=payload.image_display,
-            resource_label=payload.resource_label,
-            vendor_fix_version=payload.vendor_fix_version,
-            due_date=payload.sla_due_date,
-        )
-        if not key:
-            raise HTTPException(status_code=502, detail="Jira did not return issue key")
-        summary = f"[{cve_id}] - [{image_basename}]"
-        warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
-        _persist_plat_key_into_run(
-            payload.run_id,
-            cve_id,
-            key,
-            "Bug",
-            image_basename=image_basename,
-            summary=summary,
-        )
-        out = {"exists": False, "key": key, "summary": summary}
         if warnings:
             out["link_warnings"] = warnings
         return out
@@ -1163,10 +1090,11 @@ def patch_cve_row(run_id: str, payload: CveRowPatchIn):
                 row["affected_version"] = payload.affected_version or None
             if payload.affected_resource is not None:
                 bn = (payload.image_basename or "").strip()
+                canonical_resource = canonical_single_package_name(payload.affected_resource)
                 if not bn:
                     # Only update row-level resource when no image is specified
-                    row["affected_resource"] = payload.affected_resource or None
-                search = (payload.affected_resource or "").strip()
+                    row["affected_resource"] = canonical_resource
+                search = canonical_resource or ""
                 if search and (settings.aqua_api_key or "").strip():
                     basenames = image_basenames_for_cve_row(row)
                     if not bn:

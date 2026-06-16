@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import re
 import uuid
 from typing import Any
 
@@ -19,6 +18,7 @@ from api.app.allowed_images import load_alias_map, normalize_image_basename
 from api.app.models import CveCache, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
 from api.app.nvd_client import NvdClient, _extract_affected_packages
+from api.app.alpine_client import AlpineClient
 from api.app.redhat_client import RedHatClient
 from api.app.cve5_client import Cve5Client
 from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
@@ -29,6 +29,7 @@ from api.app.portal_settings import (
     get_aqua_processing_enabled,
     get_rewrite_plat_package_name_on_sync,
 )
+from api.app.package_name import canonical_single_package_name
 from api.app.cve_row_derived import (
     _image_path_basename,
     apply_plat_vendor_fields_from_sync,
@@ -159,41 +160,6 @@ class _SyncProgressReporter:
             phase_total=self.phase_total,
             phase_index=self.phase_index,
         )
-
-
-def _img_tokens(img_name: str) -> list[str]:
-    """Return searchable substrings for an image name, e.g. 'plainid/pip-operator' → ['pip-operator','pip','operator']."""
-    name = re.sub(r"^plainid/", "", img_name, flags=re.IGNORECASE).lower()
-    parts = re.split(r"[-_]", name)
-    tokens: list[str] = [name] + parts
-    stem = name.split(":", 1)[0].strip() if ":" in name else name
-    if stem and stem not in tokens:
-        tokens.append(stem)
-    # Path segments (e.g. rclone/rclone → bare "rclone") so Bug summaries like [CVE] - [rclone] match.
-    for seg in stem.split("/"):
-        s = seg.strip()
-        if s and s not in tokens:
-            tokens.append(s)
-    return [t for t in tokens if t]
-
-
-def _token_in_summary(tok: str, summary_lower: str) -> bool:
-    """Match token as a complete segment — not as a prefix/suffix of a longer hyphenated word.
-    e.g. 'pip' matches 'pip' and '[pip]' but NOT 'pip-mgmt' or 'pip-operator'."""
-    return bool(re.search(r"(?<![a-zA-Z0-9\-_])" + re.escape(tok) + r"(?![a-zA-Z0-9\-_])", summary_lower))
-
-
-def _filter_plat_tickets(tickets: list[dict], imgs: list[dict]) -> list[dict]:
-    """Keep Security Vulnerability tickets as-is; filter Bug tickets to those matching an affected image."""
-    img_token_set = {tok for i in imgs for tok in _img_tokens(i["image"]) if len(tok) > 2}
-    result = []
-    for t in tickets:
-        if t["issue_type"] == "Bug" and img_token_set:
-            summary_lower = (t.get("summary") or "").lower()
-            if not any(_token_in_summary(tok, summary_lower) for tok in img_token_set):
-                continue  # no image match — skip this Bug ticket
-        result.append(t)
-    return result
 
 
 def _affected_imgs_for_cve_row(row: dict[str, Any]) -> list[dict]:
@@ -352,6 +318,20 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         finally:
             nvd.close()
 
+        if settings.alpine_enrichment_enabled:
+            _set_run_status(run_id, "enriching_alpine")
+            alpine = AlpineClient()
+            try:
+                for entry in enriched:
+                    pkgs = entry.get("packages") or []
+                    if pkgs and any((p.get("product") or "").strip() for p in pkgs if isinstance(p, dict)):
+                        continue
+                    alpine_pkgs = alpine.fetch_cve_packages(entry["cve_id"])
+                    if alpine_pkgs:
+                        entry["packages"] = alpine_pkgs
+            finally:
+                alpine.close()
+
         if settings.redhat_enrichment_enabled:
             _set_run_status(run_id, "enriching_rh")
             rh = RedHatClient()
@@ -406,9 +386,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             finally:
                 cve5.close()
 
-        # 4th fallback: fill missing packages / versions from ticket attachment columns
-        # ("Package Version" and "Fix Status").  Unlike the API fallbacks, ticket data
-        # is also merged into existing NVD package entries to fill missing version fields.
+        # Ticket attachment fallback: package name only when NVD + Alpine left packages empty;
+        # version fields may still be merged from attachment when missing.
         ticket_pkgs: dict[str, list[dict[str, Any]]] = {}
         for att in parsed_attachments:
             for p in att.get("packages") or []:
@@ -417,7 +396,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     continue
                 ticket_pkgs.setdefault(cve, []).append({
                     "vendor": "ticket",
-                    "product": (p.get("package_name") or "").strip(),
+                    "product": canonical_single_package_name((p.get("package_name") or "").strip()) or "",
                     "version_start": (p.get("package_version") or "").strip() or None,
                     "fixed_version": (p.get("fixed_version") or "").strip() or None,
                 })
@@ -429,10 +408,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             if not t_with_product:
                 continue
             if not entry.get("packages"):
-                # No packages from online sources — use ticket data wholesale.
                 entry["packages"] = list(t_with_product)
             else:
-                # Merge ticket version fields into NVD entries with matching product names.
                 t_by_product = {p["product"].lower(): p for p in t_with_product}
                 matched_ticket: set[str] = set()
                 for pkg in entry["packages"]:
@@ -444,19 +421,22 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                         pkg["version_start"] = tp["version_start"]
                     if not pkg.get("fixed_version") and tp.get("fixed_version"):
                         pkg["fixed_version"] = tp["fixed_version"]
-                # No name match — store the attachment name as a candidate hint only.
-                # NVD is the source of truth for the package identity; the attachment
-                # product (e.g. "aws-java-sdk-core" for a JDK CVE) surfaces in the
-                # Aqua dropdown as the "customer" option but never overrides affected_resource.
                 if not matched_ticket and t_with_product:
-                    entry["attachment_product"] = t_with_product[0].get("product") or ""
+                    tp = t_with_product[0]
+                    for pkg in entry["packages"]:
+                        if not isinstance(pkg, dict):
+                            continue
+                        if not pkg.get("version_start") and tp.get("version_start"):
+                            pkg["version_start"] = tp["version_start"]
+                        if not pkg.get("fixed_version") and tp.get("fixed_version"):
+                            pkg["fixed_version"] = tp["fixed_version"]
+                        break
 
 
-        # Look up associated PLAT tickets (Security Vulnerability + Bug) for each CVE.
+        # Look up associated PLAT Security Vulnerability tickets for each CVE.
         _set_run_status(run_id, "looking_up_plat_tickets")
         cve_to_plat: dict[str, list[dict]] = {}
         cve_to_plat_security_by_image: dict[str, dict[str, list[str]]] = {}
-        cve_to_plat_bugs: dict[str, list[dict[str, str]]] = {}
         try:
             for cve_id in cve_ids:
                 try:
@@ -472,11 +452,9 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                             continue
                         by_img.setdefault(img, []).append(item["key"])
                     cve_to_plat_security_by_image[cve_id] = by_img
-                    cve_to_plat_bugs[cve_id] = jira.search_plat_bugs_for_cve(cve_id)
                 except Exception:
                     cve_to_plat[cve_id] = []
                     cve_to_plat_security_by_image[cve_id] = {}
-                    cve_to_plat_bugs[cve_id] = []
         finally:
             jira.close()
 
@@ -586,9 +564,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
 
-            # Package/resource metadata priority: NVD CPE → Red Hat errata → MITRE CVE 5.0 → ticket attachments.
-            # The enrichment phases above (enriching_nvd, enriching_rh, ticket fallback) populate
-            # entry["packages"] in that priority order before we reach this point.
+            # Package/resource metadata: NVD CPE → Alpine OSV → ticket attachment (one name).
+            # Enrichment phases above populate entry["packages"] before we build rows.
             nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
             attach_primary = nvd_entry.get("attachment_primary")
             if attach_primary:
@@ -597,7 +574,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 primary = _pick_best_nvd_package(nvd_pkgs)
             else:
                 primary = None
-            affected_resource = primary.get("product") if primary else None
+            affected_resource = canonical_single_package_name(primary.get("product") if primary else None)
             affected_version = primary.get("version_start") if primary else None
             fixed_version = primary.get("fixed_version") if primary else None
             all_packages = nvd_pkgs
@@ -615,7 +592,6 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 cve_id,
                 raw_plat,
                 row_for_plat,
-                cve_to_plat_bugs.get(cve_id),
             )
 
             cve_rows.append(
@@ -652,12 +628,15 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     for row in cve_rows:
                         cve_id = row.get("cve_id") or ""
                         nvd_entry = nvd_by_id.get(cve_id, {})
-                        customer_name = (nvd_entry.get("attachment_product") or "").strip() or None
+                        customer_name: str | None = None
+                        ticket_for_cve = ticket_pkgs.get(cve_id) or []
+                        if ticket_for_cve:
+                            customer_name = (ticket_for_cve[0].get("product") or "").strip() or None
                         nvd_pkgs = row.get("all_packages") or []
                         nvd_name = None
                         if nvd_pkgs and isinstance(nvd_pkgs[0], dict):
                             nvd_name = (nvd_pkgs[0].get("product") or "").strip() or None
-                        search_name = (row.get("affected_resource") or "").strip()
+                        search_name = canonical_single_package_name(row.get("affected_resource")) or ""
                         if not search_name:
                             continue
 
@@ -982,7 +961,7 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
                 try:
                     for row in cve_rows:
                         nvd_pkgs = row.get("all_packages") or []
-                        search_name = (row.get("affected_resource") or "").strip()
+                        search_name = canonical_single_package_name(row.get("affected_resource")) or ""
                         if not search_name and nvd_pkgs and isinstance(nvd_pkgs[0], dict):
                             search_name = (nvd_pkgs[0].get("product") or "").strip()
                         basenames = image_basenames_for_cve_row(row)

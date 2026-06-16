@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     nvd_api_key: str | None = None
     redhat_enrichment_enabled: bool = False
     cve5_enrichment_enabled: bool = False
+    # When NVD has no package/CPE data, enrich from Alpine secdb via OSV (ALPINE-CVE-*).
+    alpine_enrichment_enabled: bool = True
 
     # Comma-separated lowercase tokens used to decide if an image is a PlainID image.
     # Matched case-insensitively as a substring of image name or tag.
@@ -25,17 +27,6 @@ class Settings(BaseSettings):
     jira_plat_issuetype_name: str = "Security Vulnerability"
     # If set (e.g. "10034"), `issuetype` is sent as {"id": ...} instead of by name (use when names are ambiguous).
     jira_plat_issuetype_id: str | None = None
-
-    # PLAT Bug create — same project/fields pattern as Security Vulnerability where Jira allows.
-    jira_plat_bug_issuetype_name: str = "Bug"
-    jira_plat_bug_issuetype_id: str | None = None
-    # Bug screen often requires "Dev Group" (PlainID: customfield_10712).
-    jira_plat_bug_dev_group_field_id: str = "customfield_10712"
-    jira_plat_bug_dev_group_copy_from_source: bool = True
-    # When source issue has no Dev Group, use these Jira option label(s) as [{"value": "..."}, ...] (comma-separated for multi).
-    jira_plat_bug_dev_group_option_value: str = "BE"
-    # Jira Components on PLAT Bug create (e.g. Security).
-    jira_plat_bug_component_name: str = "Security"
 
     jira_plat_cf_cve_id: str = "customfield_11245"
     jira_plat_cve_cf_number: int = 11245

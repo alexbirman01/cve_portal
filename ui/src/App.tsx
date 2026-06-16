@@ -4,7 +4,6 @@ import type { ComponentHealth } from './api'
 import {
   apiCreateCustomerSla,
   apiCreatePlat,
-  apiCreatePlatBug,
   apiDeleteCustomerSla,
   apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
@@ -41,10 +40,7 @@ import {
   formatStatus,
   imageBasenamesForCveRow,
   isAllowedImageBasename,
-  mergePlatBugCreateIntoRows,
   mergePlatCreateIntoRows,
-  platBugTicketsForImage,
-  platMissingBugCreateSlots,
   platMissingCveCreateSlots,
   platOrphanSecKeys,
   platSecKeysForImage,
@@ -56,6 +52,7 @@ import {
   aquaAllowsPlatCreate,
   isNvdGoRow,
   isPackageNotFoundForImage,
+  canonicalSinglePackageName,
   packageEntryForImage,
   packagePickOptions,
   platPackageNameForRow,
@@ -287,10 +284,6 @@ function platSyncStripForKeys(r: CveRow, secKeys: string[], legacyRowFallback = 
 
 /** One strip per PLAT sketch row (same order: each image, then orphan if any; else aggregated). */
 function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
-  const tickets = [
-    ...(r.plat_tickets ?? (r.plat_ticket ? [{ key: r.plat_ticket, issue_type: 'Security Vulnerability' }] : [])),
-  ]
-  const bugTickets = tickets.filter((t) => t.issue_type === 'Bug')
   const perImages = imageBasenamesForCveRow(r)
   const orphanSec = platOrphanSecKeys(r)
   const allSecKeys = platSecurityKeys(r)
@@ -317,7 +310,6 @@ function platSyncStripsForRow(r: CveRow): PlatSyncStrip[] | null {
   }
 
   const showAggregated =
-    bugTickets.length > 0 ||
     allSecKeys.length > 0 ||
     !!platDisplayFullImagesSummary(r) ||
     !!platDisplaySketchSummary(r)
@@ -396,7 +388,6 @@ function PlatSyncStripCell({
 const CVE_TABLE_COLUMN_KEYS = [
   'cve',
   'platImage',
-  'platBug',
   'platCve',
   'platFix',
   'platTags',
@@ -411,7 +402,6 @@ type CveTableColumnKey = (typeof CVE_TABLE_COLUMN_KEYS)[number]
 const CVE_TABLE_COLUMN_LABELS: Record<CveTableColumnKey, string> = {
   cve: 'CVE ID',
   platImage: 'Affected image',
-  platBug: 'PLAT bug',
   platCve: 'PLAT CVE',
   platFix: 'Expected release date',
   platTags: 'Tag numbers',
@@ -425,7 +415,6 @@ const CVE_TABLE_COLUMN_LABELS: Record<CveTableColumnKey, string> = {
 const CVE_TABLE_COL_CLASS: Record<CveTableColumnKey, string> = {
   cve: 'cveColCve',
   platImage: 'cveColPlatImg',
-  platBug: 'cveColPlatBug',
   platCve: 'cveColPlatCve',
   platFix: 'cveColPlatFix',
   platTags: 'cveColPlatTag',
@@ -439,7 +428,6 @@ const CVE_TABLE_COL_CLASS: Record<CveTableColumnKey, string> = {
 const DEFAULT_CVE_TABLE_COLUMN_VISIBILITY: Record<CveTableColumnKey, boolean> = {
   cve: true,
   platImage: true,
-  platBug: true,
   platCve: true,
   severity: true,
   resource: true,
@@ -536,9 +524,9 @@ function PackageResourceCell({
 
   const matchedName = (
     entry?.aqua_pkg_found && entry.aqua_package_name
-      ? entry.aqua_package_name
+      ? canonicalSinglePackageName(entry.aqua_package_name)
       : entry?.aqua_pkg_found && entry.affected_resource
-        ? entry.affected_resource
+        ? canonicalSinglePackageName(entry.affected_resource)
         : ''
   ).trim()
 
@@ -687,7 +675,7 @@ function PackageResourceCell({
     )
   }
 
-  const fallback = (entry?.affected_resource ?? row.affected_resource ?? '').trim()
+  const fallback = canonicalSinglePackageName(entry?.affected_resource ?? row.affected_resource)
   return (
     <div className="packageResourceCell">
       <span className="mono packageResourceMatched muted">
@@ -705,7 +693,6 @@ function CveTable({
   runId,
   platOrganizationRefs,
   onPlatCreated,
-  onPlatBugCreated,
   onRowUpdated,
   hideBuiltInToolbar,
   sourceRowCount,
@@ -718,7 +705,6 @@ function CveTable({
   runId?: string | null
   platOrganizationRefs?: OrgRef[] | null
   onPlatCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
-  onPlatBugCreated?: (cveId: string, imageBasename: string, out: CreatePlatResponse) => void
   onRowUpdated?: (cveId: string, patch: Partial<CveRow>) => void
   hideBuiltInToolbar?: boolean
   /** When search hides all rows but source had rows, show clear action */
@@ -799,13 +785,7 @@ function CveTable({
                 </a>
               </td>
               ) : null}
-              {(vis.platImage || vis.platBug || vis.platCve) ? (() => {
-                  const tickets = [
-                    ...(r.plat_tickets ?? (r.plat_ticket ? [{ key: r.plat_ticket, issue_type: 'Security Vulnerability' }] : [])),
-                  ]
-                  const bugTickets = tickets.filter((t) => t.issue_type === 'Bug')
-                  bugTickets.sort((a, b) => a.key.localeCompare(b.key))
-
+              {(vis.platImage || vis.platCve) ? (() => {
                   const perImages = imageBasenamesForCveRow(r)
                   const verOk = true
                   const orphanSec = platOrphanSecKeys(r)
@@ -822,8 +802,7 @@ function CveTable({
                     ) : null
 
                   const errInImage = vis.platImage ? platErrBlock : null
-                  const errInBug = !vis.platImage && vis.platBug ? platErrBlock : null
-                  const errInCve = !vis.platImage && !vis.platBug && vis.platCve ? platErrBlock : null
+                  const errInCve = !vis.platImage && vis.platCve ? platErrBlock : null
 
                   return (
                     <>
@@ -860,8 +839,7 @@ function CveTable({
                         </>
                       ) : (
                         <>
-                          {(bugTickets.length > 0 ||
-                            allSecKeys.length > 0 ||
+                          {(allSecKeys.length > 0 ||
                             platDisplayFullImagesSummary(r) ||
                             platDisplaySketchSummary(r)) && (() => {
                             const legacyLabel = platDisplaySketchSummary(r) || platDisplayFullImagesSummary(r) || '—'
@@ -886,8 +864,7 @@ function CveTable({
                               </div>
                             )
                           })()}
-                          {bugTickets.length === 0 &&
-                            allSecKeys.length === 0 &&
+                          {allSecKeys.length === 0 &&
                             !platDisplayFullImagesSummary(r) &&
                             !platDisplaySketchSummary(r) && (
                               <div className="platColStrip">
@@ -897,147 +874,6 @@ function CveTable({
                         </>
                       )}
                       {errInImage}
-                </div>
-              </td>
-                      ) : null}
-                      {vis.platBug ? (
-              <td className="platTicketCell platColCell">
-                <div className="platColStack">
-                      {perImages.length > 0 ? (
-                        <>
-                          {perImages.map((imgBasename) => {
-                            const bugsForImg = platBugTicketsForImage(r, imgBasename)
-                            const busyKeyBug = `${r.cve_id}|${imgBasename}|bug`
-                            const canCreateBug =
-                              onPlatBugCreated && verOk && bugsForImg.length === 0
-                            const bugEmpty = !bugsForImg.length && !canCreateBug
-                            return (
-                              <div key={imgBasename} className="platColStrip">
-                                <div
-                                  className={
-                                    bugEmpty ? 'platColPills platColPillsEmpty' : 'platColPills'
-                                  }
-                                >
-                                  {bugEmpty ? (
-                                    <span className="muted small platPerImageNA">—</span>
-                                  ) : (
-                                    <>
-                                      {bugsForImg.map((t) => (
-                                        <a
-                                          key={t.key}
-                                          className="platTicketPill platTicketFound"
-                                          href={`https://plainid.atlassian.net/browse/${t.key}`}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          title={t.issue_type}
-                                        >
-                                          {t.key}
-                                        </a>
-                                      ))}
-                                      {canCreateBug && (
-                                        <button
-                                          type="button"
-                                          className="platTicketPill platTicketCreate platTicketCreateBug platCreatePill platCreateBugPill"
-                                          disabled={platBusy === busyKeyBug}
-                                          title={`Create Bug PLAT for ${imgBasename}`}
-                                          onClick={async () => {
-                                            if (!onPlatBugCreated) return
-                                            const ver = (r.affected_version ?? '').trim()
-                                            setPlatBusy(busyKeyBug)
-                                            setPlatErrRow(null)
-                                            setPlatErrMsg(null)
-                                            setPlatLinkWarnings(null)
-                                            try {
-                                              const out = await apiCreatePlatBug({
-                                                cve_id: r.cve_id,
-                                                image_basename: imgBasename,
-                                                package_name: platPackageNameForRow(r),
-                                                package_version: ver,
-                                                severity: r.severity,
-                                                organizations: platOrganizationRefs ?? [],
-                                                source_issue_key: issueKey,
-                                                image_display: platDisplayLabelForImage(r, imgBasename),
-                                                resource_label:
-                                                  (r.affected_resource ?? '').trim() ||
-                                                  platPackageNameForRow(r),
-                                                vendor_fix_version: (r.fixed_version ?? '').trim() || null,
-                                                sla_due_date: r.sla_due_date ?? null,
-                                                run_id: runId,
-                                              })
-                                              if (out.link_warnings?.length) {
-                                                setPlatErrRow(r.cve_id)
-                                                setPlatLinkWarnings(out.link_warnings)
-                                              }
-                                              onPlatBugCreated(r.cve_id, imgBasename, out)
-                                            } catch (e) {
-                                              setPlatErrRow(r.cve_id)
-                                              setPlatErrMsg(e instanceof Error ? e.message : String(e))
-                                            } finally {
-                                              setPlatBusy(null)
-                                            }
-                                          }}
-                                        >
-                                          {platBusy === busyKeyBug ? 'Creating…' : 'Create BUG'}
-                                        </button>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            )
-                          })}
-                          {orphanSec.length > 0 && (
-                            <div className="platColStrip">
-                              <div className="platColPills platColPillsEmpty">
-                                <span className="muted small platPerImageNA">—</span>
-                              </div>
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          {(bugTickets.length > 0 ||
-                            allSecKeys.length > 0 ||
-                            platDisplayFullImagesSummary(r) ||
-                            platDisplaySketchSummary(r)) && (
-                            <div className="platColStrip">
-                              <div
-                                className={
-                                  bugTickets.length === 0
-                                    ? 'platColPills platColPillsEmpty'
-                                    : 'platColPills'
-                                }
-                              >
-                                {bugTickets.length === 0 ? (
-                                  <span className="muted small platPerImageNA">—</span>
-                                ) : (
-                                  bugTickets.map((t) => (
-                                    <a
-                                      key={t.key}
-                                      className="platTicketPill platTicketFound"
-                                      href={`https://plainid.atlassian.net/browse/${t.key}`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      title={t.issue_type}
-                                    >
-                                      {t.key}
-                                    </a>
-                                  ))
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {bugTickets.length === 0 &&
-                            allSecKeys.length === 0 &&
-                            !platDisplayFullImagesSummary(r) &&
-                            !platDisplaySketchSummary(r) && (
-                              <div className="platColStrip">
-                                <Dash />
-                              </div>
-                            )}
-                        </>
-                      )}
-                      {errInBug}
                 </div>
               </td>
                       ) : null}
@@ -1146,8 +982,7 @@ function CveTable({
                         </>
                       ) : (
                         <>
-                          {(bugTickets.length > 0 ||
-                            allSecKeys.length > 0 ||
+                          {(allSecKeys.length > 0 ||
                             platDisplayFullImagesSummary(r) ||
                             platDisplaySketchSummary(r)) && (
                             <div className="platColStrip">
@@ -1177,8 +1012,7 @@ function CveTable({
                               </div>
                             </div>
                           )}
-                          {bugTickets.length === 0 &&
-                            allSecKeys.length === 0 &&
+                          {allSecKeys.length === 0 &&
                             !platDisplayFullImagesSummary(r) &&
                             !platDisplaySketchSummary(r) && (
                               <div className="platColStrip">
@@ -2588,18 +2422,14 @@ function ResultsActionsMenu({
   disabled,
   onReprocess,
   onCreateAllCve,
-  onCreateAllBug,
   onSync,
   missingCveCount,
-  missingBugCount,
 }: {
   disabled: boolean
   onReprocess: () => void
   onCreateAllCve: () => void
-  onCreateAllBug: () => void
   onSync: () => void
   missingCveCount: number
-  missingBugCount: number
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -2657,25 +2487,6 @@ function ResultsActionsMenu({
               }}
             >
               Create all CVE tickets{missingCveCount > 0 ? ` (${missingCveCount})` : ''}
-            </button>
-          </li>
-          <li role="none">
-            <button
-              type="button"
-              role="menuitem"
-              className="resultsActionsMenuItem"
-              disabled={disabled || missingBugCount === 0}
-              title={
-                missingBugCount === 0
-                  ? 'No filtered rows need a new Bug PLAT ticket (per image)'
-                  : undefined
-              }
-              onClick={() => {
-                setOpen(false)
-                onCreateAllBug()
-              }}
-            >
-              Create all bug tickets{missingBugCount > 0 ? ` (${missingBugCount})` : ''}
             </button>
           </li>
           <li role="none">
@@ -3003,10 +2814,6 @@ function ResultsPanel({
     setRows((prev) => mergePlatCreateIntoRows(prev, cveId, imageBasename, out))
   }
 
-  const onPlatBugCreated = (cveId: string, imageBasename: string, out: CreatePlatResponse) => {
-    setRows((prev) => mergePlatBugCreateIntoRows(prev, cveId, imageBasename, out))
-  }
-
   const onRowUpdated = (cveId: string, patch: Partial<CveRow>) => {
     setRows((prev) => prev.map((r) => r.cve_id === cveId ? { ...r, ...patch } : r))
     if (job.run_id) {
@@ -3025,11 +2832,6 @@ function ResultsPanel({
 
   const missingCveSlots = useMemo(
     () => platMissingCveCreateSlots(filteredRows),
-    [filteredRows],
-  )
-
-  const missingBugSlots = useMemo(
-    () => platMissingBugCreateSlots(filteredRows),
     [filteredRows],
   )
 
@@ -3066,66 +2868,6 @@ function ResultsPanel({
             continue
           }
           acc = mergePlatCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
-          setRows(acc)
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          failures.push(`${r.cve_id} / ${slot.image_basename}: ${msg}`)
-        }
-        setPlatBulkProgress({ done: i + 1, total: slots.length })
-      }
-      if (failures.length) {
-        setPlatBulkErr(
-          failures.length === slots.length
-            ? `All ${failures.length} failed. ${failures[0]}`
-            : `${failures.length} of ${slots.length} failed. ${failures.slice(0, 3).join(' · ')}${failures.length > 3 ? ' …' : ''}`,
-        )
-      }
-    } finally {
-      setPlatBulkBusy(false)
-      setPlatBulkProgress(null)
-      try {
-        const j = await onJobRefresh()
-        const rs = j.result?.cve_rows
-        if (rs && Array.isArray(rs)) setRows(rs)
-      } catch {
-        /* local row state already updated */
-      }
-    }
-  }
-
-  async function createAllMissingPlatBugs() {
-    const slots = [...missingBugSlots]
-    if (!issue.key || slots.length === 0) return
-    setPlatBulkBusy(true)
-    setPlatBulkErr(null)
-    setPlatBulkProgress({ done: 0, total: slots.length })
-    const orgRefs = platOrgRefsFromIssue(issue)
-    let acc = rows
-    const failures: string[] = []
-    try {
-      for (let i = 0; i < slots.length; i++) {
-        const slot = slots[i]
-        const r = acc.find((x) => x.cve_id === slot.cve_id)
-        if (!r) continue
-        const ver = (r.affected_version ?? '').trim()
-        try {
-          const out = await apiCreatePlatBug({
-            cve_id: r.cve_id,
-            image_basename: slot.image_basename,
-            package_name: platPackageNameForRow(r),
-            package_version: ver,
-            severity: r.severity,
-            organizations: orgRefs,
-            source_issue_key: issue.key,
-            image_display: platDisplayLabelForImage(r, slot.image_basename),
-            resource_label:
-              (r.affected_resource ?? '').trim() ||
-              platPackageNameForRow(r),
-            vendor_fix_version: (r.fixed_version ?? '').trim() || null,
-            sla_due_date: r.sla_due_date ?? null,
-            run_id: job.run_id,
-          })
-          acc = mergePlatBugCreateIntoRows(acc, slot.cve_id, slot.image_basename, out)
           setRows(acc)
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
@@ -3333,10 +3075,8 @@ function ResultsPanel({
                 disabled={loading || platBulkBusy || syncingPlat}
                 onReprocess={() => { void onReprocessTicket() }}
                 onCreateAllCve={() => { void createAllMissingPlatCves() }}
-                onCreateAllBug={() => { void createAllMissingPlatBugs() }}
                 onSync={() => { void runPlatSync() }}
                 missingCveCount={missingCveSlots.length}
-                missingBugCount={missingBugSlots.length}
               />
               {platBulkBusy && platBulkProgress && (
                 <span className="muted small">
@@ -3384,7 +3124,6 @@ function ResultsPanel({
           runId={job.run_id}
           platOrganizationRefs={platOrgRefsFromIssue(issue)}
           onPlatCreated={onPlatCreated}
-          onPlatBugCreated={onPlatBugCreated}
           onRowUpdated={onRowUpdated}
           hideBuiltInToolbar={findingsReady}
           sourceRowCount={rows.length}

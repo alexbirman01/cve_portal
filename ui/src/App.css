@@ -470,10 +470,8 @@ a.btn {
 
 /* Laptop-friendly column slice — slightly tighter padding below on td/th */
 .cveColCve { width: 10%; }
-/* Split PLAT: image | bug tickets | CVE tickets (was single 32% col) */
 .cveColPlatImg { width: 13%; }
-.cveColPlatBug { width: 9.5%; }
-.cveColPlatCve { width: 9.5%; }
+.cveColPlatCve { width: 13%; }
 .cveColPlatFix { width: 9.5%; }
 .cveColPlatTag { width: 8%; }
 .cveColSev { width: 6%; }
@@ -882,15 +880,6 @@ a.btn {
   background: rgba(239, 68, 68, 0.24) !important;
 }
 
-.platTicketCreate.platTicketCreateBug {
-  color: rgba(147, 197, 253, 0.98) !important;
-  background: rgba(59, 130, 246, 0.14) !important;
-  border-color: rgba(96, 165, 250, 0.55) !important;
-}
-.platTicketCreate.platTicketCreateBug:hover:not(:disabled) {
-  background: rgba(59, 130, 246, 0.24) !important;
-}
-
 /* CVE create: explicit typography — must match .platTicketPill (buttons default to larger inherited font) */
 button.platCreatePill {
   margin: 0;
@@ -912,10 +901,6 @@ button.platCreatePill:disabled {
 
 button.platCreatePill:disabled:hover {
   background: rgba(239, 68, 68, 0.14) !important;
-}
-
-button.platCreateBugPill:disabled:hover {
-  background: rgba(59, 130, 246, 0.14) !important;
 }
 
 .fixedVer { color: #4ade80; }

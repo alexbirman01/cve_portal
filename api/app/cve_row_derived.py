@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from api.app.package_name import canonical_single_package_name
+
 
 def _image_path_basename(image_path: str) -> str:
     s = image_path.replace("plainid/", "").replace("PLAINID/", "")
@@ -81,27 +83,27 @@ def plat_jira_package_name_for_row(row: dict[str, Any], image_basename: str | No
 
     if image_basename:
         entry = package_entry_for_image(row, image_basename)
-        apn = (entry.get("aqua_package_name") or "").strip()
+        apn = canonical_single_package_name(entry.get("aqua_package_name"))
         if entry.get("aqua_pkg_found") and apn:
             return apn
         if is_go:
             return GO_AQUA_RESOURCE
-        res = (entry.get("affected_resource") or "").strip()
+        res = canonical_single_package_name(entry.get("affected_resource"))
         if res:
             return res
 
-    apn = (row.get("aqua_package_name") or "").strip()
+    apn = canonical_single_package_name(row.get("aqua_package_name"))
     if row.get("aqua_pkg_found") and apn:
         return apn
     if is_go:
         return GO_AQUA_RESOURCE
 
-    res = (row.get("affected_resource") or "").strip()
+    res = canonical_single_package_name(row.get("affected_resource"))
     if res:
         return res
     for p in nvd_pkgs:
         if isinstance(p, dict):
-            product = (p.get("product") or "").strip()
+            product = canonical_single_package_name(p.get("product"))
             if product:
                 return product
     return str(row.get("cve_id") or "").strip()
@@ -225,7 +227,7 @@ def plat_missing_cve_create_slots_for_row(row: dict[str, Any]) -> list[tuple[str
 
 
 def plat_ticket_keys_for_row(row: dict[str, Any]) -> list[str]:
-    """All PLAT-style issue keys linked to this CVE row (sec, bug, per-image)."""
+    """All Security Vulnerability PLAT keys linked to this CVE row (explicit, per-image)."""
     seen: set[str] = set()
     out: list[str] = []
 

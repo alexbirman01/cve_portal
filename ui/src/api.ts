@@ -507,6 +507,7 @@ export function formatStatus(status?: string | null): string {
     downloading_attachments: 'Downloading attachments',
     parsing_attachments: 'Parsing attachments',
     enriching_nvd: 'Validating/enriching via NVD',
+    enriching_alpine: 'Enriching via Alpine secdb (OSV)',
     enriching_rh: 'Enriching via Red Hat Security',
     enriching_cve5: 'Enriching via MITRE CVE 5.0',
     looking_up_plat_tickets: 'Looking up PLAT tickets',
@@ -545,6 +546,7 @@ export function statusSteps(
     { id: 'downloading_attachments', label: 'Download attachments' },
     { id: 'parsing_attachments', label: 'Parse attachments' },
     { id: 'enriching_nvd', label: 'NVD enrichment' },
+    { id: 'enriching_alpine', label: 'Alpine package lookup' },
     { id: 'looking_up_plat_tickets', label: 'Look up PLAT tickets' },
     { id: 'enriching_aqua', label: aquaOn ? 'Aqua package check' : 'Aqua package check (off)' },
     { id: 'building_results', label: 'Build results' },
@@ -673,34 +675,6 @@ export async function apiCreatePlat(body: {
   return JSON.parse(text) as CreatePlatResponse
 }
 
-export async function apiCreatePlatBug(body: {
-  cve_id: string
-  image_basename: string
-  package_name: string
-  package_version: string
-  severity?: string | null
-  organizations?: OrgRef[] | null
-  source_issue_key?: string | null
-  /** Label shown in UI / Jira description Image line (e.g. pip-operator:tag) */
-  image_display?: string | null
-  /** Resource column — component/package name */
-  resource_label?: string | null
-  vendor_fix_version?: string | null
-  /** SLA due date YYYY-MM-DD; sent as Jira `duedate` on create */
-  sla_due_date?: string | null
-  /** Run whose result_json will be updated with the new key so it survives remount */
-  run_id?: string | null
-}): Promise<CreatePlatResponse> {
-  const res = await fetch('/api/plat/bug', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(text || res.statusText)
-  return JSON.parse(text) as CreatePlatResponse
-}
-
 /** Per-image package entry — reads new package_by_image first, falls back to aqua_pkg_by_image. */
 export function packageEntryForImage(
   r: CveRow,
@@ -786,10 +760,10 @@ export function packagePickOptions(
     candidates.find((c) => c.source === source)?.name?.trim() ?? ''
   const customer =
     nameFor('customer') ||
-    (entry?.affected_resource ?? row.affected_resource ?? '').trim()
+    canonicalSinglePackageName(entry?.affected_resource ?? row.affected_resource)
   const nvd =
     nameFor('nvd') ||
-    (row.all_packages?.map((p) => (p.product ?? '').trim()).find(Boolean) ?? '')
+    (row.all_packages?.map((p) => canonicalSinglePackageName(p.product)).find(Boolean) ?? '')
 
   if (isNvdGoRow(row)) {
     return [
@@ -812,20 +786,34 @@ export function packagePickOptions(
   ]
 }
 
+/** First token when scanners join packages (libssl3,libcrypto3) — mirrors api/app/package_name.py */
+export function canonicalSinglePackageName(name: string | null | undefined): string {
+  const s = (name ?? '').trim()
+  if (!s) return ''
+  const parts = s.split(/[,;]+/).map((p) => p.trim()).filter(Boolean)
+  return parts[0] ?? ''
+}
+
 /** Best-effort package / component name for PLAT “Package Name” field. */
 export function platPackageNameForRow(r: CveRow, imageBasename?: string): string {
   if (imageBasename) {
     const entry = packageEntryForImage(r, imageBasename)
-    if (entry?.aqua_pkg_found && entry.aqua_package_name) return entry.aqua_package_name.trim()
+    if (entry?.aqua_pkg_found && entry.aqua_package_name) {
+      return canonicalSinglePackageName(entry.aqua_package_name)
+    }
     if (isNvdGoRow(r)) return 'stdlib'
-    if (entry?.affected_resource) return entry.affected_resource.trim()
+    if (entry?.affected_resource) return canonicalSinglePackageName(entry.affected_resource)
   }
-  if (r.aqua_pkg_found && r.aqua_package_name?.trim()) return r.aqua_package_name.trim()
+  if (r.aqua_pkg_found && r.aqua_package_name?.trim()) {
+    return canonicalSinglePackageName(r.aqua_package_name)
+  }
   if (isNvdGoRow(r)) return 'stdlib'
-  if (r.aqua_package_name?.trim()) return r.aqua_package_name.trim()
-  const res = (r.affected_resource ?? '').trim()
+  if (r.aqua_package_name?.trim()) return canonicalSinglePackageName(r.aqua_package_name)
+  const res = canonicalSinglePackageName(r.affected_resource)
   if (res) return res
-  const product = r.all_packages?.map((p) => (p.product ?? '').trim()).find(Boolean)
+  const product = r.all_packages
+    ?.map((p) => canonicalSinglePackageName(p.product))
+    .find(Boolean)
   if (product) return product
   return r.cve_id
 }
@@ -1134,43 +1122,6 @@ function _uniqueImageTokens(raw: string[]): string[] {
   return out
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-/** Match token as a whole segment (aligned with worker `_token_in_summary`). */
-export function tokenInSummaryForPlatBug(token: string, summaryLower: string): boolean {
-  if (token.length <= 2) return false
-  const re = new RegExp(`(?<![a-zA-Z0-9\\-_])${escapeRegExp(token)}(?![a-zA-Z0-9\\-_])`, 'i')
-  return re.test(summaryLower)
-}
-
-export function bugSummaryMatchesTokens(
-  summary: string | null | undefined,
-  tokens: string[],
-): boolean {
-  const summaryLower = (summary ?? '').toLowerCase()
-  if (!tokens.length) return false
-  return tokens.some((tok) => tokenInSummaryForPlatBug(tok, summaryLower))
-}
-
-export function bugSummaryMatchesImageBasename(
-  summary: string | null | undefined,
-  imageBasename: string,
-): boolean {
-  return bugSummaryMatchesTokens(summary, imageTokensForBasename(imageBasename))
-}
-
-/** Bug PLAT tickets whose summary matches this image (worker-style tokens on full path when known). */
-export function platBugTicketsForImage(r: CveRow, imageBasename: string): PlatTicket[] {
-  const path = imagePathForBasename(r, imageBasename)
-  const tokens = path ? imageTokensForImagePath(path) : imageTokensForBasename(imageBasename)
-  const bugs = (r.plat_tickets ?? []).filter((t) => t.issue_type === 'Bug')
-  const matched = bugs.filter((t) => bugSummaryMatchesTokens(t.summary, tokens))
-  matched.sort((a, b) => a.key.localeCompare(b.key))
-  return matched
-}
-
 /** Sec-Vuln keys not assigned to any image in `plat_security_for_images` (multi-image rows). */
 export function platOrphanSecKeys(r: CveRow): string[] {
   const allSec = platSecurityKeys(r)
@@ -1209,37 +1160,6 @@ export function platSecKeysForImage(r: CveRow, imageBasename: string): string[] 
 export function imageBasenameForPlat(r: CveRow): string | null {
   const all = imageBasenamesForCveRow(r)
   return all[0] ?? null
-}
-
-/** Apply a PLAT Bug create (new or already-existing) onto the CVE table row list. */
-export function mergePlatBugCreateIntoRows(
-  rows: CveRow[],
-  cveId: string,
-  imageBasename: string,
-  out: CreatePlatResponse,
-): CveRow[] {
-  const fallbackSummary = `[${cveId}] - [${imageBasename}]`
-  const summaryTemplate =
-    !out.exists && out.summary != null && out.summary.trim() !== ''
-      ? out.summary
-      : fallbackSummary
-  return rows.map((r) => {
-    if (r.cve_id !== cveId) return r
-    const mergeKeys = out.exists ? out.keys : [out.key]
-    const byKey = new Map((r.plat_tickets ?? []).map((t) => [t.key, t]))
-    for (const k of mergeKeys) {
-      const prev = byKey.get(k)
-      const summary =
-        prev?.issue_type === 'Bug' && prev.summary?.trim()
-          ? prev.summary
-          : summaryTemplate
-      byKey.set(k, { key: k, issue_type: 'Bug', summary })
-    }
-    return {
-      ...r,
-      plat_tickets: [...byKey.values()],
-    }
-  })
 }
 
 /** Apply a PLAT Security create (new or already-existing) onto the CVE table row list. */
@@ -1338,18 +1258,6 @@ export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] 
   for (const r of rows) {
     for (const imageBasename of imageBasenamesForCveRow(r)) {
       if (platSecKeysForImage(r, imageBasename).length === 0) {
-        out.push({ cve_id: r.cve_id, image_basename: imageBasename })
-      }
-    }
-  }
-  return out
-}
-
-export function platMissingBugCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
-  const out: PlatMissingCveSlot[] = []
-  for (const r of rows) {
-    for (const imageBasename of imageBasenamesForCveRow(r)) {
-      if (platBugTicketsForImage(r, imageBasename).length === 0) {
         out.push({ cve_id: r.cve_id, image_basename: imageBasename })
       }
     }
@@ -1533,16 +1441,17 @@ export function packageDisplayForImage(r: CveRow, imageBasename: string): string
         : r.aqua_pkg_found === true
     if (found) {
       return (
-        entry?.aqua_package_name ||
-        entry?.affected_resource ||
-        r.affected_resource ||
-        ''
-      ).trim() || '—'
+        canonicalSinglePackageName(
+          entry?.aqua_package_name ||
+            entry?.affected_resource ||
+            r.affected_resource,
+        ) || '—'
+      )
     }
     return 'Package not found'
   }
 
-  const name = (entry?.affected_resource ?? r.affected_resource ?? '').trim()
+  const name = canonicalSinglePackageName(entry?.affected_resource ?? r.affected_resource)
   return name || '—'
 }
 
@@ -1553,12 +1462,11 @@ export function isPackageNotFoundForImage(r: CveRow, imageBasename: string): boo
 /** Package name for customer comment (NVD/Aqua name; never the "Package not found" label). */
 export function packageNameForComment(r: CveRow, imageBasename: string): string {
   const entry = packageEntryForImage(r, imageBasename)
-  const name = (
+  const name = canonicalSinglePackageName(
     entry?.aqua_package_name ||
-    entry?.affected_resource ||
-    r.affected_resource ||
-    ''
-  ).trim()
+      entry?.affected_resource ||
+      r.affected_resource,
+  )
   return name || '—'
 }
 
