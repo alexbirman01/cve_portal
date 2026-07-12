@@ -22,7 +22,9 @@ from api.app.cve_row_derived import (
     plat_keys_aggregate_from_rows,
 )
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
-from api.app.jira_client import JiraClient
+from api.app.jira_client import JiraClient, PlatSearchError
+from api.app.plat_audit import log_plat_audit
+from api.app.plat_linking import filter_plat_hits_for_image
 from api.app.db import engine, db_session
 from api.app.allowed_images import normalize_image_basename
 from api.app.aqua_catalog import (
@@ -283,6 +285,93 @@ def _aqua_blocks_plat_create(run_id: str | None, cve_id: str, image_basename: st
     return None
 
 
+def _plat_create_audit_base(
+    *,
+    cve_id: str,
+    image: str,
+    source_issue_key: str | None,
+    run_id: str | None,
+    check: str,
+    search_results: list[dict[str, str]],
+) -> dict[str, object]:
+    hits = filter_plat_hits_for_image(search_results, image)
+    return {
+        "check": check,
+        "cve_id": cve_id,
+        "image": image,
+        "source_issue": (source_issue_key or "").strip(),
+        "run_id": (run_id or "").strip(),
+        "search_hits": hits,
+        "search_count": len(search_results),
+    }
+
+
+def _plat_create_resolve_search(
+    search_results: list[dict[str, str]],
+    *,
+    cve_id: str,
+    image: str,
+    source_issue_key: str | None,
+    run_id: str | None,
+    check: str,
+    initial_image_hits: list[str] | None = None,
+) -> list[str] | None:
+    """
+    Evaluate PLAT search for create/reuse.
+    Returns reuse keys, None to proceed with create, or raises HTTPException.
+    """
+    audit = _plat_create_audit_base(
+        cve_id=cve_id,
+        image=image,
+        source_issue_key=source_issue_key,
+        run_id=run_id,
+        check=check,
+        search_results=search_results,
+    )
+    hits = audit["search_hits"]
+    assert isinstance(hits, list)
+
+    if check == "pre_create" and hits and initial_image_hits is not None and not initial_image_hits:
+        audit["recovered_on_pre_create"] = True
+
+    if len(hits) > 1:
+        audit["decision"] = "blocked_multiple_matches"
+        log_plat_audit("plat_create_audit", **audit)
+        detail = f"Multiple PLAT tickets already exist for {cve_id} / {image}: {', '.join(hits)}"
+        raise HTTPException(status_code=409, detail=detail)
+
+    if len(hits) == 1:
+        audit["decision"] = "reused_existing"
+        log_plat_audit("plat_create_audit", **audit)
+        return hits
+
+    audit["decision"] = "no_match"
+    log_plat_audit("plat_create_audit", **audit)
+    return None
+
+
+def _plat_create_finish_reuse(
+    jira: JiraClient,
+    *,
+    existing: list[str],
+    payload: CreatePlatIn,
+    image: str,
+) -> dict:
+    warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
+    for k in existing:
+        _persist_plat_key_into_run(
+            payload.run_id,
+            payload.cve_id.strip(),
+            k,
+            "Security Vulnerability",
+            image_basename=image,
+        )
+    out: dict = {"exists": True, "keys": existing}
+    if warnings:
+        out["link_warnings"] = warnings
+    return out
+
+
 @app.post("/api/plat")
 def create_plat_ticket(payload: CreatePlatIn):
     block = _aqua_blocks_plat_create(
@@ -293,30 +382,73 @@ def create_plat_ticket(payload: CreatePlatIn):
     if block:
         raise HTTPException(status_code=400, detail=block)
     jira = JiraClient()
+    cve_id = payload.cve_id.strip()
+    image = payload.image_basename.strip()
     try:
-        existing = jira.find_plat_security_for_image(
-            payload.cve_id.strip(),
-            payload.image_basename.strip(),
+        try:
+            initial_results = jira.search_plat_security_for_cve(cve_id)
+        except PlatSearchError as exc:
+            log_plat_audit(
+                "plat_create_audit",
+                check="initial",
+                cve_id=cve_id,
+                image=image,
+                source_issue=(payload.source_issue_key or "").strip(),
+                run_id=(payload.run_id or "").strip(),
+                decision="search_failed",
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot verify existing PLAT tickets in Jira: {exc}",
+            ) from exc
+
+        initial_image_hits = filter_plat_hits_for_image(initial_results, image)
+        reuse = _plat_create_resolve_search(
+            initial_results,
+            cve_id=cve_id,
+            image=image,
+            source_issue_key=payload.source_issue_key,
+            run_id=payload.run_id,
+            check="initial",
         )
-        if existing:
-            warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
-            out: dict = {"exists": True, "keys": existing}
-            if warnings:
-                out["link_warnings"] = warnings
-            img_bn = payload.image_basename.strip()
-            for k in existing:
-                _persist_plat_key_into_run(
-                    payload.run_id,
-                    payload.cve_id.strip(),
-                    k,
-                    "Security Vulnerability",
-                    image_basename=img_bn,
-                )
-            return out
+        if reuse:
+            return _plat_create_finish_reuse(jira, existing=reuse, payload=payload, image=image)
+
+        try:
+            pre_results = jira.search_plat_security_for_cve(cve_id)
+        except PlatSearchError as exc:
+            log_plat_audit(
+                "plat_create_audit",
+                check="pre_create",
+                cve_id=cve_id,
+                image=image,
+                source_issue=(payload.source_issue_key or "").strip(),
+                run_id=(payload.run_id or "").strip(),
+                decision="search_failed",
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot verify existing PLAT tickets in Jira before create: {exc}",
+            ) from exc
+
+        reuse = _plat_create_resolve_search(
+            pre_results,
+            cve_id=cve_id,
+            image=image,
+            source_issue_key=payload.source_issue_key,
+            run_id=payload.run_id,
+            check="pre_create",
+            initial_image_hits=initial_image_hits,
+        )
+        if reuse:
+            return _plat_create_finish_reuse(jira, existing=reuse, payload=payload, image=image)
+
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_security_vulnerability(
-            payload.cve_id.strip(),
-            payload.image_basename.strip(),
+            cve_id,
+            image,
             payload.package_name.strip(),
             payload.package_version.strip(),
             priority_name=_jira_priority_name(payload.severity),
@@ -326,13 +458,23 @@ def create_plat_ticket(payload: CreatePlatIn):
         )
         if not key:
             raise HTTPException(status_code=502, detail="Jira did not return issue key")
+        log_plat_audit(
+            "plat_create_audit",
+            check="pre_create",
+            cve_id=cve_id,
+            image=image,
+            source_issue=(payload.source_issue_key or "").strip(),
+            run_id=(payload.run_id or "").strip(),
+            decision="created_new",
+            created_key=key,
+        )
         warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
         _persist_plat_key_into_run(
             payload.run_id,
-            payload.cve_id.strip(),
+            cve_id,
             key,
             "Security Vulnerability",
-            image_basename=payload.image_basename.strip(),
+            image_basename=image,
         )
         out = {"exists": False, "key": key}
         if warnings:
@@ -341,6 +483,8 @@ def create_plat_ticket(payload: CreatePlatIn):
     except httpx.HTTPStatusError as e:
         detail = e.response.text if e.response is not None else str(e)
         raise HTTPException(status_code=400, detail=detail) from e
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     finally:

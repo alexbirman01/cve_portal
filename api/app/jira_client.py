@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +14,44 @@ import httpx
 from api.app.config import settings
 from api.app.plat_organization_labels import plat_organization_name_allowed
 from api.app.sla_commitment import parse_jira_created
+
+_PLAT_SEARCH_MAX_ATTEMPTS = 3
+_PLAT_SEARCH_INITIAL_BACKOFF_S = 1.0
+_PLAT_SEARCH_RETRY_STATUS = frozenset({429, 503, 504})
+
+
+class PlatSearchError(Exception):
+    """Jira PLAT search failed after retries (fail closed — not equivalent to zero hits)."""
+
+    def __init__(
+        self,
+        cve_id: str,
+        *,
+        jql: str | None = None,
+        retries: int = 0,
+        cause: BaseException | None = None,
+    ) -> None:
+        self.cve_id = cve_id
+        self.jql = jql
+        self.retries = retries
+        self.cause = cause
+        msg = f"PLAT Jira search failed for {cve_id}"
+        if retries:
+            msg += f" after {retries} attempt(s)"
+        super().__init__(msg)
+
+
+def _retry_after_seconds(response: httpx.Response, default: float) -> float:
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return default
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        return default
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -855,13 +895,84 @@ class JiraClient:
             created=created_dt,
         )
 
+    def _post_jql_search_with_retry(
+        self,
+        *,
+        cve_id: str,
+        jql: str,
+        fields: list[str],
+        max_results: int = 100,
+    ) -> list[dict[str, Any]]:
+        url = f"{self._base}/rest/api/3/search/jql"
+        headers = {**self._headers, "Content-Type": "application/json"}
+        payload = {"jql": jql, "fields": fields, "maxResults": max_results}
+        backoff = _PLAT_SEARCH_INITIAL_BACKOFF_S
+        last_exc: BaseException | None = None
+
+        for attempt in range(1, _PLAT_SEARCH_MAX_ATTEMPTS + 1):
+            try:
+                r = self._client.post(url, json=payload, headers=headers)
+                if r.status_code in _PLAT_SEARCH_RETRY_STATUS and attempt < _PLAT_SEARCH_MAX_ATTEMPTS:
+                    wait = _retry_after_seconds(r, backoff)
+                    logger.warning(
+                        "jira_search_retry attempt=%s status=%s cve_id=%s wait=%.1fs",
+                        attempt,
+                        r.status_code,
+                        cve_id,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    backoff *= 2
+                    continue
+                r.raise_for_status()
+                return list(r.json().get("issues") or [])
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status = exc.response.status_code if exc.response is not None else None
+                if status in _PLAT_SEARCH_RETRY_STATUS and attempt < _PLAT_SEARCH_MAX_ATTEMPTS:
+                    wait = _retry_after_seconds(exc.response, backoff) if exc.response else backoff
+                    logger.warning(
+                        "jira_search_retry attempt=%s status=%s cve_id=%s wait=%.1fs",
+                        attempt,
+                        status,
+                        cve_id,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    backoff *= 2
+                    continue
+                raise PlatSearchError(cve_id, jql=jql, retries=attempt, cause=exc) from exc
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_exc = exc
+                if attempt < _PLAT_SEARCH_MAX_ATTEMPTS:
+                    logger.warning(
+                        "jira_search_retry attempt=%s error=%s cve_id=%s wait=%.1fs",
+                        attempt,
+                        type(exc).__name__,
+                        cve_id,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                raise PlatSearchError(cve_id, jql=jql, retries=attempt, cause=exc) from exc
+            except PlatSearchError:
+                raise
+            except Exception as exc:
+                raise PlatSearchError(cve_id, jql=jql, retries=attempt, cause=exc) from exc
+
+        raise PlatSearchError(
+            cve_id,
+            jql=jql,
+            retries=_PLAT_SEARCH_MAX_ATTEMPTS,
+            cause=last_exc,
+        )
+
     def search_plat_security_for_cve(self, cve_id: str) -> list[dict[str, str]]:
         """
         Sec-Vuln PLAT rows for this CVE. Each item: {"key", "image_basename"}.
         image_basename from correlation custom field (imagename_CVE) or summary [CVE] - [image].
         """
-        url = f"{self._base}/rest/api/3/search/jql"
-        headers = {**self._headers, "Content-Type": "application/json"}
         jql = (
             f'project = {settings.jira_plat_project_key} AND issuetype = "{settings.jira_plat_issuetype_name}" '
             f'AND cf[{settings.jira_plat_cve_cf_number}] = "{cve_id}"'
@@ -870,26 +981,18 @@ class JiraClient:
         fid = settings.jira_plat_cf_internal_id
         if fid:
             fields.append(fid)
-        try:
-            r = self._client.post(
-                url,
-                json={"jql": jql, "fields": fields, "maxResults": 100},
-                headers=headers,
-            )
-            r.raise_for_status()
-            out: list[dict[str, str]] = []
-            for issue in r.json().get("issues") or []:
-                key = issue.get("key", "")
-                f = issue.get("fields") or {}
-                img: str | None = None
-                if fid:
-                    img = _image_basename_from_correlation(_normalize_cf_value(f.get(fid)), cve_id)
-                if not img:
-                    img = _image_basename_from_summary(f.get("summary"), cve_id)
-                out.append({"key": key, "image_basename": (img or "").strip()})
-            return out
-        except Exception:
-            return []
+        issues = self._post_jql_search_with_retry(cve_id=cve_id, jql=jql, fields=fields)
+        out: list[dict[str, str]] = []
+        for issue in issues:
+            key = issue.get("key", "")
+            f = issue.get("fields") or {}
+            img: str | None = None
+            if fid:
+                img = _image_basename_from_correlation(_normalize_cf_value(f.get(fid)), cve_id)
+            if not img:
+                img = _image_basename_from_summary(f.get("summary"), cve_id)
+            out.append({"key": key, "image_basename": (img or "").strip()})
+        return out
 
     def search_plat_security_keys(self, cve_id: str) -> list[str]:
         """Keys of PLAT Security Vulnerability issues with this CVE (custom CVE field)."""
@@ -907,24 +1010,18 @@ class JiraClient:
 
     def search_plat_tickets(self, cve_id: str) -> list[PlatTicket]:
         """Return Security Vulnerability PLAT tickets for this CVE (by cf field)."""
-        url = f"{self._base}/rest/api/3/search/jql"
-        headers = {**self._headers, "Content-Type": "application/json"}
         proj = settings.jira_plat_project_key
         cfn = settings.jira_plat_cve_cf_number
         jql = f'project = {proj} AND issuetype = "{settings.jira_plat_issuetype_name}" AND cf[{cfn}] = "{cve_id}"'
-        try:
-            r = self._client.post(
-                url,
-                json={"jql": jql, "fields": ["key", "summary"], "maxResults": 100},
-                headers=headers,
-            )
-            r.raise_for_status()
-            return [
-                PlatTicket(key=issue["key"], issue_type="Security Vulnerability")
-                for issue in r.json().get("issues") or []
-            ]
-        except Exception:
-            return []
+        issues = self._post_jql_search_with_retry(
+            cve_id=cve_id,
+            jql=jql,
+            fields=["key", "summary"],
+        )
+        return [
+            PlatTicket(key=issue["key"], issue_type="Security Vulnerability")
+            for issue in issues
+        ]
 
     def _organization_ids_for_plat_create(
         self,

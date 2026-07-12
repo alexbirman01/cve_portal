@@ -12,8 +12,9 @@ from sqlalchemy import func
 
 from api.app.config import settings
 from api.app.db import db_session
-from api.app.jira_client import JiraClient, PlatTicket
-from api.app.plat_linking import plat_keys_to_link_for_row, plat_tickets_for_row
+from api.app.jira_client import JiraClient, PlatSearchError
+from api.app.plat_audit import log_plat_audit
+from api.app.plat_linking import plat_keys_to_link_for_row, plat_security_by_image_from_search, plat_tickets_for_row
 from api.app.allowed_images import load_alias_map, normalize_image_basename
 from api.app.models import CveCache, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
@@ -437,24 +438,38 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
         _set_run_status(run_id, "looking_up_plat_tickets")
         cve_to_plat: dict[str, list[dict]] = {}
         cve_to_plat_security_by_image: dict[str, dict[str, list[str]]] = {}
+        issue_key = (issue.key or "").strip()
         try:
             for cve_id in cve_ids:
-                try:
-                    tickets: list[PlatTicket] = jira.search_plat_tickets(cve_id)
-                    cve_to_plat[cve_id] = [
-                        {"key": t.key, "issue_type": t.issue_type, "summary": t.summary}
-                        for t in tickets
-                    ]
-                    by_img: dict[str, list[str]] = {}
-                    for item in jira.search_plat_security_for_cve(cve_id):
-                        img = (item.get("image_basename") or "").strip()
-                        if not img:
-                            continue
-                        by_img.setdefault(img, []).append(item["key"])
-                    cve_to_plat_security_by_image[cve_id] = by_img
-                except Exception:
-                    cve_to_plat[cve_id] = []
-                    cve_to_plat_security_by_image[cve_id] = {}
+                search_results = jira.search_plat_security_for_cve(cve_id)
+                all_keys = [item["key"] for item in search_results if item.get("key")]
+                by_img, unmapped = plat_security_by_image_from_search(search_results)
+                cve_to_plat[cve_id] = [
+                    {"key": k, "issue_type": "Security Vulnerability", "summary": None}
+                    for k in all_keys
+                ]
+                cve_to_plat_security_by_image[cve_id] = by_img
+                log_plat_audit(
+                    "plat_lookup_audit",
+                    issue_key=issue_key,
+                    run_id=run_id,
+                    cve_id=cve_id,
+                    search_count=len(search_results),
+                    hits=all_keys,
+                    by_image=by_img,
+                    unmapped_keys=unmapped,
+                    decision="ok",
+                )
+        except PlatSearchError as exc:
+            log_plat_audit(
+                "plat_lookup_audit",
+                issue_key=issue_key,
+                run_id=run_id,
+                cve_id=getattr(exc, "cve_id", ""),
+                decision="search_failed",
+                error=str(exc),
+            )
+            raise
         finally:
             jira.close()
 

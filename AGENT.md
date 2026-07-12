@@ -7,6 +7,19 @@
 
 ---
 
+## PLAT lookup/create audit (stdout)
+
+Structured JSON lines on portal/worker pod stdout (not in UI):
+
+```bash
+kubectl logs -n cve deploy/cve-cve-portal-portal -f | rg plat_create_audit
+kubectl logs -n cve deploy/cve-cve-portal-worker -f | rg plat_lookup_audit
+```
+
+Create path: initial Jira search → pre-create search (if no match) → create only if both empty. Search failures fail closed (503 on create, failed run on process). Multiple existing PLAT keys for same CVE+image → 409 block.
+
+---
+
 ## Current status (shipped in 1.2622.6)
 
 ### PLAT sync & UX
