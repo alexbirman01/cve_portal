@@ -504,75 +504,28 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     return p
             return pkgs[0]
 
-        # Build PlainID image filter from configurable token list.
-        _plainid_tokens = tuple(
-            t.strip().lower()
-            for t in settings.plainid_image_patterns.split(",")
-            if t.strip()
-        )
-        # Always accept images whose path starts with "plainid/".
-        _plainid_tokens = _plainid_tokens + ("plainid",)
-        # Any canonical name in the Allowed Images catalog is a known PlainID image
-        # (covers resolved Aqua aliases like "secrets-mgmt" that don't match token patterns).
-        _allowed_canonical: set[str] = set(alias_map.values())
-
-        def _is_plainid_image(image_name: str) -> bool:
-            lower = image_name.lower()
-            return lower in _allowed_canonical or any(tok in lower for tok in _plainid_tokens)
-
-        # Build cve_to_images from CveImageFacts (structured per-row links) first.
-        # This avoids fragile cross-attachment correlation.
-        cve_to_images: dict[str, list[dict]] = {c: [] for c in cve_ids}
-        seen_img_keys: set[tuple[str, str, str]] = set()  # (cve_id, image, tag)
-
-        # 1. Structured facts from Excel (direct CVE ↔ image mapping per row).
-        for p in parsed_attachments:
-            for fact in p.get("cve_image_facts", []):
-                if not _is_plainid_image(fact["image"]):
-                    continue
-                key = (fact["cve_id"], fact["image"], fact["tag"])
-                if fact["cve_id"] in cve_to_images and key not in seen_img_keys:
-                    seen_img_keys.add(key)
-                    cve_to_images[fact["cve_id"]].append(
-                        {"image": fact["image"], "tag": fact["tag"], "source": fact["source"]}
-                    )
-
         def _resolve_image_name(raw: str) -> str:
             """Normalize raw image path → canonical name via alias map, or best-effort basename."""
             basename = normalize_image_basename(raw)
             return alias_map.get(basename, basename)
 
-        # 2. Legacy: free-text images from description apply to all CVEs in description.
-        desc_cve_ids = {c.cve_id for c in desc_cves}
-        for i in desc_images:
-            if not _is_plainid_image(i.image):
-                continue
-            canonical = _resolve_image_name(i.image)
-            for cve_id in desc_cve_ids:
-                if cve_id not in cve_to_images:
-                    continue
-                key = (cve_id, canonical, i.tag)
-                if key not in seen_img_keys:
-                    seen_img_keys.add(key)
-                    cve_to_images[cve_id].append({"image": canonical, "tag": i.tag, "source": i.source})
+        # CVE↔image source of truth: structured facts from Excel/JSON attachments only.
+        # Description and PDF free-text are excluded from PLAT image slots — substring
+        # token matching (plainid_image_patterns) was unreliable and let bare words like
+        # "authorizer" produce PLAT tickets with bad image names.
+        # Catalog enforcement (Allowed Images) is applied at PLAT create time (POST /api/plat).
+        cve_to_images: dict[str, list[dict]] = {c: [] for c in cve_ids}
+        seen_img_keys: set[tuple[str, str, str]] = set()  # (cve_id, image, tag)
 
-        # 3. Legacy: free-text images from attachments (when no structured facts were extracted).
-        #    Correlate by CVEs found in the same attachment.
         for p in parsed_attachments:
-            if p.get("cve_image_facts"):
-                continue  # structured extraction succeeded — skip legacy correlation
-            att_cves = {c["cve_id"] for c in p["cves"]}
-            for img_dict in p.get("images", []):
-                if not _is_plainid_image(img_dict["image"]):
-                    continue
-                canonical = _resolve_image_name(img_dict["image"])
-                for cve_id in att_cves:
-                    if cve_id not in cve_to_images:
-                        continue
-                    key = (cve_id, canonical, img_dict["tag"])
-                    if key not in seen_img_keys:
-                        seen_img_keys.add(key)
-                        cve_to_images[cve_id].append({**img_dict, "image": canonical})
+            for fact in p.get("cve_image_facts", []):
+                canonical = _resolve_image_name(fact["image"])
+                key = (fact["cve_id"], canonical, fact["tag"])
+                if fact["cve_id"] in cve_to_images and key not in seen_img_keys:
+                    seen_img_keys.add(key)
+                    cve_to_images[fact["cve_id"]].append(
+                        {"image": canonical, "tag": fact["tag"], "source": fact["source"]}
+                    )
 
         cve_rows = []
         for cve_id in cve_ids:

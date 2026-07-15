@@ -45,6 +45,12 @@ Create path: initial Jira search → pre-create search (if no match) → create 
 - NVD is source of truth for primary package; attachment name stored as `attachment_product` hint only (not `attachment_primary` override in Aqua path)
 - `attachment_primary` still used when building `cve_rows` primary resource (see open tasks)
 
+### Image source of truth (strict gating — shipped)
+- **CVE↔image pairs come only from Excel/JSON structured attachment facts** (`cve_image_facts`). Description text and PDF free-text are no longer used for PLAT image slots.
+- **PLAT create is hard-blocked** unless `image_basename` resolves (via alias map) to a name in the `allowed_images` catalog. `POST /api/plat` returns HTTP 400 with a clear message for unknown images.
+- **UI gates Create CVE / Create All** on `isAllowedImageBasename` — unknown images show the "Unknown image" badge but no create button.
+- `plainid_image_patterns` config is no longer used for PLAT inclusion (still in config but deprecated for this purpose).
+
 ---
 
 ## Known issue (not fixed)

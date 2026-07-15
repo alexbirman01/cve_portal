@@ -1252,13 +1252,15 @@ export async function apiPatchCveRow(
 
 export type PlatMissingCveSlot = { cve_id: string; image_basename: string }
 
-/** Row/image pairs that show “Create CVE” (version present, image known, no Sec-Vuln PLAT yet). */
-export function platMissingCveCreateSlots(rows: CveRow[]): PlatMissingCveSlot[] {
+/** Row/image pairs that show “Create CVE” (image in Allowed Images catalog, no Sec-Vuln PLAT yet). */
+export function platMissingCveCreateSlots(rows: CveRow[], allowedImageNames?: Set<string>): PlatMissingCveSlot[] {
   const out: PlatMissingCveSlot[] = []
   for (const r of rows) {
     for (const imageBasename of imageBasenamesForCveRow(r)) {
       if (platSecKeysForImage(r, imageBasename).length === 0) {
-        out.push({ cve_id: r.cve_id, image_basename: imageBasename })
+        if (!allowedImageNames || allowedImageNames.size === 0 || isAllowedImageBasename(imageBasename, allowedImageNames)) {
+          out.push({ cve_id: r.cve_id, image_basename: imageBasename })
+        }
       }
     }
   }

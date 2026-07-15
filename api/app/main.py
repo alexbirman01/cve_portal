@@ -26,7 +26,7 @@ from api.app.jira_client import JiraClient, PlatSearchError
 from api.app.plat_audit import log_plat_audit
 from api.app.plat_linking import filter_plat_hits_for_image
 from api.app.db import engine, db_session
-from api.app.allowed_images import normalize_image_basename
+from api.app.allowed_images import load_alias_map, load_allowed_names, normalize_image_basename
 from api.app.aqua_catalog import (
     AquaPackagesRefreshIn,
     AquaPackagesSettingsIn,
@@ -357,7 +357,19 @@ def _plat_create_finish_reuse(
     payload: CreatePlatIn,
     image: str,
 ) -> dict:
-    warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
+    org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
+    warnings: list[str] = []
+    for k in existing:
+        try:
+            jira.merge_organization_on_issue(
+                k,
+                org_refs or None,
+                payload.source_issue_key,
+            )
+        except Exception as exc:
+            warnings.append(f"org merge on {k}: {exc}")
+    link_warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
+    warnings.extend(link_warnings)
     for k in existing:
         _persist_plat_key_into_run(
             payload.run_id,
@@ -384,6 +396,19 @@ def create_plat_ticket(payload: CreatePlatIn):
     jira = JiraClient()
     cve_id = payload.cve_id.strip()
     image = payload.image_basename.strip()
+
+    # Resolve to canonical name and enforce Allowed Images catalog.
+    with db_session() as db:
+        _alias_map = load_alias_map(db)
+        _allowed_names = load_allowed_names(db)
+    _basename = normalize_image_basename(image)
+    image = _alias_map.get(_basename, _basename)
+    if image not in _allowed_names:
+        raise HTTPException(
+            status_code=400,
+            detail=f"image '{payload.image_basename.strip()}' is not in the Allowed Images catalog",
+        )
+
     try:
         try:
             initial_results = jira.search_plat_security_for_cve(cve_id)

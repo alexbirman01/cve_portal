@@ -889,7 +889,8 @@ function CveTable({
                               onPlatCreated &&
                               verOk &&
                               secKeys.length === 0 &&
-                              aquaAllowsPlatCreate(r, imgBasename)
+                              aquaAllowsPlatCreate(r, imgBasename) &&
+                              (!allowedImageNames || allowedImageNames.size === 0 || isAllowedImageBasename(imgBasename, allowedImageNames))
                             const cveEmpty = !secKeys.length && !canCreateThis
                             return (
                               <div key={imgBasename} className="platColStrip">
@@ -2831,8 +2832,8 @@ function ResultsPanel({
   )
 
   const missingCveSlots = useMemo(
-    () => platMissingCveCreateSlots(filteredRows),
-    [filteredRows],
+    () => platMissingCveCreateSlots(filteredRows, allowedImageNames),
+    [filteredRows, allowedImageNames],
   )
 
   async function createAllMissingPlatCves() {

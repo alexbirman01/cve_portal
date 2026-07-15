@@ -1146,6 +1146,88 @@ class JiraClient:
                         return True
         return False
 
+    def merge_organization_on_issue(
+        self,
+        issue_key: str,
+        organization_refs: list[dict[str, Any]] | None,
+        source_issue_key: str | None,
+    ) -> bool:
+        """Merge (append) new org values onto an existing PLAT issue.
+
+        Reads the current Organization field from the issue, resolves the wanted
+        set using the same path as create, diffs the two, and calls
+        _apply_organization_field_to_issue only when there is something new.
+        Handles both the empty-org case and the already-populated case.
+
+        Returns True if a PUT was attempted (regardless of outcome), False if
+        nothing was needed or org management is disabled.
+        """
+        if settings.jira_plat_skip_organization_field_on_create:
+            return False
+
+        org_fids = _plat_organization_field_ids()
+        if not org_fids:
+            return False
+
+        # Read current org state from the existing PLAT ticket.
+        try:
+            existing_issue = self.get_issue(issue_key)
+        except Exception:
+            return False
+
+        current_names: set[str] = {
+            str(r.get("name") or "").strip().casefold()
+            for r in (existing_issue.organization_refs or [])
+            if isinstance(r, dict) and (r.get("name") or "").strip()
+        }
+
+        # Resolve the org display names that should be on this ticket.
+        wanted_display = self._organization_display_names_for_plat_create(
+            organization_refs,
+            source_issue_key=source_issue_key,
+        )
+        wanted_tokens = self._organization_ids_for_plat_create(
+            organization_refs,
+            source_issue_key=source_issue_key,
+        )
+
+        if not wanted_display and not wanted_tokens:
+            return False
+
+        # Diff: keep only names not already present.
+        new_display = [n for n in wanted_display if n.strip().casefold() not in current_names]
+
+        if not new_display and not wanted_tokens:
+            return False
+
+        # Build the merged list: existing names first, then new additions.
+        existing_display = [
+            str(r.get("name") or "").strip()
+            for r in (existing_issue.organization_refs or [])
+            if isinstance(r, dict) and (r.get("name") or "").strip()
+        ]
+        merged_display = existing_display + new_display
+
+        # Tokens: include wanted tokens (ids) along with any already on the ticket.
+        existing_tokens: list[str] = [
+            str(r.get("id") or "").strip()
+            for r in (existing_issue.organization_refs or [])
+            if isinstance(r, dict) and (r.get("id") or "").strip()
+        ]
+        seen_tok: set[str] = set(existing_tokens)
+        merged_tokens = list(existing_tokens)
+        for t in wanted_tokens:
+            if t not in seen_tok:
+                seen_tok.add(t)
+                merged_tokens.append(t)
+
+        return self._apply_organization_field_to_issue(
+            issue_key,
+            org_fids,
+            merged_tokens,
+            organization_display_names=merged_display or None,
+        )
+
     def _plat_extra_base_fields(self) -> dict[str, Any]:
         """Extra fields to include inline on PLAT issue create (account picker + team select)."""
         extra: dict[str, Any] = {}
