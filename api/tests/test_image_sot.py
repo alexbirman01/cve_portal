@@ -18,6 +18,7 @@ from api.app.allowed_images import (
     normalize_image_basename,
 )
 from api.app.parsing import (
+    _aqua_image_basename,
     extract_cves,
     extract_images,
     parse_attachment_bytes,
@@ -212,6 +213,79 @@ def test_aqua_json_produces_cve_image_facts():
     assert parsed.cve_image_facts[0].cve_id == "CVE-2026-39822"
     # normalize_image_basename strips "plainid/" — verify that resolves correctly.
     assert normalize_image_basename(parsed.cve_image_facts[0].image) == "pip-operator"
+
+
+# ── Aqua transactional tag → service token ────────────────────────────────────
+
+def test_aqua_transactional_hotfix_suffix():
+    """Non-calendar suffixes (e.g. Junhotfix2026) still yield the service from the tag."""
+    image, tag = _aqua_image_basename(
+        "244266704373.dkr.ecr.us-east-1.amazonaws.com/"
+        "220016-02-dev-eks-transactional:5.2627.4_authz-sql-pdp-modifier_Junhotfix2026"
+    )
+    assert image == "authz-sql-pdp-modifier"
+    assert tag == "5.2627.4_authz-sql-pdp-modifier_Junhotfix2026"
+
+
+def test_aqua_transactional_calendar_suffix():
+    image, tag = _aqua_image_basename(
+        "244266704373.dkr.ecr.us-east-1.amazonaws.com/"
+        "220016-02-dev-eks-transactional:5.2608.2_agent_16Feb2026"
+    )
+    assert image == "agent"
+    assert tag == "5.2608.2_agent_16Feb2026"
+
+
+def test_aqua_transactional_underscored_service_normalized():
+    """Service tokens with underscores map to hyphenated catalog names."""
+    image, tag = _aqua_image_basename(
+        "244266704373.dkr.ecr.us-east-1.amazonaws.com/"
+        "220016-02-dev-eks-transactional:5.2624.2_pip_operator_08Jun2026"
+    )
+    assert image == "pip-operator"
+    assert tag == "5.2624.2_pip_operator_08Jun2026"
+
+
+def test_aqua_transactional_theruntime():
+    image, tag = _aqua_image_basename(
+        "244266704373.dkr.ecr.us-east-1.amazonaws.com/"
+        "220016-02-dev-eks-transactional:5.2624.8_theruntime_08Jun2026"
+    )
+    assert image == "theruntime"
+    assert tag == "5.2624.8_theruntime_08Jun2026"
+
+
+def test_aqua_json_transactional_facts_use_service_not_repo():
+    """Full Aqua JSON path: image is service token, not the shared ECR repo name."""
+    payload = [
+        {
+            "image_name": (
+                "244266704373.dkr.ecr.us-east-1.amazonaws.com/"
+                "220016-02-dev-eks-transactional:5.2627.4_authz-sql-pdp-modifier_Junhotfix2026"
+            ),
+            "results": {
+                "resources": [
+                    {
+                        "resource": {"name": "openssl", "version": "3.0.0"},
+                        "vulnerabilities": [{"name": "CVE-2026-39822"}],
+                    }
+                ]
+            },
+        }
+    ]
+    alias_map = {"authz-sql-pdp-modifier": "authz-sql-pdp-modifier"}
+    parsed = parse_attachment_bytes(
+        attachment_id="att5",
+        filename="aqua_scan.json",
+        mime_type="application/json",
+        data=json.dumps(payload).encode(),
+        alias_map=alias_map,
+    )
+    assert parsed.status == "ok"
+    assert len(parsed.cve_image_facts) == 1
+    fact = parsed.cve_image_facts[0]
+    assert fact.image == "authz-sql-pdp-modifier"
+    assert fact.tag == "5.2627.4_authz-sql-pdp-modifier_Junhotfix2026"
 
 
 # ── catalog enforcement helpers ───────────────────────────────────────────────

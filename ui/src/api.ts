@@ -954,10 +954,11 @@ export function imagePathBasename(imagePath: string): string {
 }
 
 /**
- * Aqua ECR transactional tags use `{version}_{Service}_{DDMonYYYY}`.
+ * Aqua ECR transactional tags use `{version}_{Service}_{suffix}`.
+ * Suffix is usually DDMonYYYY but may be non-calendar (e.g. Junhotfix2026).
  * UI shows the release version only; the full tag is kept in row data for Aqua lookups.
  */
-const AQUA_TRANSACTIONAL_TAG_RE = /^([\d.]+)_.+_\d{2}[A-Za-z]{3}\d{4}$/
+const AQUA_TRANSACTIONAL_TAG_RE = /^([\d.]+)_.+_.+$/
 
 export function imageTagForDisplay(tag: string | null | undefined): string {
   const t = (tag ?? '').trim()

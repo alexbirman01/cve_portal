@@ -85,6 +85,7 @@ docker compose down           # stop
 docker compose logs portal    # check logs
 ```
 
+All services in `docker-compose.yml` build with `platform: linux/amd64` — even on Mac arm64 — so local and prod images are always the same architecture.
 Build context is always the **repo root** — both Dockerfiles rely on `api/`, `worker/`, `requirements.txt`, and `VERSION`.
 
 ---
@@ -124,6 +125,7 @@ Steps before "deploy to prod":
 
 Local builds are **unversioned** — `docker compose build` always builds from current source.
 The `APP_VERSION` is set to `dev` in the local build (default in `docker-compose.yml`).
+All services target `linux/amd64` (set in `docker-compose.yml`) — identical architecture to production.
 Never push local dev images to Docker Hub.
 
 - AWS SSO token may need refresh before K8s commands: `aws sso login`

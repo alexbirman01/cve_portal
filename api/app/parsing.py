@@ -252,18 +252,23 @@ def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: st
 
 # ─── Aqua Security JSON parser ────────────────────────────────────────────────
 
-_AQUA_TAG_SERVICE_RE = re.compile(r"[\d.]+_(.+?)_\d{2}[A-Za-z]{3}\d{4}$")
+# ECR transactional tags: {version}_{Service}_{suffix}
+# suffix is usually DDMonYYYY (e.g. 15Jun2026) but can be non-calendar
+# (e.g. Junhotfix2026). Service may contain underscores (pip_operator).
+_AQUA_TAG_SERVICE_RE = re.compile(r"^([\d.]+)_(.+)_(.+)$")
 
 
 def _aqua_image_basename(image_name: str) -> tuple[str, str]:
     """Return (service_token, tag) extracted from a full Aqua image_name field.
 
     image_name format:
-      registry/repo:version_ServiceName_DDMonYYYY  (ECR transactional repo)
-      registry/repo:tag                            (standard naming)
+      registry/repo:version_ServiceName_suffix  (ECR transactional repo)
+      registry/repo:tag                         (standard naming)
 
-    The service token is the segment between the version and date in the tag when
-    the tag follows the Aqua transactional pattern; otherwise it is the repo basename.
+    The service token is the segment between the version and trailing suffix when
+    the tag follows the Aqua transactional pattern; otherwise it is the repo path.
+    Underscores in the service token are normalized to hyphens for catalog matching
+    (e.g. pip_operator → pip-operator).
     """
     s = image_name.strip()
     # Strip registry prefix (first component containing "." or port ":")
@@ -275,9 +280,12 @@ def _aqua_image_basename(image_name: str) -> tuple[str, str]:
         repo, tag = s.rsplit(":", 1)
     else:
         repo, tag = s, ""
-    # Try to extract a service identifier from the tag pattern {version}_{Service}_{Date}
+    # Try to extract a service identifier from {version}_{Service}_{suffix}
     m = _AQUA_TAG_SERVICE_RE.match(tag)
-    service = m.group(1).lower() if m else repo.strip().lower()
+    if m:
+        service = m.group(2).lower().replace("_", "-")
+    else:
+        service = repo.strip().lower()
     return service, tag.strip()
 
 
