@@ -111,6 +111,23 @@ def extract_cves(text: str, source: str) -> list[ExtractedCve]:
     return [ExtractedCve(cve_id=m.group(0).upper(), source=source) for m in _CVE_RE.finditer(text or "")]
 
 
+def cve_ids_from_attachment_facts(parsed_attachments: list[dict]) -> list[str]:
+    """Return sorted unique CVE IDs from structured Excel/Aqua JSON facts only.
+
+    Description and PDF free-text CVE mentions must not create findings rows.
+    ``parsed_attachments`` entries are dicts with a ``cve_image_facts`` list
+    (as produced by the worker after ``parse_attachment_bytes``).
+    """
+    return sorted(
+        {
+            f["cve_id"]
+            for p in parsed_attachments
+            for f in (p.get("cve_image_facts") or [])
+            if isinstance(f, dict) and f.get("cve_id")
+        }
+    )
+
+
 def extract_images(text: str, source: str) -> list[ExtractedImage]:
     out: list[ExtractedImage] = []
     for m in _IMAGE_RE.finditer(text or ""):

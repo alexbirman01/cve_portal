@@ -22,7 +22,13 @@ from api.app.nvd_client import NvdClient, _extract_affected_packages
 from api.app.alpine_client import AlpineClient
 from api.app.redhat_client import RedHatClient
 from api.app.cve5_client import Cve5Client
-from api.app.parsing import extract_cves, extract_images, normalize_description, parse_attachment_bytes
+from api.app.parsing import (
+    cve_ids_from_attachment_facts,
+    extract_cves,
+    extract_images,
+    normalize_description,
+    parse_attachment_bytes,
+)
 from api.app.aqua_client import AquaClient
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
 from api.app.portal_settings import (
@@ -185,7 +191,7 @@ def _affected_imgs_for_cve_row(row: dict[str, Any]) -> list[dict]:
 
 @celery_app.task(name="process_issue", bind=True)
 def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
-    # v1 extraction: description + attachments (Excel/PDF) with provenance.
+    # Extraction: description scraped for provenance; findings CVEs from attachment facts only.
     try:
         _set_run_status(run_id, "fetching_issue")
         jira = JiraClient()
@@ -240,7 +246,11 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 }
             )
 
-        cve_ids = sorted({c.cve_id for c in desc_cves} | {c["cve_id"] for p in parsed_attachments for c in p["cves"]})
+        # CVE source of truth: structured attachment facts only (Excel / Aqua JSON).
+        # Description and PDF free-text may still be scraped for provenance below, but
+        # they must not create findings rows (e.g. CVE-2026-41992 listed in description
+        # but absent from the Aqua JSON on PLATFORM-2107).
+        cve_ids = cve_ids_from_attachment_facts(parsed_attachments)
 
         images = [{"image": i.image, "tag": i.tag, "source": i.source} for i in desc_images]
         for p in parsed_attachments:
@@ -509,7 +519,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             basename = normalize_image_basename(raw)
             return alias_map.get(basename, basename)
 
-        # CVE↔image source of truth: structured facts from Excel/JSON attachments only.
+        # CVE↔image source of truth: same structured facts that define cve_ids above.
         # Description and PDF free-text are excluded from PLAT image slots — substring
         # token matching (plainid_image_patterns) was unreliable and let bare words like
         # "authorizer" produce PLAT tickets with bad image names.
@@ -519,11 +529,14 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
 
         for p in parsed_attachments:
             for fact in p.get("cve_image_facts", []):
+                cve_id = fact.get("cve_id") or ""
+                if cve_id not in cve_to_images:
+                    continue
                 canonical = _resolve_image_name(fact["image"])
-                key = (fact["cve_id"], canonical, fact["tag"])
-                if fact["cve_id"] in cve_to_images and key not in seen_img_keys:
+                key = (cve_id, canonical, fact["tag"])
+                if key not in seen_img_keys:
                     seen_img_keys.add(key)
-                    cve_to_images[fact["cve_id"]].append(
+                    cve_to_images[cve_id].append(
                         {"image": canonical, "tag": fact["tag"], "source": fact["source"]}
                     )
 
@@ -581,8 +594,12 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "plat_security_for_images": plat_security_for_images,
                     "plat_tickets": plat_tickets,
                     "sources": list(
-                        {c.source for c in desc_cves if c.cve_id == cve_id}
-                        | {c["source"] for p in parsed_attachments for c in p["cves"] if c["cve_id"] == cve_id}
+                        {
+                            f["source"]
+                            for p in parsed_attachments
+                            for f in p.get("cve_image_facts", [])
+                            if f.get("cve_id") == cve_id and f.get("source")
+                        }
                     ),
                 }
             )
@@ -725,8 +742,15 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "cves": cve_ids,
             "cve_rows": cve_rows,
             "nvd": enriched,
-            "cve_sources": [{"cve_id": c.cve_id, "source": c.source} for c in desc_cves]
-            + [c for p in parsed_attachments for c in p["cves"]],
+            # Findings provenance: structured attachment facts only.
+            "cve_sources": [
+                {"cve_id": f["cve_id"], "source": f["source"]}
+                for p in parsed_attachments
+                for f in p.get("cve_image_facts", [])
+                if f.get("cve_id")
+            ],
+            # Mentions scraped from description (not included in findings / cve_ids).
+            "description_cves": [{"cve_id": c.cve_id, "source": c.source} for c in desc_cves],
             "attachments": parsed_attachments,
             "images": images,
             "_plat_link_counts": link_counts,

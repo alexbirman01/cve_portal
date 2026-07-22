@@ -19,6 +19,7 @@ from api.app.allowed_images import (
 )
 from api.app.parsing import (
     _aqua_image_basename,
+    cve_ids_from_attachment_facts,
     extract_cves,
     extract_images,
     parse_attachment_bytes,
@@ -111,6 +112,45 @@ def test_description_cves_without_image_facts():
     cves = extract_cves(text, "description")
     assert any(c.cve_id == "CVE-2026-12345" for c in cves)
     # extract_cves has no image correlation — callers get no (cve_id, image, tag) facts.
+
+
+def test_findings_cve_ids_ignore_description_only_mentions():
+    """Worker findings list uses cve_image_facts only — description-only CVEs are dropped."""
+    # PLATFORM-2107-style: description lists CVE-2026-41992 but Aqua JSON does not.
+    desc_cves = extract_cves(
+        "CVE-2026-39822 CVE-2026-39829 CVE-2026-41992 CVE-2026-46597",
+        "description",
+    )
+    assert any(c.cve_id == "CVE-2026-41992" for c in desc_cves)
+
+    parsed_attachments = [
+        {
+            "cves": [
+                {"cve_id": "CVE-2026-39822", "source": "attachment:1:scan.json"},
+                {"cve_id": "CVE-2026-39829", "source": "attachment:1:scan.json"},
+            ],
+            "cve_image_facts": [
+                {
+                    "cve_id": "CVE-2026-39822",
+                    "image": "authz-sql-pdp-modifier",
+                    "tag": "5.2627.4_authz-sql-pdp-modifier_Junhotfix2026",
+                    "source": "attachment:1:scan.json",
+                },
+                {
+                    "cve_id": "CVE-2026-39829",
+                    "image": "authz-sql-pdp-modifier",
+                    "tag": "5.2627.4_authz-sql-pdp-modifier_Junhotfix2026",
+                    "source": "attachment:1:scan.json",
+                },
+            ],
+        }
+    ]
+    cve_ids = cve_ids_from_attachment_facts(parsed_attachments)
+    assert cve_ids == ["CVE-2026-39822", "CVE-2026-39829"]
+    assert "CVE-2026-41992" not in cve_ids
+    # Union with description (old behavior) would have wrongly included it:
+    old_union = sorted({c.cve_id for c in desc_cves} | set(cve_ids))
+    assert "CVE-2026-41992" in old_union
 
 
 # ── Excel structured attachment → cve_image_facts ────────────────────────────
