@@ -32,7 +32,6 @@ from api.app.parsing import (
     normalize_description,
     parse_attachment_bytes,
 )
-from api.app.github_advisory_client import GithubAdvisoryClient
 from api.app.aqua_client import AquaClient
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
 from api.app.portal_settings import (
@@ -403,6 +402,8 @@ def process_issue(
         )
         advisory_by_ghsa: dict[str, Any] = {}
         if ghsa_ids:
+            from api.app.github_advisory_client import GithubAdvisoryClient
+
             gh = GithubAdvisoryClient()
             try:
                 for gid in ghsa_ids:
@@ -431,6 +432,8 @@ def process_issue(
                     if is_ghsa_id(cve_id):
                         adv = advisory_by_ghsa.get(cve_id)
                         if adv is None:
+                            from api.app.github_advisory_client import GithubAdvisoryClient
+
                             gh = GithubAdvisoryClient()
                             try:
                                 adv = gh.fetch(cve_id)
