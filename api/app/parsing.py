@@ -11,6 +11,16 @@ import pdfplumber
 
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+_GHSA_RE = re.compile(r"GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}", re.IGNORECASE)
+# Structured Vulnerability column: CVE or GitHub Security Advisory.
+_VULN_ID_RE = re.compile(
+    rf"^(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern})$",
+    re.IGNORECASE,
+)
+_VULN_ID_FIND_RE = re.compile(
+    rf"(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern})",
+    re.IGNORECASE,
+)
 
 # Fallback regex for image:tag in free text (PDF / description).
 # Image must contain at least one letter; allows optional space after colon.
@@ -107,12 +117,32 @@ def _parse_fix_version(raw: str | None) -> str | None:
 
 # ─── public extraction helpers ───────────────────────────────────────────────
 
+def normalize_vuln_id(raw: str) -> str | None:
+    """Return normalized CVE/GHSA id, or None if not a supported vuln id."""
+    s = (raw or "").strip()
+    if not s or not _VULN_ID_RE.match(s):
+        return None
+    return s.upper()
+
+
+def is_ghsa_id(vuln_id: str) -> bool:
+    return bool(_GHSA_RE.fullmatch((vuln_id or "").strip()))
+
+
+def is_cve_id(vuln_id: str) -> bool:
+    return bool(_CVE_RE.fullmatch((vuln_id or "").strip()))
+
+
 def extract_cves(text: str, source: str) -> list[ExtractedCve]:
-    return [ExtractedCve(cve_id=m.group(0).upper(), source=source) for m in _CVE_RE.finditer(text or "")]
+    """Extract CVE and GHSA identifiers from free text (normalized uppercase)."""
+    return [
+        ExtractedCve(cve_id=m.group(0).upper(), source=source)
+        for m in _VULN_ID_FIND_RE.finditer(text or "")
+    ]
 
 
 def cve_ids_from_attachment_facts(parsed_attachments: list[dict]) -> list[str]:
-    """Return sorted unique CVE IDs from structured Excel/Aqua JSON facts only.
+    """Return sorted unique vuln IDs from structured Excel/Aqua JSON facts only.
 
     Description and PDF free-text CVE mentions must not create findings rows.
     ``parsed_attachments`` entries are dicts with a ``cve_image_facts`` list
@@ -132,6 +162,27 @@ def extract_images(text: str, source: str) -> list[ExtractedImage]:
     out: list[ExtractedImage] = []
     for m in _IMAGE_RE.finditer(text or ""):
         out.append(ExtractedImage(image=m.group("image"), tag=m.group("tag"), source=source))
+    return out
+
+
+def list_excel_sheets(data: bytes) -> list[dict[str, Any]]:
+    """Return sheet metadata for multi-sheet selection UI.
+
+    Each entry: ``{"name": str, "row_count": int}`` (data rows, excluding header).
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    out: list[dict[str, Any]] = []
+    try:
+        for sheet in wb.worksheets:
+            # Cheap row count: iterate once; read_only worksheets support this.
+            n = 0
+            for i, _row in enumerate(sheet.iter_rows(values_only=True)):
+                if i == 0:
+                    continue  # header
+                n += 1
+            out.append({"name": sheet.title, "row_count": n})
+    finally:
+        wb.close()
     return out
 
 
@@ -171,7 +222,14 @@ def parse_pdf_bytes(data: bytes, source: str, attachment_id: str, filename: str,
 
 # ─── Excel parser ─────────────────────────────────────────────────────────────
 
-def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: str, mime_type: str | None) -> ParsedAttachment:
+def parse_excel_bytes(
+    data: bytes,
+    source: str,
+    attachment_id: str,
+    filename: str,
+    mime_type: str | None,
+    sheet_names: set[str] | None = None,
+) -> ParsedAttachment:
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
 
@@ -182,7 +240,12 @@ def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: st
         seen_pkgs: set[tuple[str, str]] = set()  # (cve_id, package_name)
         texts: list[str] = []
 
+        selected = {n.strip() for n in sheet_names} if sheet_names is not None else None
+
         for sheet in wb.worksheets:
+            if selected is not None and sheet.title not in selected:
+                continue
+
             rows = list(sheet.iter_rows(values_only=True))
             if len(rows) < 2:
                 continue
@@ -206,16 +269,16 @@ def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: st
                 if row is rows[0]:
                     continue  # skip header row for structured extraction
 
-                # Need at minimum a CVE column to do structured extraction.
+                # Need at minimum a CVE/GHSA column to do structured extraction.
                 if vuln_col is None:
                     continue
 
                 cve_raw = str(row[vuln_col]).strip() if row[vuln_col] else ""
-                if not _CVE_RE.match(cve_raw):
+                cve_id = normalize_vuln_id(cve_raw)
+                if not cve_id:
                     continue
-                cve_id = cve_raw.upper()
 
-                # ── (CVE, image, tag) fact ──
+                # ── (CVE/GHSA, image, tag) fact ──
                 if img_col is not None and row[img_col]:
                     img_name = str(row[img_col]).strip()
                     img_tag  = str(row[tag_col]).strip() if tag_col is not None and row[tag_col] else ""
@@ -247,7 +310,7 @@ def parse_excel_bytes(data: bytes, source: str, attachment_id: str, filename: st
 
         full_text = "\n".join(texts)
 
-        # Always extract CVEs from raw text (catches any format not in known columns).
+        # Always extract CVEs/GHSAs from raw text (catches any format not in known columns).
         cves = extract_cves(full_text, source)
 
         # Images: use free-text regex only as fallback when structured extraction found nothing.
@@ -370,9 +433,9 @@ def parse_aqua_json_bytes(
                 if not isinstance(vuln, dict):
                     continue
                 cve_raw = str(vuln.get("name") or "").strip()
-                if not _CVE_RE.match(cve_raw):
+                cve_id = normalize_vuln_id(cve_raw)
+                if not cve_id:
                     continue
-                cve_id = cve_raw.upper()
                 all_cve_ids.append(cve_id)
 
                 key = (cve_id, canonical, tag)
@@ -414,6 +477,7 @@ def parse_attachment_bytes(
     mime_type: str | None,
     data: bytes,
     alias_map: dict[str, str] | None = None,
+    sheet_names: set[str] | None = None,
 ) -> ParsedAttachment:
     source = f"attachment:{attachment_id}:{filename}"
     lower  = filename.lower()
@@ -422,7 +486,9 @@ def parse_attachment_bytes(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel",
     ):
-        return parse_excel_bytes(data, source, attachment_id, filename, mime_type)
+        return parse_excel_bytes(
+            data, source, attachment_id, filename, mime_type, sheet_names=sheet_names,
+        )
 
     if lower.endswith(".pdf") or mime_type == "application/pdf":
         return parse_pdf_bytes(data, source, attachment_id, filename, mime_type)

@@ -346,3 +346,101 @@ def test_alias_resolved_to_canonical_passes_check():
     raw = "secretmgr"
     canonical = alias_map.get(normalize_image_basename(raw), normalize_image_basename(raw))
     assert is_allowed_basename(canonical, allowed) is True
+
+
+# ── Excel sheet selection + GHSA ──────────────────────────────────────────────
+
+def _make_multisheet_excel() -> bytes:
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Todays Vulnerabilities"
+    ws1.append(("Vulnerability", "Image Repository", "Tag"))
+    ws1.append(("CVE-2026-11111", "plainid/agent", "1.0"))
+    ws1.append(("GHSA-hrxh-6v49-42gf", "plainid/agent", "1.0"))
+    ws2 = wb.create_sheet("CleanData")
+    ws2.append(("Vulnerability", "Image Repository", "Tag"))
+    ws2.append(("CVE-2026-22222", "plainid/pip-operator", "2.0"))
+    ws3 = wb.create_sheet("Export")
+    ws3.append(("Vulnerability", "Image Repository", "Tag"))
+    ws3.append(("CVE-2026-33333", "plainid/agent", "3.0"))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_list_excel_sheets_row_counts():
+    from api.app.parsing import list_excel_sheets
+
+    sheets = list_excel_sheets(_make_multisheet_excel())
+    by_name = {s["name"]: s["row_count"] for s in sheets}
+    assert by_name["Todays Vulnerabilities"] == 2
+    assert by_name["CleanData"] == 1
+    assert by_name["Export"] == 1
+
+
+def test_excel_sheet_names_filter_todays_only():
+    data = _make_multisheet_excel()
+    parsed = parse_attachment_bytes(
+        attachment_id="att-ms",
+        filename="scan.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        data=data,
+        sheet_names={"Todays Vulnerabilities"},
+    )
+    ids = {f.cve_id for f in parsed.cve_image_facts}
+    assert "CVE-2026-11111" in ids
+    assert "GHSA-HRXH-6V49-42GF" in ids
+    assert "CVE-2026-22222" not in ids
+    assert "CVE-2026-33333" not in ids
+
+
+def test_excel_parses_ghsa_ids():
+    data = _make_excel_bytes([
+        ("GHSA-jpcw-4wr7-c3vq", "plainid/authz-access-file", "5.0"),
+    ])
+    parsed = parse_attachment_bytes(
+        attachment_id="att-ghsa",
+        filename="scan.xlsx",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        data=data,
+    )
+    assert len(parsed.cve_image_facts) == 1
+    assert parsed.cve_image_facts[0].cve_id == "GHSA-JPCW-4WR7-C3VQ"
+
+
+def test_aqua_json_parses_ghsa_ids():
+    payload = [
+        {
+            "image_name": "registry.example.com/plainid/agent:1.0",
+            "results": {
+                "resources": [
+                    {
+                        "resource": {"name": "google.golang.org/grpc", "version": "1.80.0"},
+                        "vulnerabilities": [{"name": "GHSA-hrxh-6v49-42gf"}],
+                    }
+                ]
+            },
+        }
+    ]
+    parsed = parse_attachment_bytes(
+        attachment_id="att-ghsa-json",
+        filename="aqua.json",
+        mime_type="application/json",
+        data=json.dumps(payload).encode(),
+    )
+    assert len(parsed.cve_image_facts) == 1
+    assert parsed.cve_image_facts[0].cve_id == "GHSA-HRXH-6V49-42GF"
+
+
+def test_cve_ids_from_facts_include_ghsa():
+    ids = cve_ids_from_attachment_facts(
+        [
+            {
+                "cve_image_facts": [
+                    {"cve_id": "CVE-2026-1", "image": "agent", "tag": "1", "source": "t"},
+                    {"cve_id": "GHSA-AAAA-BBBB-CCCC", "image": "agent", "tag": "1", "source": "t"},
+                ]
+            }
+        ]
+    )
+    assert ids == ["CVE-2026-1", "GHSA-AAAA-BBBB-CCCC"]

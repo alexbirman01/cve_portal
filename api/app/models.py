@@ -62,7 +62,7 @@ class AllowedImage(Base):
 class CveCache(Base):
     __tablename__ = "cves"
 
-    cve_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    cve_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     state: Mapped[str] = mapped_column(String(32), default="unknown")  # ok | not_found | error
     severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
     score: Mapped[str | None] = mapped_column(String(16), nullable=True)

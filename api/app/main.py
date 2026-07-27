@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -1129,6 +1130,7 @@ _PIPELINE_ACTIVE = frozenset(
         "fetching_issue",
         "extracting_from_description",
         "downloading_attachments",
+        "awaiting_sheet_selection",
         "parsing_attachments",
         "enriching_nvd",
         "enriching_rh",
@@ -1266,6 +1268,83 @@ def cancel_run(run_id: str):
         db.add(run)
         db.commit()
     return {"ok": True}
+
+
+class SheetSelectionItem(BaseModel):
+    attachment_id: str
+    sheets: list[str]
+
+
+class SelectSheetsIn(BaseModel):
+    selections: list[SheetSelectionItem]
+
+
+@app.post("/api/jobs/{run_id}/select-sheets")
+def select_sheets(run_id: str, payload: SelectSheetsIn):
+    """Resume a run paused for multi-sheet Excel selection."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid run id") from e
+
+    if not payload.selections:
+        raise HTTPException(status_code=400, detail="select at least one sheet")
+    cleaned: list[dict[str, Any]] = []
+    for item in payload.selections:
+        aid = (item.attachment_id or "").strip()
+        sheets = [s.strip() for s in item.sheets if (s or "").strip()]
+        if not aid or not sheets:
+            continue
+        cleaned.append({"attachment_id": aid, "sheets": sheets})
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="select at least one sheet")
+
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if (run.status or "").strip() != "awaiting_sheet_selection":
+            raise HTTPException(
+                status_code=409,
+                detail=f"run is not awaiting sheet selection (status={run.status!r})",
+            )
+        issue_key = run.issue_key
+        try:
+            data = json.loads(run.result_json or "{}")
+        except json.JSONDecodeError:
+            data = {}
+        # Require a selection for every multi-sheet workbook we paused on.
+        multi_ids = {
+            str(c.get("attachment_id"))
+            for c in (data.get("sheet_choices") or [])
+            if isinstance(c, dict) and len(c.get("sheets") or []) > 1
+        }
+        selected_ids = {c["attachment_id"] for c in cleaned}
+        missing = sorted(multi_ids - selected_ids)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"select at least one sheet for attachment(s): {', '.join(missing)}",
+            )
+        data["sheet_selection"] = {c["attachment_id"]: c["sheets"] for c in cleaned}
+        data["awaiting_sheet_selection"] = False
+        run.result_json = json.dumps(data)
+        run.status = "queued"
+        db.add(run)
+        db.commit()
+
+    async_result = process_issue.delay(
+        str(rid),
+        issue_key,
+        {"selections": cleaned},
+    )
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if run:
+            run.celery_task_id = async_result.id
+            db.add(run)
+            db.commit()
+    return {"task_id": async_result.id, "run_id": str(rid)}
 
 
 class CveRowPatchIn(BaseModel):

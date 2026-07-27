@@ -61,6 +61,8 @@ export type PlatSecurityFieldSyncEntry = {
 
 export type CveRow = {
   cve_id: string
+  /** Set when the finding ID is a GHSA (or linked GHSA alias). */
+  ghsa_id?: string | null
   severity?: string | null
   score?: string | null
   nvd_state?: string
@@ -134,6 +136,12 @@ export type PlatSyncLogEntry = {
   msg: string
 }
 
+export type SheetChoice = {
+  attachment_id: string
+  filename: string
+  sheets: Array<{ name: string; row_count?: number }>
+}
+
 export type JobResult = {
   issue_key: string
   cves: string[]
@@ -143,6 +151,10 @@ export type JobResult = {
   images: any[]
   sla_anchor_created?: string | null
   sla_anchor_issue_key?: string | null
+  /** Present while status is awaiting_sheet_selection. */
+  sheet_choices?: SheetChoice[] | null
+  awaiting_sheet_selection?: boolean | null
+  sheet_selection?: Record<string, string[]> | null
   /** Set when some Jira writes during PLAT sync fail (partial success). */
   _plat_sync_errors?: string[] | null
   /** Append-only activity log during/after Sync PLAT (polled from result_json). */
@@ -509,6 +521,7 @@ export function formatStatus(status?: string | null): string {
     fetching_issue: 'Fetching Jira issue',
     extracting_from_description: 'Extracting from description',
     downloading_attachments: 'Downloading attachments',
+    awaiting_sheet_selection: 'Choose Excel sheets',
     parsing_attachments: 'Parsing attachments',
     enriching_nvd: 'Validating/enriching via NVD',
     enriching_alpine: 'Enriching via Alpine secdb (OSV)',
@@ -549,6 +562,7 @@ export function statusSteps(
     { id: 'fetching_issue', label: 'Fetch issue' },
     { id: 'extracting_from_description', label: 'Extract description' },
     { id: 'downloading_attachments', label: 'Download attachments' },
+    { id: 'awaiting_sheet_selection', label: 'Choose Excel sheets' },
     { id: 'parsing_attachments', label: 'Parse attachments' },
     { id: 'enriching_nvd', label: 'NVD enrichment' },
     { id: 'enriching_alpine', label: 'Alpine package lookup' },
@@ -1208,6 +1222,25 @@ export async function apiEnqueuePlatLink(runId: string): Promise<{ task_id: stri
 export async function apiCancelRun(runId: string): Promise<void> {
   const res = await fetch(`/api/jobs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
+}
+
+export async function apiSelectSheets(
+  runId: string,
+  selections: Array<{ attachment_id: string; sheets: string[] }>,
+): Promise<{ task_id: string; run_id: string }> {
+  return apiPost(`/api/jobs/${encodeURIComponent(runId)}/select-sheets`, { selections })
+}
+
+export function vulnDetailUrl(cveId: string): string {
+  const id = (cveId || '').trim()
+  if (/^GHSA-/i.test(id)) {
+    return `https://github.com/advisories/${encodeURIComponent(id.toUpperCase())}`
+  }
+  return `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`
+}
+
+export function isGhsaId(id: string): boolean {
+  return /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/i.test((id || '').trim())
 }
 
 export type IssueSyncScheduleResponse = {

@@ -9,7 +9,11 @@ import {
   apiEnqueuePlatSync,
   apiEnqueuePlatLink,
   apiCancelRun,
+  apiSelectSheets,
   apiPatchIssueSyncSchedule,
+  vulnDetailUrl,
+  isGhsaId,
+  type SheetChoice,
   apiPatchCveRow,
   apiGet,
   apiGetAbout,
@@ -779,9 +783,10 @@ function CveTable({
               <td>
                 <a
                   className="cveId"
-                  href={`https://nvd.nist.gov/vuln/detail/${r.cve_id}`}
+                  href={vulnDetailUrl(r.cve_id)}
                   target="_blank"
                   rel="noreferrer"
+                  title={isGhsaId(r.cve_id) ? 'GitHub Security Advisory' : 'NVD'}
                 >
                   {r.cve_id}
                 </a>
@@ -1330,6 +1335,122 @@ function SlaAdminPanelBody() {
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  )
+}
+
+function SheetSelectionModal({
+  open,
+  choices,
+  submitting,
+  onProceed,
+  onCancel,
+}: {
+  open: boolean
+  choices: SheetChoice[]
+  submitting: boolean
+  onProceed: (selections: Array<{ attachment_id: string; sheets: string[] }>) => void
+  onCancel: () => void
+}) {
+  const [checked, setChecked] = useState<Record<string, Record<string, boolean>>>({})
+
+  useEffect(() => {
+    if (!open) return
+    const next: Record<string, Record<string, boolean>> = {}
+    const todayRe = /today'?s?\s*vulnerabilit/i
+    for (const att of choices) {
+      const bySheet: Record<string, boolean> = {}
+      const hasToday = att.sheets.some((s) => todayRe.test(s.name))
+      for (const s of att.sheets) {
+        bySheet[s.name] = hasToday ? todayRe.test(s.name) : att.sheets.length === 1
+      }
+      next[att.attachment_id] = bySheet
+    }
+    setChecked(next)
+  }, [open, choices])
+
+  if (!open) return null
+
+  const selections = Object.entries(checked)
+    .map(([attachment_id, sheetsMap]) => ({
+      attachment_id,
+      sheets: Object.entries(sheetsMap)
+        .filter(([, on]) => on)
+        .map(([name]) => name),
+    }))
+    .filter((s) => s.sheets.length > 0)
+
+  const canProceed = selections.length > 0 && !submitting
+
+  return (
+    <div className="slaModalBackdrop" role="presentation">
+      <div
+        className="slaModalPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sheetSelectTitle"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="slaModalHeader">
+          <h2 id="sheetSelectTitle">Multiple sheets detected</h2>
+        </div>
+        <div className="slaModalBody">
+          <p className="muted small" style={{ marginTop: 0 }}>
+            This Excel attachment has more than one sheet. Select which sheet(s) to use for findings, then proceed.
+          </p>
+          {choices.map((att) => (
+            <div key={att.attachment_id} style={{ marginBottom: 16 }}>
+              <div className="mono" style={{ fontWeight: 600, marginBottom: 8 }}>
+                {att.filename}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {att.sheets.map((s) => {
+                  const id = `${att.attachment_id}::${s.name}`
+                  const on = Boolean(checked[att.attachment_id]?.[s.name])
+                  return (
+                    <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={submitting}
+                        onChange={(e) => {
+                          const val = e.target.checked
+                          setChecked((prev) => ({
+                            ...prev,
+                            [att.attachment_id]: {
+                              ...(prev[att.attachment_id] || {}),
+                              [s.name]: val,
+                            },
+                          }))
+                        }}
+                      />
+                      <span>
+                        {s.name}
+                        {typeof s.row_count === 'number' ? (
+                          <span className="muted small"> ({s.row_count} rows)</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+            <button type="button" className="btn btnSecondary" disabled={submitting} onClick={onCancel}>
+              Cancel run
+            </button>
+            <button
+              type="button"
+              className="btn btnPrimary"
+              disabled={!canProceed}
+              onClick={() => onProceed(selections)}
+            >
+              {submitting ? 'Continuing…' : 'Proceed'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -3697,9 +3818,10 @@ function DashboardView({
                               <td>
                                 <a
                                   className="cveId"
-                                  href={`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(c.cve_id)}`}
+                                  href={vulnDetailUrl(c.cve_id)}
                                   target="_blank"
                                   rel="noreferrer"
+                                  title={isGhsaId(c.cve_id) ? 'GitHub Security Advisory' : 'NVD'}
                                 >
                                   {c.cve_id}
                                 </a>
@@ -3933,6 +4055,7 @@ function App() {
     issueKey: string
     issuetype: string
   } | null>(null)
+  const [sheetSelectSubmitting, setSheetSelectSubmitting] = useState(false)
 
   useEffect(() => {
     apiListAllowedImages().then((list) => {
@@ -3995,8 +4118,10 @@ function App() {
           j.status === 'done' ||
           j.status.startsWith('failed') ||
           j.status === 'cancelled'
+        // Keep polling while awaiting sheet selection or PLAT sync.
         const platSyncing = jobIsSyncingPlat(j.status)
-        if (terminal && !platSyncing) clearInterval(t)
+        const awaitingSheets = j.status === 'awaiting_sheet_selection'
+        if (terminal && !platSyncing && !awaitingSheets) clearInterval(t)
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? String(e))
@@ -4076,6 +4201,38 @@ function App() {
     )
     if (!ok) return
     await startProcessingForIssue(issue)
+  }
+
+  async function proceedSheetSelection(
+    selections: Array<{ attachment_id: string; sheets: string[] }>,
+  ) {
+    if (!runId) return
+    setError(null)
+    setSheetSelectSubmitting(true)
+    try {
+      await apiSelectSheets(runId, selections)
+      const j = await apiGet<JobResponse>(`/api/jobs/${runId}`)
+      setJob(j)
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally {
+      setSheetSelectSubmitting(false)
+    }
+  }
+
+  async function cancelSheetSelection() {
+    if (!runId) return
+    setError(null)
+    setSheetSelectSubmitting(true)
+    try {
+      await apiCancelRun(runId)
+      const j = await apiGet<JobResponse>(`/api/jobs/${runId}`)
+      setJob(j)
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally {
+      setSheetSelectSubmitting(false)
+    }
   }
 
   async function pushComment() {
@@ -4231,6 +4388,13 @@ function App() {
         onClose={() => setSecurityTypeWarning(null)}
       />
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} info={aboutInfo} loading={aboutLoading} />
+      <SheetSelectionModal
+        open={job?.status === 'awaiting_sheet_selection'}
+        choices={job?.result?.sheet_choices ?? []}
+        submitting={sheetSelectSubmitting}
+        onProceed={(sels) => void proceedSheetSelection(sels)}
+        onCancel={() => void cancelSheetSelection()}
+      />
 
       {/* ── Main content ── */}
       <main className="mainContent">

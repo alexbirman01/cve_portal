@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     nvd_api_key: str | None = None
+    # Optional GitHub token for higher Advisory API rate limits (GHSA enrichment).
+    github_token: str | None = None
     redhat_enrichment_enabled: bool = False
     cve5_enrichment_enabled: bool = False
     # When NVD has no package/CPE data, enrich from Alpine secdb via OSV (ALPINE-CVE-*).

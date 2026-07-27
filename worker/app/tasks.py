@@ -26,9 +26,13 @@ from api.app.parsing import (
     cve_ids_from_attachment_facts,
     extract_cves,
     extract_images,
+    is_cve_id,
+    is_ghsa_id,
+    list_excel_sheets,
     normalize_description,
     parse_attachment_bytes,
 )
+from api.app.github_advisory_client import GithubAdvisoryClient
 from api.app.aqua_client import AquaClient
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
 from api.app.portal_settings import (
@@ -189,10 +193,97 @@ def _affected_imgs_for_cve_row(row: dict[str, Any]) -> list[dict]:
     return []
 
 
+def _is_excel_attachment(filename: str, mime_type: str | None) -> bool:
+    lower = (filename or "").lower()
+    if lower.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+        return True
+    return mime_type in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    )
+
+
+def _normalize_sheet_selection(sheet_selection: dict[str, Any] | None) -> dict[str, set[str]]:
+    """Map attachment_id → selected sheet names.
+
+    Accepts either:
+      {"att-id": ["Sheet A", "Sheet B"]}
+    or
+      {"selections": [{"attachment_id": "att-id", "sheets": ["Sheet A"]}]}
+    """
+    if not sheet_selection:
+        return {}
+    out: dict[str, set[str]] = {}
+    if isinstance(sheet_selection.get("selections"), list):
+        for item in sheet_selection["selections"]:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("attachment_id") or "").strip()
+            sheets = item.get("sheets") or []
+            if not aid or not isinstance(sheets, list):
+                continue
+            names = {str(s).strip() for s in sheets if str(s).strip()}
+            if names:
+                out[aid] = names
+        return out
+    for aid, sheets in sheet_selection.items():
+        if aid == "selections":
+            continue
+        if not isinstance(sheets, list):
+            continue
+        names = {str(s).strip() for s in sheets if str(s).strip()}
+        if names:
+            out[str(aid)] = names
+    return out
+
+
+def _apply_ghsa_aliases(
+    parsed_attachments: list[dict],
+    advisory_by_ghsa: dict[str, Any],
+) -> dict[str, str]:
+    """Rewrite GHSA facts to CVE when GitHub reports a CVE alias.
+
+    Returns mapping of rewritten GHSA → CVE for provenance.
+    """
+    aliases: dict[str, str] = {}
+    for ghsa_id, adv in advisory_by_ghsa.items():
+        cve_alias = getattr(adv, "cve_id", None) or (adv.get("cve_id") if isinstance(adv, dict) else None)
+        if cve_alias and is_cve_id(cve_alias):
+            aliases[ghsa_id.upper()] = str(cve_alias).upper()
+
+    if not aliases:
+        return {}
+
+    for p in parsed_attachments:
+        for fact in p.get("cve_image_facts") or []:
+            cid = (fact.get("cve_id") or "").upper()
+            if cid in aliases:
+                fact["ghsa_id"] = cid
+                fact["cve_id"] = aliases[cid]
+        for pkg in p.get("packages") or []:
+            cid = (pkg.get("cve_id") or "").upper()
+            if cid in aliases:
+                pkg["ghsa_id"] = cid
+                pkg["cve_id"] = aliases[cid]
+        for c in p.get("cves") or []:
+            cid = (c.get("cve_id") or "").upper()
+            if cid in aliases:
+                c["ghsa_id"] = cid
+                c["cve_id"] = aliases[cid]
+    return aliases
+
+
 @celery_app.task(name="process_issue", bind=True)
-def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
+def process_issue(
+    self,
+    run_id: str,
+    issue_key: str,
+    sheet_selection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     # Extraction: description scraped for provenance; findings CVEs from attachment facts only.
     try:
+        selection_map = _normalize_sheet_selection(sheet_selection)
+
         _set_run_status(run_id, "fetching_issue")
         jira = JiraClient()
         issue = jira.get_issue(issue_key)
@@ -209,17 +300,71 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 continue
             blobs.append((a, jira.download_attachment(a["content"])))
 
+        # Multi-sheet Excel: pause for operator sheet selection unless already provided.
+        if not selection_map:
+            sheet_choices: list[dict[str, Any]] = []
+            needs_selection = False
+            for a, blob in blobs:
+                fname = str(a["filename"])
+                mime = a.get("mimeType")
+                if not _is_excel_attachment(fname, mime):
+                    continue
+                try:
+                    sheets = list_excel_sheets(blob)
+                except Exception:
+                    sheets = []
+                entry = {
+                    "attachment_id": str(a["id"]),
+                    "filename": fname,
+                    "sheets": sheets,
+                }
+                sheet_choices.append(entry)
+                if len(sheets) > 1:
+                    needs_selection = True
+
+            if needs_selection:
+                pause_payload = {
+                    "issue_key": issue.key,
+                    "sheet_choices": sheet_choices,
+                    "awaiting_sheet_selection": True,
+                }
+                with db_session() as db:
+                    run = db.get(ProcessingRun, uuid.UUID(run_id))
+                    if run:
+                        run.status = "awaiting_sheet_selection"
+                        run.result_json = json.dumps(pause_payload)
+                        db.add(run)
+                        db.commit()
+                return pause_payload
+
         _set_run_status(run_id, "parsing_attachments")
         with db_session() as db:
             alias_map = load_alias_map(db)
         parsed_attachments = []
         for a, blob in blobs:
+            aid = str(a["id"])
+            fname = str(a["filename"])
+            mime = a.get("mimeType")
+            sheets_for_att: set[str] | None = None
+            if selection_map and _is_excel_attachment(fname, mime):
+                try:
+                    meta = list_excel_sheets(blob)
+                except Exception:
+                    meta = []
+                if len(meta) > 1:
+                    # Multi-sheet: missing selection means parse nothing from this workbook.
+                    sheets_for_att = selection_map.get(aid, set())
+                elif aid in selection_map:
+                    sheets_for_att = selection_map[aid]
+            elif aid in selection_map:
+                sheets_for_att = selection_map[aid]
             parsed = parse_attachment_bytes(
-                attachment_id=str(a["id"]),
-                filename=str(a["filename"]),
-                mime_type=a.get("mimeType"),
+                attachment_id=aid,
+                filename=fname,
+                mime_type=mime,
                 data=blob,
                 alias_map=alias_map,
+                sheet_names=sheets_for_att,
             )
             parsed_attachments.append(
                 {
@@ -228,6 +373,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                     "mimeType": parsed.mime_type,
                     "status": parsed.status,
                     "text_preview": parsed.text_preview,
+                    "selected_sheets": sorted(sheets_for_att) if sheets_for_att is not None else None,
                     "cves": [{"cve_id": c.cve_id, "source": c.source} for c in parsed.cves],
                     "images": [{"image": i.image, "tag": i.tag, "source": i.source} for i in parsed.images],
                     "packages": [
@@ -246,7 +392,26 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 }
             )
 
-        # CVE source of truth: structured attachment facts only (Excel / Aqua JSON).
+        # Resolve GHSA → CVE aliases via GitHub Advisory API before building findings IDs.
+        ghsa_ids = sorted(
+            {
+                f["cve_id"]
+                for p in parsed_attachments
+                for f in (p.get("cve_image_facts") or [])
+                if is_ghsa_id(f.get("cve_id") or "")
+            }
+        )
+        advisory_by_ghsa: dict[str, Any] = {}
+        if ghsa_ids:
+            gh = GithubAdvisoryClient()
+            try:
+                for gid in ghsa_ids:
+                    advisory_by_ghsa[gid] = gh.fetch(gid)
+            finally:
+                gh.close()
+            _apply_ghsa_aliases(parsed_attachments, advisory_by_ghsa)
+
+        # CVE/GHSA source of truth: structured attachment facts only (Excel / Aqua JSON).
         # Description and PDF free-text may still be scraped for provenance below, but
         # they must not create findings rows (e.g. CVE-2026-41992 listed in description
         # but absent from the Aqua JSON on PLATFORM-2107).
@@ -262,6 +427,53 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             enriched = []
             with db_session() as db:
                 for cve_id in cve_ids:
+                    # GHSA-only findings: enrich from GitHub Advisory (already fetched), skip NVD.
+                    if is_ghsa_id(cve_id):
+                        adv = advisory_by_ghsa.get(cve_id)
+                        if adv is None:
+                            gh = GithubAdvisoryClient()
+                            try:
+                                adv = gh.fetch(cve_id)
+                            finally:
+                                gh.close()
+                            advisory_by_ghsa[cve_id] = adv
+                        if getattr(adv, "state", None) == "ok":
+                            db.merge(
+                                CveCache(
+                                    cve_id=cve_id,
+                                    state="ok",
+                                    severity=adv.severity,
+                                    score=adv.score,
+                                    published=adv.published,
+                                    modified=adv.modified,
+                                    raw_json=adv.raw_json,
+                                )
+                            )
+                            enriched.append(
+                                {
+                                    "cve_id": cve_id,
+                                    "state": "ok",
+                                    "severity": adv.severity,
+                                    "score": adv.score,
+                                    "published": adv.published,
+                                    "modified": adv.modified,
+                                    "packages": list(adv.packages or []),
+                                    "ghsa_id": cve_id,
+                                    "enrichment_source": "github_advisory",
+                                }
+                            )
+                        else:
+                            db.merge(CveCache(cve_id=cve_id, state=getattr(adv, "state", None) or "error"))
+                            enriched.append(
+                                {
+                                    "cve_id": cve_id,
+                                    "state": getattr(adv, "state", None) or "error",
+                                    "ghsa_id": cve_id,
+                                    "enrichment_source": "github_advisory",
+                                }
+                            )
+                        continue
+
                     cached = db.get(CveCache, cve_id)
                     if cached and cached.state == "ok":
                         # Re-parse packages from cached raw_json.
@@ -334,6 +546,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             alpine = AlpineClient()
             try:
                 for entry in enriched:
+                    if is_ghsa_id(entry.get("cve_id") or ""):
+                        continue
                     pkgs = entry.get("packages") or []
                     if pkgs and any((p.get("product") or "").strip() for p in pkgs if isinstance(p, dict)):
                         continue
@@ -348,6 +562,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             rh = RedHatClient()
             try:
                 for entry in enriched:
+                    if is_ghsa_id(entry.get("cve_id") or ""):
+                        continue
                     # Only call Red Hat when NVD is missing packages or severity/score.
                     if entry.get("packages") and entry.get("severity") and entry.get("score"):
                         continue
@@ -371,6 +587,8 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             cve5 = Cve5Client()
             try:
                 for entry in enriched:
+                    if is_ghsa_id(entry.get("cve_id") or ""):
+                        continue
                     if entry.get("packages") and all(
                         p.get("version_start") or p.get("fixed_version")
                         for p in entry["packages"]
@@ -578,6 +796,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             cve_rows.append(
                 {
                     "cve_id": cve_id,
+                    "ghsa_id": cve_id if is_ghsa_id(cve_id) else nvd_entry.get("ghsa_id"),
                     "severity": nvd_entry.get("severity"),
                     "score": nvd_entry.get("score"),
                     "nvd_state": nvd_entry.get("state", "unknown"),
@@ -745,6 +964,9 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "description_cves": [{"cve_id": c.cve_id, "source": c.source} for c in desc_cves],
             "attachments": parsed_attachments,
             "images": images,
+            "sheet_selection": (
+                {aid: sorted(names) for aid, names in selection_map.items()} if selection_map else None
+            ),
             "_plat_link_counts": {"links_checked": 0, "links_created": 0, "errors": []},
             "_aqua_processing_enabled": aqua_processing_on,
         }
