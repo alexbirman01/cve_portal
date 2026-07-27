@@ -40,7 +40,7 @@ from api.app.aqua_catalog import (
 from api.app.models import AllowedImage, Base, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor, parse_jira_created
 from api.app.parsing import normalize_description
-from worker.app.tasks import process_issue, sync_plat_for_run
+from worker.app.tasks import link_plat_for_run, process_issue, sync_plat_for_run
 
 
 app = FastAPI(title="CVE Portal API", version="0.1.0")
@@ -1120,7 +1120,7 @@ def delete_allowed_image(image_id: str):
     return {"ok": True}
 
 
-_PLAT_SYNC_IN_PROGRESS = frozenset({"syncing_plat", "syncing_plat_rewrite", "syncing_aqua"})
+_PLAT_SYNC_IN_PROGRESS = frozenset({"syncing_plat", "syncing_plat_rewrite", "syncing_aqua", "linking_plat"})
 
 # Celery pipeline statuses — PLAT sync requires a stored findings payload first.
 _PIPELINE_ACTIVE = frozenset(
@@ -1188,6 +1188,42 @@ def enqueue_sync_plat(run_id: str):
                 detail=f"cannot sync PLAT for run status {st!r}",
             )
     async_result = sync_plat_for_run.delay(str(rid))
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if run:
+            run.celery_task_id = async_result.id
+            db.add(run)
+            db.commit()
+    return {"task_id": async_result.id}
+
+
+@app.post("/api/jobs/{run_id}/link-plat")
+def enqueue_link_plat(run_id: str):
+    """Enqueue a job that creates Jira Relates links for all existing PLAT tickets in this run."""
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid run id") from e
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run:
+            raise HTTPException(status_code=404, detail="run not found")
+        if (run.status or "") == "linking_plat":
+            raise HTTPException(status_code=409, detail="PLAT linking already in progress")
+        if not _run_ready_for_plat_sync(run):
+            st = (run.status or "").strip()
+            if not _run_has_cve_rows(run):
+                raise HTTPException(status_code=400, detail="no result to link")
+            if st in _PIPELINE_ACTIVE or st == "queued":
+                raise HTTPException(
+                    status_code=400,
+                    detail="run must be finished before linking PLAT tickets",
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"cannot link PLAT tickets for run status {st!r}",
+            )
+    async_result = link_plat_for_run.delay(str(rid))
     with db_session() as db:
         run = db.get(ProcessingRun, rid)
         if run:

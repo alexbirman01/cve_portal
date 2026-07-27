@@ -7,6 +7,7 @@ import {
   apiDeleteCustomerSla,
   apiDeleteProcessingRunsForIssue,
   apiEnqueuePlatSync,
+  apiEnqueuePlatLink,
   apiCancelRun,
   apiPatchIssueSyncSchedule,
   apiPatchCveRow,
@@ -67,6 +68,7 @@ import {
   sortCveRows,
   statusSteps,
   jobIsSyncingPlat,
+  jobIsLinkingPlat,
   type PlatSyncLogEntry,
   dashboardCveStateLabel,
   dashboardRemediationStatusLabel,
@@ -2423,12 +2425,14 @@ function ResultsActionsMenu({
   disabled,
   onReprocess,
   onCreateAllCve,
+  onLinkPlat,
   onSync,
   missingCveCount,
 }: {
   disabled: boolean
   onReprocess: () => void
   onCreateAllCve: () => void
+  onLinkPlat: () => void
   onSync: () => void
   missingCveCount: number
 }) {
@@ -2488,6 +2492,21 @@ function ResultsActionsMenu({
               }}
             >
               Create all CVE tickets{missingCveCount > 0 ? ` (${missingCveCount})` : ''}
+            </button>
+          </li>
+          <li role="none">
+            <button
+              type="button"
+              role="menuitem"
+              className="resultsActionsMenuItem"
+              disabled={disabled}
+              title="Create Jira Relates links between existing PLAT Security tickets and this PLATFORM ticket"
+              onClick={() => {
+                setOpen(false)
+                onLinkPlat()
+              }}
+            >
+              Link existing PLAT tickets
             </button>
           </li>
           <li role="none">
@@ -2741,8 +2760,11 @@ function ResultsPanel({
     () => job.result?._plat_sync_log ?? [],
   )
   const [suggestedCommentRefreshing, setSuggestedCommentRefreshing] = useState(false)
+  const [platLinkBusy, setPlatLinkBusy] = useState(false)
+  const [platLinkErr, setPlatLinkErr] = useState<string | null>(null)
 
   const syncingPlat = jobIsSyncingPlat(job.status)
+  const linkingPlat = jobIsLinkingPlat(job.status)
 
   useEffect(() => {
     if (syncingPlat) {
@@ -2959,6 +2981,40 @@ function ResultsPanel({
     }
   }
 
+  async function runPlatLink() {
+    if (!job.run_id) return
+    setPlatLinkErr(null)
+    setPlatLinkBusy(true)
+    try {
+      await apiEnqueuePlatLink(job.run_id)
+      for (let attempt = 0; attempt < 120; attempt++) {
+        await new Promise((r) => setTimeout(r, 1500))
+        const j = await onJobRefresh()
+        if (jobIsLinkingPlat(j.status)) continue
+        if (j.status === 'done') {
+          const rs = j.result?.cve_rows
+          if (rs && Array.isArray(rs)) setRows(rs)
+        } else if (j.status?.startsWith('failed')) {
+          setPlatLinkErr(j.result?.error ?? 'Linking failed')
+        }
+        break
+      }
+    } catch (e) {
+      setPlatLinkErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPlatLinkBusy(false)
+      try {
+        const j = await onJobRefresh()
+        if (j.status === 'done') {
+          const rs = j.result?.cve_rows
+          if (rs && Array.isArray(rs)) setRows(rs)
+        }
+      } catch {
+        /* keep last polled state */
+      }
+    }
+  }
+
   function clearCveSearch() {
     setFilterText('')
   }
@@ -3073,9 +3129,10 @@ function ResultsPanel({
             </div>
             <div className="resultsFindingsToolbarActions">
               <ResultsActionsMenu
-                disabled={loading || platBulkBusy || syncingPlat}
+                disabled={loading || platBulkBusy || syncingPlat || platLinkBusy || linkingPlat}
                 onReprocess={() => { void onReprocessTicket() }}
                 onCreateAllCve={() => { void createAllMissingPlatCves() }}
+                onLinkPlat={() => { void runPlatLink() }}
                 onSync={() => { void runPlatSync() }}
                 missingCveCount={missingCveSlots.length}
               />
@@ -3084,6 +3141,11 @@ function ResultsPanel({
                   Creating… {platBulkProgress.done}/{platBulkProgress.total}
                 </span>
               )}
+              {(platLinkBusy || linkingPlat) ? (
+                <span className="platSyncProgressPill" role="status">
+                  Linking PLAT tickets…
+                </span>
+              ) : null}
               {syncingPlat ? (
                 <span className="platSyncProgressPill" role="status">
                   Syncing PLAT
@@ -3114,6 +3176,11 @@ function ResultsPanel({
         {findingsReady && platBulkErr && (
           <div className={`resultsPlatBulkErr small${platBulkErrIsWarn ? '' : ' resultsPlatBulkInfo'}`} role="status">
             {platBulkErr}
+          </div>
+        )}
+        {findingsReady && platLinkErr && (
+          <div className="resultsPlatBulkErr small" role="status">
+            Link existing PLAT tickets: {platLinkErr}
           </div>
         )}
         {findingsReady && platSyncLog.length > 0 && (

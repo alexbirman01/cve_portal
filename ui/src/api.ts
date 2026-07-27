@@ -498,6 +498,10 @@ export function jobIsSyncingPlat(status?: string | null): boolean {
   )
 }
 
+export function jobIsLinkingPlat(status?: string | null): boolean {
+  return status === 'linking_plat'
+}
+
 export function formatStatus(status?: string | null): string {
   if (!status) return ''
   const map: Record<string, string> = {
@@ -518,6 +522,7 @@ export function formatStatus(status?: string | null): string {
     syncing_plat: 'Syncing PLAT with Jira',
     syncing_plat_rewrite: 'Rewriting PLAT Package Name in Jira',
     syncing_aqua: 'Rewriting PLAT Package Name in Jira',
+    linking_plat: 'Linking existing PLAT tickets',
     // Legacy (removed Aqua phase)
     querying_aqua: 'Building results',
   }
@@ -1194,6 +1199,10 @@ export function mergePlatCreateIntoRows(
 
 export async function apiEnqueuePlatSync(runId: string): Promise<{ task_id: string }> {
   return apiPost<{ task_id: string }>(`/api/jobs/${encodeURIComponent(runId)}/sync-plat`, {})
+}
+
+export async function apiEnqueuePlatLink(runId: string): Promise<{ task_id: string }> {
+  return apiPost<{ task_id: string }>(`/api/jobs/${encodeURIComponent(runId)}/link-plat`, {})
 }
 
 export async function apiCancelRun(runId: string): Promise<void> {

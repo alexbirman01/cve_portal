@@ -18,6 +18,7 @@ celery_app.conf.update(
     # worker processes auto-syncs sequentially without blocking process_issue.
     task_routes={
         "sync_plat_for_run": {"queue": "plat_sync"},
+        "link_plat_for_run": {"queue": "plat_sync"},
     },
     beat_schedule={
         "run-due-plat-syncs": {

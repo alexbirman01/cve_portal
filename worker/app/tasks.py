@@ -723,14 +723,6 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
                 rows_by_customer_lower,
             )
 
-        link_counts: dict[str, Any] = {"links_checked": 0, "links_created": 0, "errors": []}
-        if issue.key:
-            _jira_link = JiraClient()
-            try:
-                link_counts = _link_plat_rows(_jira_link, cve_rows, issue.key)
-            finally:
-                _jira_link.close()
-
         for entry in enriched:
             entry.pop("attachment_product", None)
 
@@ -753,7 +745,7 @@ def process_issue(self, run_id: str, issue_key: str) -> dict[str, Any]:
             "description_cves": [{"cve_id": c.cve_id, "source": c.source} for c in desc_cves],
             "attachments": parsed_attachments,
             "images": images,
-            "_plat_link_counts": link_counts,
+            "_plat_link_counts": {"links_checked": 0, "links_created": 0, "errors": []},
             "_aqua_processing_enabled": aqua_processing_on,
         }
     except Exception as e:
@@ -823,6 +815,67 @@ def _link_plat_rows(
             if progress:
                 progress.bump()
     return counts
+
+
+@celery_app.task(name="link_plat_for_run")
+def link_plat_for_run(run_id: str) -> dict[str, Any]:
+    """Create Jira Relates links between existing PLAT tickets and the PLATFORM parent."""
+    rid = uuid.UUID(run_id)
+    _set_run_status(run_id, "linking_plat")
+    try:
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if not run or not run.result_json:
+                raise ValueError("run has no stored result")
+            result = json.loads(run.result_json)
+            source_issue_key: str = (run.issue_key or "").strip()
+        cve_rows: list[dict[str, Any]] = result.get("cve_rows") or []
+        if not cve_rows:
+            with db_session() as db:
+                run = db.get(ProcessingRun, rid)
+                if run:
+                    run.status = "done"
+                    db.add(run)
+                    db.commit()
+            return {"links_checked": 0, "links_created": 0, "errors": []}
+
+        jira = JiraClient()
+        try:
+            link_counts = _link_plat_rows(jira, cve_rows, source_issue_key)
+        finally:
+            jira.close()
+
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if run:
+                try:
+                    merged = json.loads(run.result_json) if run.result_json else {}
+                except json.JSONDecodeError:
+                    merged = {}
+                merged["_plat_link_counts"] = link_counts
+                run.status = "done"
+                run.result_json = json.dumps(merged)
+                db.add(run)
+                db.commit()
+        return link_counts
+    except Exception as e:
+        import traceback
+        err_msg = str(e)
+        tb_str = traceback.format_exc()
+        with db_session() as db:
+            run = db.get(ProcessingRun, rid)
+            if run:
+                run.status = f"failed: {type(e).__name__}"[:32]
+                try:
+                    res = json.loads(run.result_json) if run.result_json else {}
+                except Exception:
+                    res = {}
+                res["error"] = err_msg
+                res["traceback"] = tb_str
+                run.result_json = json.dumps(res)
+                db.add(run)
+                db.commit()
+        raise
 
 
 @celery_app.task(name="sync_plat_for_run")
