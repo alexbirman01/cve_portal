@@ -444,3 +444,115 @@ def test_cve_ids_from_facts_include_ghsa():
         ]
     )
     assert ids == ["CVE-2026-1", "GHSA-AAAA-BBBB-CCCC"]
+
+
+def _make_aqua_html(
+    image_ref: str,
+    rows: list[tuple[str, str, str]],
+    *,
+    with_resource: bool = True,
+) -> bytes:
+    """Minimal Aqua Scan Report HTML. rows: (vuln_id, resource, fix_version)."""
+    if with_resource:
+        header = (
+            "<tr><th>Name</th><th>Resource</th><th>Severity</th>"
+            "<th>Fix Version</th></tr>"
+        )
+        body = "".join(
+            f"<tr><td>{vid}</td><td>{res}</td><td>high</td><td>{fix}</td></tr>"
+            for vid, res, fix in rows
+        )
+    else:
+        header = "<tr><th>Name</th><th>Severity</th><th>Fix Version</th></tr>"
+        body = "".join(
+            f"<tr><td>{vid}</td><td>high</td><td>{fix}</td></tr>"
+            for vid, _res, fix in rows
+        )
+    html = f"""<!DOCTYPE html><html><head>
+<title>{image_ref} | Scan Results</title></head><body>
+<h1>Scan Report: {image_ref}</h1>
+<table>{header}{body}</table>
+</body></html>"""
+    return html.encode("utf-8")
+
+
+def test_aqua_html_parses_consolidated_table():
+    data = _make_aqua_html(
+        "eyctpeu.example/plainid/secrets-mgmt:5.2631.3",
+        [
+            ("CVE-2025-60876", "busybox", "None"),
+            ("GHSA-r277-6w6q-xmqw", "github.com/getkin/kin-openapi", "0.144.0"),
+            ("GHSA-jpcw-4wr7-c3vq", "github.com/getkin/kin-openapi", "0.144.0"),
+            ("GHSA-hrxh-6v49-42gf", "google.golang.org/grpc", "1.82.1"),
+        ],
+    )
+    parsed = parse_attachment_bytes(
+        attachment_id="att-html",
+        filename="AquaReport-secrets-mgmt-5.2631.3.html",
+        mime_type="text/html",
+        data=data,
+    )
+    assert parsed.status == "ok"
+    ids = {f.cve_id for f in parsed.cve_image_facts}
+    assert ids == {
+        "CVE-2025-60876",
+        "GHSA-R277-6W6Q-XMQW",
+        "GHSA-JPCW-4WR7-C3VQ",
+        "GHSA-HRXH-6V49-42GF",
+    }
+    assert all(
+        normalize_image_basename(f.image) == "secrets-mgmt" and f.tag == "5.2631.3"
+        for f in parsed.cve_image_facts
+    )
+    pkgs = {p.cve_id: p for p in parsed.packages}
+    assert pkgs["CVE-2025-60876"].package_name == "busybox"
+    assert pkgs["CVE-2025-60876"].fixed_version is None
+    assert pkgs["GHSA-R277-6W6Q-XMQW"].fixed_version == "0.144.0"
+
+
+def test_aqua_html_falls_back_to_name_only_tables():
+    data = _make_aqua_html(
+        "registry.example/plainid/agent:1.2.3",
+        [("CVE-2026-11111", "", "2.0")],
+        with_resource=False,
+    )
+    parsed = parse_attachment_bytes(
+        attachment_id="att-html2",
+        filename="report.htm",
+        mime_type="text/html",
+        data=data,
+    )
+    assert parsed.status == "ok"
+    assert len(parsed.cve_image_facts) == 1
+    assert parsed.cve_image_facts[0].cve_id == "CVE-2026-11111"
+    assert normalize_image_basename(parsed.cve_image_facts[0].image) == "agent"
+    assert parsed.packages == []
+
+
+def test_aqua_html_real_secrets_mgmt_fixture():
+    from pathlib import Path
+
+    path = Path(
+        "/Users/alexbirman/Downloads/"
+        "AquaReport-secrets-mgmt-5.2631.3-20260727132524-1256061.html"
+    )
+    if not path.is_file():
+        import pytest
+
+        pytest.skip("local Aqua HTML fixture not present")
+    parsed = parse_attachment_bytes(
+        attachment_id="87830",
+        filename=path.name,
+        mime_type="text/html",
+        data=path.read_bytes(),
+    )
+    assert parsed.status == "ok"
+    ids = {f.cve_id for f in parsed.cve_image_facts}
+    assert ids == {
+        "CVE-2025-60876",
+        "GHSA-R277-6W6Q-XMQW",
+        "GHSA-JPCW-4WR7-C3VQ",
+        "GHSA-HRXH-6V49-42GF",
+    }
+    assert {normalize_image_basename(f.image) for f in parsed.cve_image_facts} == {"secrets-mgmt"}
+    assert {f.tag for f in parsed.cve_image_facts} == {"5.2631.3"}

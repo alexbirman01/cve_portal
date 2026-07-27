@@ -346,17 +346,26 @@ def process_issue(
             mime = a.get("mimeType")
             sheets_for_att: set[str] | None = None
             if selection_map and _is_excel_attachment(fname, mime):
-                try:
-                    meta = list_excel_sheets(blob)
-                except Exception:
-                    meta = []
-                if len(meta) > 1:
-                    # Multi-sheet: missing selection means parse nothing from this workbook.
-                    sheets_for_att = selection_map.get(aid, set())
-                elif aid in selection_map:
+                if aid in selection_map:
                     sheets_for_att = selection_map[aid]
+                else:
+                    # Resume path: multi-sheet workbooks must be in selection_map.
+                    # Avoid a second full-sheet scan (memory) when selection is present.
+                    try:
+                        meta = list_excel_sheets(blob)
+                    except Exception:
+                        meta = []
+                    if len(meta) > 1:
+                        sheets_for_att = set()
             elif aid in selection_map:
                 sheets_for_att = selection_map[aid]
+            logger.info(
+                "parsing attachment %s (%s) sheets=%s bytes=%s",
+                aid,
+                fname,
+                sorted(sheets_for_att) if sheets_for_att is not None else None,
+                len(blob),
+            )
             parsed = parse_attachment_bytes(
                 attachment_id=aid,
                 filename=fname,
@@ -364,6 +373,12 @@ def process_issue(
                 data=blob,
                 alias_map=alias_map,
                 sheet_names=sheets_for_att,
+            )
+            logger.info(
+                "parsed attachment %s status=%s facts=%s",
+                aid,
+                parsed.status,
+                len(parsed.cve_image_facts),
             )
             parsed_attachments.append(
                 {
@@ -402,15 +417,19 @@ def process_issue(
         )
         advisory_by_ghsa: dict[str, Any] = {}
         if ghsa_ids:
-            from api.app.github_advisory_client import GithubAdvisoryClient
-
-            gh = GithubAdvisoryClient()
+            logger.info("resolving %s GHSA id(s) via GitHub Advisory API", len(ghsa_ids))
             try:
-                for gid in ghsa_ids:
-                    advisory_by_ghsa[gid] = gh.fetch(gid)
-            finally:
-                gh.close()
-            _apply_ghsa_aliases(parsed_attachments, advisory_by_ghsa)
+                from api.app.github_advisory_client import GithubAdvisoryClient
+
+                gh = GithubAdvisoryClient()
+                try:
+                    for gid in ghsa_ids:
+                        advisory_by_ghsa[gid] = gh.fetch(gid)
+                finally:
+                    gh.close()
+                _apply_ghsa_aliases(parsed_attachments, advisory_by_ghsa)
+            except Exception:
+                logger.exception("GHSA enrichment failed; continuing with raw GHSA ids")
 
         # CVE/GHSA source of truth: structured attachment facts only (Excel / Aqua JSON).
         # Description and PDF free-text may still be scraped for provenance below, but

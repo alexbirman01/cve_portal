@@ -231,7 +231,10 @@ def parse_excel_bytes(
     sheet_names: set[str] | None = None,
 ) -> ParsedAttachment:
     try:
-        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        # When filtering sheets, avoid read_only: skipping unread worksheets can
+        # desync openpyxl's XML stream and hang the worker indefinitely.
+        use_read_only = sheet_names is None
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=use_read_only, data_only=True)
 
         # Collect structured facts; use a set to dedup (CVE, image, tag) across sheets.
         seen_facts: set[tuple[str, str, str]] = set()
@@ -468,6 +471,171 @@ def parse_aqua_json_bytes(
     )
 
 
+# ─── Aqua Security HTML report parser ─────────────────────────────────────────
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+_AQUA_HTML_H1_RE = re.compile(
+    r"<h1[^>]*>\s*Scan Report:\s*(.*?)</h1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_AQUA_HTML_TITLE_RE = re.compile(
+    r"<title[^>]*>(.*?)</title>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_html_text(raw: str) -> str:
+    return _WS_RE.sub(" ", _TAG_RE.sub(" ", raw or "")).strip()
+
+
+def _html_tables(html: str) -> list[tuple[list[str], list[list[str]]]]:
+    """Return ``[(headers, data_rows), ...]`` for each ``<table>`` in ``html``."""
+    out: list[tuple[list[str], list[list[str]]]] = []
+    for table_html in re.findall(r"<table[^>]*>(.*?)</table>", html, re.IGNORECASE | re.DOTALL):
+        headers = [
+            _strip_html_text(h)
+            for h in re.findall(r"<th[^>]*>(.*?)</th>", table_html, re.IGNORECASE | re.DOTALL)
+        ]
+        data_rows: list[list[str]] = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.IGNORECASE | re.DOTALL):
+            cells = [
+                _strip_html_text(c)
+                for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.IGNORECASE | re.DOTALL)
+            ]
+            if cells:
+                data_rows.append(cells)
+        if headers or data_rows:
+            out.append((headers, data_rows))
+    return out
+
+
+def _aqua_html_image_ref(html: str) -> str | None:
+    """Extract full ``registry/.../image:tag`` from Aqua HTML H1 or title."""
+    m = _AQUA_HTML_H1_RE.search(html)
+    if m:
+        ref = _strip_html_text(m.group(1))
+        if ref:
+            return ref
+    m = _AQUA_HTML_TITLE_RE.search(html)
+    if not m:
+        return None
+    title = _strip_html_text(m.group(1))
+    if "|" in title:
+        title = title.split("|", 1)[0].strip()
+    return title or None
+
+
+def parse_aqua_html_bytes(
+    data: bytes,
+    source: str,
+    attachment_id: str,
+    filename: str,
+    mime_type: str | None,
+    alias_map: dict[str, str] | None = None,
+) -> ParsedAttachment:
+    """Parse an Aqua Security HTML scan report (``AquaReport-*.html``).
+
+    Image/tag come from ``Scan Report: …``; findings prefer the consolidated
+    table with both ``Name`` and ``Resource`` columns (severity-bucket tables
+    are fallbacks when that table is absent).
+    """
+    try:
+        html = data.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="error", text_preview=str(exc)[:500],
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    image_ref = _aqua_html_image_ref(html)
+    if not image_ref:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="unparsed", text_preview=html[:500] or None,
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    service_token, tag = _aqua_image_basename(image_ref)
+    canonical = (alias_map or {}).get(service_token, service_token)
+
+    consolidated: list[dict[str, str | None]] = []
+    name_only: list[dict[str, str | None]] = []
+    for headers, rows in _html_tables(html):
+        hl = [h.lower() for h in headers]
+        if "name" not in hl:
+            continue
+        name_i = hl.index("name")
+        res_i = hl.index("resource") if "resource" in hl else None
+        fix_i = hl.index("fix version") if "fix version" in hl else None
+        for cells in rows:
+            if name_i >= len(cells):
+                continue
+            cve_id = normalize_vuln_id(cells[name_i])
+            if not cve_id:
+                continue
+            resource = None
+            if res_i is not None and res_i < len(cells):
+                resource = cells[res_i].strip() or None
+            fixed = None
+            if fix_i is not None and fix_i < len(cells):
+                raw_fix = cells[fix_i].strip()
+                if raw_fix and raw_fix.lower() != "none":
+                    fixed = raw_fix
+            entry = {"cve_id": cve_id, "resource": resource, "fixed_version": fixed}
+            if res_i is not None:
+                consolidated.append(entry)
+            else:
+                name_only.append(entry)
+
+    rows_src = consolidated if consolidated else name_only
+    if not rows_src:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="unparsed", text_preview=html[:500] or None,
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    seen_facts: set[tuple[str, str, str]] = set()
+    cve_image_facts: list[CveImageFact] = []
+    packages: list[ExtractedPackage] = []
+    seen_pkgs: set[tuple[str, str]] = set()
+    all_cve_ids: list[str] = []
+
+    for row in rows_src:
+        cve_id = str(row["cve_id"])
+        all_cve_ids.append(cve_id)
+        key = (cve_id, canonical, tag)
+        if key not in seen_facts:
+            seen_facts.add(key)
+            cve_image_facts.append(
+                CveImageFact(cve_id=cve_id, image=canonical, tag=tag, source=source)
+            )
+        pkg_name = row.get("resource")
+        if pkg_name:
+            pkg_key = (cve_id, pkg_name)
+            if pkg_key not in seen_pkgs:
+                seen_pkgs.add(pkg_key)
+                packages.append(
+                    ExtractedPackage(
+                        cve_id=cve_id,
+                        package_name=pkg_name,
+                        package_version=None,
+                        fixed_version=row.get("fixed_version"),
+                        source=source,
+                    )
+                )
+
+    cves = [ExtractedCve(cve_id=c, source=source) for c in dict.fromkeys(all_cve_ids)]
+    preview = f"Aqua HTML: {canonical}:{tag} — {len(cve_image_facts)} finding(s)"
+    return ParsedAttachment(
+        attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+        status="ok", text_preview=preview,
+        cves=cves, images=[], packages=packages, cve_image_facts=cve_image_facts,
+    )
+
+
 # ─── dispatcher ──────────────────────────────────────────────────────────────
 
 def parse_attachment_bytes(
@@ -495,6 +663,14 @@ def parse_attachment_bytes(
 
     if lower.endswith(".json"):
         return parse_aqua_json_bytes(data, source, attachment_id, filename, mime_type, alias_map=alias_map)
+
+    if lower.endswith((".html", ".htm")) or (mime_type or "").split(";")[0].strip().lower() in (
+        "text/html",
+        "application/xhtml+xml",
+    ):
+        return parse_aqua_html_bytes(
+            data, source, attachment_id, filename, mime_type, alias_map=alias_map,
+        )
 
     return ParsedAttachment(
         attachment_id=attachment_id, filename=filename, mime_type=mime_type,

@@ -12,6 +12,11 @@ from typing import Any
 import httpx
 
 from api.app.config import settings
+from api.app.plat_cve_match import (
+    image_basename_from_correlation,
+    image_basename_from_summary,
+    jql_cve_field_equals,
+)
 from api.app.plat_organization_labels import plat_organization_name_allowed
 from api.app.sla_commitment import parse_jira_created
 
@@ -230,29 +235,6 @@ def _normalize_cf_value(raw: Any) -> str | None:
         return s or None
     s = str(raw).strip()
     return s or None
-
-
-def _image_basename_from_correlation(correlation_id: str | None, cve_id: str) -> str | None:
-    if not correlation_id:
-        return None
-    suffix = "_" + cve_id
-    if correlation_id.endswith(suffix):
-        stem = correlation_id[: -len(suffix)].strip()
-        return stem or None
-    return None
-
-
-def _image_basename_from_summary(summary: str | None, cve_id: str) -> str | None:
-    if not summary:
-        return None
-    m = re.match(
-        r"^\s*\[" + re.escape(cve_id) + r"\]\s*-\s*\[([^\]]+)\]\s*$",
-        summary.strip(),
-    )
-    if m:
-        s = m.group(1).strip()
-        return s or None
-    return None
 
 
 CUSTOMER_STATUS_COMMENT_MARKER = "<!-- CVE-Portal-Customer-Status v1 -->"
@@ -972,10 +954,13 @@ class JiraClient:
         """
         Sec-Vuln PLAT rows for this CVE. Each item: {"key", "image_basename"}.
         image_basename from correlation custom field (imagename_CVE) or summary [CVE] - [image].
+
+        GHSA ids are matched case-insensitively (portal stores uppercase; other
+        creators may use GitHub's lowercase form).
         """
         jql = (
             f'project = {settings.jira_plat_project_key} AND issuetype = "{settings.jira_plat_issuetype_name}" '
-            f'AND cf[{settings.jira_plat_cve_cf_number}] = "{cve_id}"'
+            f"AND {jql_cve_field_equals(cve_id, settings.jira_plat_cve_cf_number)}"
         )
         fields = ["key", "summary"]
         fid = settings.jira_plat_cf_internal_id
@@ -988,9 +973,9 @@ class JiraClient:
             f = issue.get("fields") or {}
             img: str | None = None
             if fid:
-                img = _image_basename_from_correlation(_normalize_cf_value(f.get(fid)), cve_id)
+                img = image_basename_from_correlation(_normalize_cf_value(f.get(fid)), cve_id)
             if not img:
-                img = _image_basename_from_summary(f.get("summary"), cve_id)
+                img = image_basename_from_summary(f.get("summary"), cve_id)
             out.append({"key": key, "image_basename": (img or "").strip()})
         return out
 
@@ -1011,8 +996,10 @@ class JiraClient:
     def search_plat_tickets(self, cve_id: str) -> list[PlatTicket]:
         """Return Security Vulnerability PLAT tickets for this CVE (by cf field)."""
         proj = settings.jira_plat_project_key
-        cfn = settings.jira_plat_cve_cf_number
-        jql = f'project = {proj} AND issuetype = "{settings.jira_plat_issuetype_name}" AND cf[{cfn}] = "{cve_id}"'
+        jql = (
+            f'project = {proj} AND issuetype = "{settings.jira_plat_issuetype_name}" '
+            f"AND {jql_cve_field_equals(cve_id, settings.jira_plat_cve_cf_number)}"
+        )
         issues = self._post_jql_search_with_retry(
             cve_id=cve_id,
             jql=jql,

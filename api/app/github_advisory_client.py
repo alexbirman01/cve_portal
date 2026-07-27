@@ -42,7 +42,7 @@ class GithubAdvisoryClient:
     def close(self) -> None:
         self._client.close()
 
-    @retry(stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=6))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=6))
     def fetch(self, ghsa_id: str) -> GithubAdvisory:
         gid = (ghsa_id or "").strip().upper()
         if not gid.startswith("GHSA-"):

@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.signals import worker_process_init
 
 from api.app.config import settings
 
@@ -27,6 +28,15 @@ celery_app.conf.update(
         },
     },
 )
+
+
+@worker_process_init.connect
+def _dispose_db_engine(**_kwargs: object) -> None:
+    """Drop inherited SQLAlchemy connections after Celery prefork."""
+    from api.app.db import engine
+
+    engine.dispose()
+
 
 # Ensure tasks are registered when the worker starts.
 # (Explicit import is the most reliable option for small apps.)
