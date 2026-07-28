@@ -2621,7 +2621,7 @@ function ResultsActionsMenu({
               role="menuitem"
               className="resultsActionsMenuItem"
               disabled={disabled}
-              title="Create Jira Relates links between existing PLAT Security tickets and this PLATFORM ticket"
+              title="Create Jira Relates links and append Organization from this PLATFORM ticket onto existing PLAT Security tickets"
               onClick={() => {
                 setOpen(false)
                 onLinkPlat()
@@ -3444,6 +3444,20 @@ function dashSummaryCustomer(s: IssueCveStatusSummary): string {
   return (s.customer_names?.[0] ?? '').toLowerCase()
 }
 
+/** Parse Jira keys like PLATFORM-2151 into project + numeric id for natural ticket order. */
+function parseIssueKeyParts(key: string): { project: string; num: number } {
+  const m = key.trim().match(/^([A-Za-z][A-Za-z0-9]*)-(\d+)$/)
+  if (!m) return { project: key.trim().toUpperCase(), num: 0 }
+  return { project: m[1].toUpperCase(), num: Number(m[2]) }
+}
+
+/** Ascending by ticket number (oldest first); same number → project, then full key. */
+function compareIssueKeysByNumber(a: string, b: string): number {
+  const pa = parseIssueKeyParts(a)
+  const pb = parseIssueKeyParts(b)
+  return pa.num - pb.num || pa.project.localeCompare(pb.project) || a.localeCompare(b)
+}
+
 function sortDashboardSummaries(
   items: IssueCveStatusSummary[],
   sort: DashSortOption,
@@ -3452,23 +3466,23 @@ function sortDashboardSummaries(
   sorted.sort((a, b) => {
     switch (sort) {
       case 'sync_desc':
-        return dashSummaryTimestamp(b) - dashSummaryTimestamp(a) || a.issue_key.localeCompare(b.issue_key)
+        return dashSummaryTimestamp(b) - dashSummaryTimestamp(a) || compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'sync_asc':
-        return dashSummaryTimestamp(a) - dashSummaryTimestamp(b) || a.issue_key.localeCompare(b.issue_key)
+        return dashSummaryTimestamp(a) - dashSummaryTimestamp(b) || compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'ticket_asc':
-        return a.issue_key.localeCompare(b.issue_key)
+        return compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'ticket_desc':
-        return b.issue_key.localeCompare(a.issue_key)
+        return compareIssueKeysByNumber(b.issue_key, a.issue_key)
       case 'customer_asc':
-        return dashSummaryCustomer(a).localeCompare(dashSummaryCustomer(b)) || a.issue_key.localeCompare(b.issue_key)
+        return dashSummaryCustomer(a).localeCompare(dashSummaryCustomer(b)) || compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'cve_desc':
-        return dashSummaryCveCount(b) - dashSummaryCveCount(a) || a.issue_key.localeCompare(b.issue_key)
+        return dashSummaryCveCount(b) - dashSummaryCveCount(a) || compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'cve_asc':
-        return dashSummaryCveCount(a) - dashSummaryCveCount(b) || a.issue_key.localeCompare(b.issue_key)
+        return dashSummaryCveCount(a) - dashSummaryCveCount(b) || compareIssueKeysByNumber(a.issue_key, b.issue_key)
       case 'status':
         return (
           (DASH_STATUS_SORT_ORDER[remediationStatusForSummary(a)] ?? 99) - (DASH_STATUS_SORT_ORDER[remediationStatusForSummary(b)] ?? 99)
-          || a.issue_key.localeCompare(b.issue_key)
+          || compareIssueKeysByNumber(a.issue_key, b.issue_key)
         )
       default:
         return 0
@@ -3489,7 +3503,7 @@ function DashboardView({
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [dashSearch, setDashSearch] = useState('')
-  const [dashSort, setDashSort] = useState<DashSortOption>('sync_desc')
+  const [dashSort, setDashSort] = useState<DashSortOption>('ticket_desc')
   const [jiraBrowseUrl, setJiraBrowseUrl] = useState('')
   const [removeBusyKey, setRemoveBusyKey] = useState<string | null>(null)
   const [scheduleBusyKey, setScheduleBusyKey] = useState<string | null>(null)
@@ -3662,10 +3676,10 @@ function DashboardView({
               onChange={(e) => setDashSort(e.target.value as DashSortOption)}
               aria-label="Sort tickets"
             >
+              <option value="ticket_desc">Ticket (newest)</option>
+              <option value="ticket_asc">Ticket (oldest)</option>
               <option value="sync_desc">Last sync (newest)</option>
               <option value="sync_asc">Last sync (oldest)</option>
-              <option value="ticket_asc">Ticket (A–Z)</option>
-              <option value="ticket_desc">Ticket (Z–A)</option>
               <option value="customer_asc">Customer (A–Z)</option>
               <option value="cve_desc">Most CVEs</option>
               <option value="cve_asc">Fewest CVEs</option>

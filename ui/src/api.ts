@@ -191,8 +191,13 @@ export type JobResult = {
     label_date_pushed?: number
     linked?: number
   } | null
-  /** Cumulative link counters from process_issue. */
-  _plat_link_counts?: { links_checked?: number; links_created?: number; errors: string[] } | null
+  /** Cumulative counters from Link existing PLAT (Relates + org merge). */
+  _plat_link_counts?: {
+    links_checked?: number
+    links_created?: number
+    orgs_merged?: number
+    errors: string[]
+  } | null
   error?: string | null
   traceback?: string | null
 }

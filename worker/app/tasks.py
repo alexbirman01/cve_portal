@@ -14,7 +14,12 @@ from api.app.config import settings
 from api.app.db import db_session
 from api.app.jira_client import JiraClient, PlatSearchError
 from api.app.plat_audit import log_plat_audit
-from api.app.plat_linking import plat_keys_to_link_for_row, plat_security_by_image_from_search, plat_tickets_for_row
+from api.app.plat_linking import (
+    link_plat_key_to_parent,
+    plat_keys_to_link_for_row,
+    plat_security_by_image_from_search,
+    plat_tickets_for_row,
+)
 from api.app.allowed_images import load_alias_map, normalize_image_basename
 from api.app.models import CveCache, CustomerSla, IssueSyncSchedule, ProcessingRun
 from api.app.sla_commitment import due_date_from_anchor
@@ -1015,7 +1020,12 @@ def process_issue(
             "sheet_selection": (
                 {aid: sorted(names) for aid, names in selection_map.items()} if selection_map else None
             ),
-            "_plat_link_counts": {"links_checked": 0, "links_created": 0, "errors": []},
+            "_plat_link_counts": {
+                "links_checked": 0,
+                "links_created": 0,
+                "orgs_merged": 0,
+                "errors": [],
+            },
             "_aqua_processing_enabled": aqua_processing_on,
         }
     except Exception as e:
@@ -1052,17 +1062,8 @@ def _do_link(
     seen: set[str],
     counts: dict[str, Any],
 ) -> None:
-    """Link plat_key to source_issue_key once, recording checked vs created in counts."""
-    pk = (plat_key or "").strip().upper()
-    if not pk or pk in seen:
-        return
-    seen.add(pk)
-    result = jira.ensure_plat_linked_to_parent(pk, source_issue_key)
-    counts["links_checked"] += 1
-    if result.created:
-        counts["links_created"] += 1
-    elif result.error_warning:
-        counts["errors"].append(result.error_warning)
+    """Relates-link plat_key to PLATFORM and append Organization from the parent."""
+    link_plat_key_to_parent(jira, plat_key, source_issue_key, seen, counts)
 
 
 def _link_plat_rows(
@@ -1074,10 +1075,16 @@ def _link_plat_rows(
 ) -> dict[str, Any]:
     """
     Link PLAT tickets to source_issue_key for each extracted CVE+image basename
-    (same logic as Create PLAT API: find_plat_*_for_image).
-    Returns counts: {"links_checked": N, "links_created": N, "errors": [...]}
+    (same logic as Create PLAT API: find_plat_*_for_image), and append Organization
+    from the PLATFORM parent onto each discovered PLAT.
+    Returns counts: links_checked, links_created, orgs_merged, errors.
     """
-    counts: dict[str, Any] = {"links_checked": 0, "links_created": 0, "errors": []}
+    counts: dict[str, Any] = {
+        "links_checked": 0,
+        "links_created": 0,
+        "orgs_merged": 0,
+        "errors": [],
+    }
     seen: set[str] = set()
     for row in cve_rows:
         for pk in plat_keys_to_link_for_row(jira, row):
@@ -1089,7 +1096,7 @@ def _link_plat_rows(
 
 @celery_app.task(name="link_plat_for_run")
 def link_plat_for_run(run_id: str) -> dict[str, Any]:
-    """Create Jira Relates links between existing PLAT tickets and the PLATFORM parent."""
+    """Relates-link existing PLAT tickets to the PLATFORM parent and append Organization."""
     rid = uuid.UUID(run_id)
     _set_run_status(run_id, "linking_plat")
     try:
@@ -1107,7 +1114,12 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
                     run.status = "done"
                     db.add(run)
                     db.commit()
-            return {"links_checked": 0, "links_created": 0, "errors": []}
+            return {
+                "links_checked": 0,
+                "links_created": 0,
+                "orgs_merged": 0,
+                "errors": [],
+            }
 
         jira = JiraClient()
         try:

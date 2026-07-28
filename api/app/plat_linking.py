@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from api.app.cve_row_derived import image_basenames_for_cve_row
-from api.app.jira_client import JiraClient
+
+if TYPE_CHECKING:
+    from api.app.jira_client import JiraClient
 
 
 def filter_plat_hits_for_image(
@@ -69,3 +71,37 @@ def plat_tickets_for_row(
     Security Vulnerability PLAT tickets to store on a CVE row for display.
     """
     return [t for t in raw_plat if t.get("issue_type") == "Security Vulnerability"]
+
+
+def link_plat_key_to_parent(
+    jira: JiraClient,
+    plat_key: str,
+    source_issue_key: str,
+    seen: set[str],
+    counts: dict[str, Any],
+) -> None:
+    """Relates-link one PLAT to PLATFORM and append Organization from the parent.
+
+    Org merge is idempotent and non-fatal (same helper as Create PLAT reuse).
+    Mutates ``seen`` and ``counts`` (links_checked, links_created, orgs_merged, errors).
+    """
+    pk = (plat_key or "").strip().upper()
+    if not pk or pk in seen:
+        return
+    seen.add(pk)
+    result = jira.ensure_plat_linked_to_parent(pk, source_issue_key)
+    counts["links_checked"] = int(counts.get("links_checked") or 0) + 1
+    if result.created:
+        counts["links_created"] = int(counts.get("links_created") or 0) + 1
+    elif result.error_warning:
+        errors = counts.setdefault("errors", [])
+        if isinstance(errors, list):
+            errors.append(result.error_warning)
+    try:
+        # organization_refs=None → copy/merge from PLATFORM via existing Jira settings.
+        if jira.merge_organization_on_issue(pk, None, source_issue_key):
+            counts["orgs_merged"] = int(counts.get("orgs_merged") or 0) + 1
+    except Exception as exc:
+        errors = counts.setdefault("errors", [])
+        if isinstance(errors, list):
+            errors.append(f"org merge on {pk}: {exc}")
