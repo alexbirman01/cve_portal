@@ -31,6 +31,7 @@ from api.app.parsing import (
     list_excel_sheets,
     normalize_description,
     parse_attachment_bytes,
+    severity_rank,
 )
 from api.app.aqua_client import AquaClient
 from api.app.aqua_packages import candidates_to_json, cross_check_package, resolve_aqua_search_name
@@ -400,7 +401,14 @@ def process_issue(
                         for p in parsed.packages
                     ],
                     "cve_image_facts": [
-                        {"cve_id": f.cve_id, "image": f.image, "tag": f.tag, "source": f.source}
+                        {
+                            "cve_id": f.cve_id,
+                            "image": f.image,
+                            "tag": f.tag,
+                            "source": f.source,
+                            "severity": f.severity,
+                            "score": f.score,
+                        }
                         for f in parsed.cve_image_facts
                     ],
                 }
@@ -766,6 +774,8 @@ def process_issue(
         # Catalog enforcement (Allowed Images) is applied at PLAT create time (POST /api/plat).
         cve_to_images: dict[str, list[dict]] = {c: [] for c in cve_ids}
         seen_img_keys: set[tuple[str, str, str]] = set()  # (cve_id, image, tag)
+        customer_sev_by_cve: dict[str, str] = {}
+        customer_score_by_cve: dict[str, str] = {}
 
         for p in parsed_attachments:
             for fact in p.get("cve_image_facts", []):
@@ -779,6 +789,19 @@ def process_issue(
                     cve_to_images[cve_id].append(
                         {"image": canonical, "tag": fact["tag"], "source": fact["source"]}
                     )
+                fact_sev = (fact.get("severity") or "").strip().upper() or None
+                if fact_sev and severity_rank(fact_sev) > severity_rank(customer_sev_by_cve.get(cve_id)):
+                    customer_sev_by_cve[cve_id] = fact_sev
+                    fact_score = fact.get("score")
+                    if fact_score:
+                        customer_score_by_cve[cve_id] = str(fact_score)
+                elif (
+                    fact_sev
+                    and fact_sev == customer_sev_by_cve.get(cve_id)
+                    and fact.get("score")
+                    and cve_id not in customer_score_by_cve
+                ):
+                    customer_score_by_cve[cve_id] = str(fact["score"])
 
         cve_rows = []
         for cve_id in cve_ids:
@@ -815,12 +838,15 @@ def process_issue(
                 row_for_plat,
             )
 
+            severity = nvd_entry.get("severity") or customer_sev_by_cve.get(cve_id)
+            score = nvd_entry.get("score") or customer_score_by_cve.get(cve_id)
+
             cve_rows.append(
                 {
                     "cve_id": cve_id,
                     "ghsa_id": cve_id if is_ghsa_id(cve_id) else nvd_entry.get("ghsa_id"),
-                    "severity": nvd_entry.get("severity"),
-                    "score": nvd_entry.get("score"),
+                    "severity": severity,
+                    "score": score,
                     "nvd_state": nvd_entry.get("state", "unknown"),
                     # All matched PlainID images for this CVE (may be multiple).
                     "affected_images": [{"image": i["image"], "tag": i["tag"]} for i in imgs],

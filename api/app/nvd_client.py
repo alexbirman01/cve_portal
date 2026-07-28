@@ -123,8 +123,8 @@ def _extract_affected_packages(cve_data: dict[str, Any]) -> list[AffectedPackage
 
 
 def _extract_cvss(metrics: dict[str, Any]) -> tuple[str | None, str | None]:
-    # Prefer v3.1, then v3.0, then v2.
-    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+    # Prefer v3.1, then v3.0, then v4.0, then v2.
+    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40", "cvssMetricV2"):
         arr = metrics.get(key)
         if not arr or not isinstance(arr, list):
             continue

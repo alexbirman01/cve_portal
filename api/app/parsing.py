@@ -36,11 +36,23 @@ _COL_ALIASES: dict[str, list[str]] = {
     "package": ["packages", "package name", "package"],
     "pkg_ver": ["package version", "pkg version", "version"],
     "fix":     ["fix status", "fix", "remediation", "fixed version"],
+    "sev":     ["severity", "risk rating"],
+    "score":   ["cvss score", "cvss", "score"],
 }
 
 _FIX_VER_RE = re.compile(r"fixed in\s+([^\s,;]+)", re.IGNORECASE)
 # Version-like string: starts with a digit, contains at least one dot or dash
 _PLAIN_VER_RE = re.compile(r"^\d[\w.\-+~^]*$")
+
+_SEV_LABELS = ("CRITICAL", "HIGH", "MEDIUM", "MODERATE", "LOW", "NEGLIGIBLE", "UNKNOWN")
+_SEV_RANK = {
+    "CRITICAL": 5,
+    "HIGH": 4,
+    "MEDIUM": 3,
+    "LOW": 2,
+    "NEGLIGIBLE": 1,
+    "UNKNOWN": 0,
+}
 
 
 # ─── dataclasses ─────────────────────────────────────────────────────────────
@@ -74,6 +86,8 @@ class CveImageFact:
     image: str
     tag: str
     source: str
+    severity: str | None = None  # customer-reported (Aqua), normalized uppercase
+    score: str | None = None     # customer-reported CVSS score when present
 
 
 @dataclass(frozen=True)
@@ -92,12 +106,77 @@ class ParsedAttachment:
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _find_col(header: tuple, alias_key: str) -> int | None:
-    """Return the first column index whose header matches any alias for the given key."""
+    """Return the first column index whose header matches any alias for the given key.
+
+    Prefers an exact header match (case-insensitive) before substring match so
+    ``Severity`` wins over ``Custom Severity``.
+    """
     keywords = _COL_ALIASES.get(alias_key, [])
+    lowered = [(i, str(h).strip().lower() if h else "") for i, h in enumerate(header)]
     for kw in keywords:
-        for i, h in enumerate(header):
-            if h and kw in str(h).lower():
+        for i, h in lowered:
+            if h == kw:
                 return i
+    for kw in keywords:
+        for i, h in lowered:
+            if h and kw in h:
+                return i
+    return None
+
+
+def normalize_customer_severity(raw: Any) -> str | None:
+    """Map Aqua/customer severity strings to CRITICAL/HIGH/MEDIUM/LOW/NEGLIGIBLE."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    u = s.upper()
+    for label in _SEV_LABELS:
+        if label in u:
+            return "MEDIUM" if label == "MODERATE" else label
+    return None
+
+
+def normalize_customer_score(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in ("none", "n/a", "-", "null"):
+        return None
+    try:
+        float(s)
+    except ValueError:
+        return None
+    return s
+
+
+def severity_rank(sev: str | None) -> int:
+    if not sev:
+        return -1
+    return _SEV_RANK.get(sev.upper().strip(), -1)
+
+
+def _aqua_json_vuln_severity(vuln: dict[str, Any]) -> str | None:
+    for key in ("aqua_severity", "nvd_severity", "vendor_severity", "severity"):
+        sev = normalize_customer_severity(vuln.get(key))
+        if sev:
+            return sev
+    return None
+
+
+def _aqua_json_vuln_score(vuln: dict[str, Any]) -> str | None:
+    for key in (
+        "nvd_score_v3",
+        "nvd_score_v2",
+        "aqua_score",
+        "vendor_score",
+        "score",
+        "nvd_score",
+    ):
+        score = normalize_customer_score(vuln.get(key))
+        if score:
+            return score
     return None
 
 
@@ -262,6 +341,8 @@ def parse_excel_bytes(
             pkg_col  = _find_col(header, "package")
             ver_col  = _find_col(header, "pkg_ver")
             fix_col  = _find_col(header, "fix")
+            sev_col  = _find_col(header, "sev")
+            score_col = _find_col(header, "score")
 
             for row in rows:
                 # Always collect raw text for fallback CVE regex extraction.
@@ -281,6 +362,17 @@ def parse_excel_bytes(
                 if not cve_id:
                     continue
 
+                cust_sev = (
+                    normalize_customer_severity(row[sev_col])
+                    if sev_col is not None and row[sev_col] is not None
+                    else None
+                )
+                cust_score = (
+                    normalize_customer_score(row[score_col])
+                    if score_col is not None and row[score_col] is not None
+                    else None
+                )
+
                 # ── (CVE/GHSA, image, tag) fact ──
                 if img_col is not None and row[img_col]:
                     img_name = str(row[img_col]).strip()
@@ -293,6 +385,8 @@ def parse_excel_bytes(
                             image=img_name,
                             tag=img_tag,
                             source=source,
+                            severity=cust_sev,
+                            score=cust_score,
                         ))
 
                 # ── package fact ──
@@ -440,6 +534,8 @@ def parse_aqua_json_bytes(
                 if not cve_id:
                     continue
                 all_cve_ids.append(cve_id)
+                cust_sev = _aqua_json_vuln_severity(vuln)
+                cust_score = _aqua_json_vuln_score(vuln)
 
                 key = (cve_id, canonical, tag)
                 if key not in seen_facts:
@@ -449,6 +545,8 @@ def parse_aqua_json_bytes(
                         image=canonical,
                         tag=tag,
                         source=source,
+                        severity=cust_sev,
+                        score=cust_score,
                     ))
 
                 if pkg_name:
@@ -569,6 +667,8 @@ def parse_aqua_html_bytes(
         name_i = hl.index("name")
         res_i = hl.index("resource") if "resource" in hl else None
         fix_i = hl.index("fix version") if "fix version" in hl else None
+        sev_i = hl.index("severity") if "severity" in hl else None
+        score_i = hl.index("score") if "score" in hl else None
         for cells in rows:
             if name_i >= len(cells):
                 continue
@@ -583,7 +683,23 @@ def parse_aqua_html_bytes(
                 raw_fix = cells[fix_i].strip()
                 if raw_fix and raw_fix.lower() != "none":
                     fixed = raw_fix
-            entry = {"cve_id": cve_id, "resource": resource, "fixed_version": fixed}
+            cust_sev = (
+                normalize_customer_severity(cells[sev_i])
+                if sev_i is not None and sev_i < len(cells)
+                else None
+            )
+            cust_score = (
+                normalize_customer_score(cells[score_i])
+                if score_i is not None and score_i < len(cells)
+                else None
+            )
+            entry = {
+                "cve_id": cve_id,
+                "resource": resource,
+                "fixed_version": fixed,
+                "severity": cust_sev,
+                "score": cust_score,
+            }
             if res_i is not None:
                 consolidated.append(entry)
             else:
@@ -610,7 +726,14 @@ def parse_aqua_html_bytes(
         if key not in seen_facts:
             seen_facts.add(key)
             cve_image_facts.append(
-                CveImageFact(cve_id=cve_id, image=canonical, tag=tag, source=source)
+                CveImageFact(
+                    cve_id=cve_id,
+                    image=canonical,
+                    tag=tag,
+                    source=source,
+                    severity=row.get("severity"),
+                    score=row.get("score"),
+                )
             )
         pkg_name = row.get("resource")
         if pkg_name:
