@@ -1071,6 +1071,7 @@ def _link_plat_rows(
     cve_rows: list[dict[str, Any]],
     source_issue_key: str,
     *,
+    seen: set[str] | None = None,
     progress: _SyncProgressReporter | None = None,
 ) -> dict[str, Any]:
     """
@@ -1085,7 +1086,8 @@ def _link_plat_rows(
         "orgs_merged": 0,
         "errors": [],
     }
-    seen: set[str] = set()
+    if seen is None:
+        seen = set()
     for row in cve_rows:
         for pk in plat_keys_to_link_for_row(jira, row):
             _do_link(jira, pk, source_issue_key, seen, counts)
@@ -1107,7 +1109,11 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
             result = json.loads(run.result_json)
             source_issue_key: str = (run.issue_key or "").strip()
         cve_rows: list[dict[str, Any]] = result.get("cve_rows") or []
+
+        _init_plat_sync_log(run_id)
+
         if not cve_rows:
+            _append_plat_sync_log(run_id, "info", "Link PLAT: no CVE rows in run, nothing to do")
             with db_session() as db:
                 run = db.get(ProcessingRun, rid)
                 if run:
@@ -1121,9 +1127,57 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
                 "errors": [],
             }
 
+        _append_plat_sync_log(
+            run_id,
+            "info",
+            f"Link PLAT started for {source_issue_key or run_id} ({len(cve_rows)} CVE row(s))",
+        )
+
         jira = JiraClient()
         try:
-            link_counts = _link_plat_rows(jira, cve_rows, source_issue_key)
+            # Phase 1: discover all unique PLAT keys (JQL searches; results cached in jira instance).
+            progress = _SyncProgressReporter(run_id)
+            progress.set_phase("Discovering PLAT tickets", len(cve_rows), 1)
+            all_plat_keys: list[str] = []
+            seen_keys: set[str] = set()
+            for row in cve_rows:
+                for pk in plat_keys_to_link_for_row(jira, row):
+                    norm = pk.strip().upper()
+                    if norm and norm not in seen_keys:
+                        seen_keys.add(norm)
+                        all_plat_keys.append(pk.strip())
+                progress.bump()
+
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Discovered {len(all_plat_keys)} unique PLAT ticket(s) across {len(cve_rows)} CVE row(s)",
+            )
+
+            # Phase 2: link and merge Organization for each discovered PLAT key.
+            # Keys were already deduplicated in phase 1; no JQL re-runs needed.
+            progress.set_phase("Linking and merging Organization", max(len(all_plat_keys), 1), 2)
+            link_counts: dict[str, Any] = {
+                "links_checked": 0,
+                "links_created": 0,
+                "orgs_merged": 0,
+                "errors": [],
+            }
+            link_seen: set[str] = set()
+            for pk in all_plat_keys:
+                _do_link(jira, pk, source_issue_key, link_seen, link_counts)
+                progress.bump()
+
+            errors = link_counts.get("errors") or []
+            summary = (
+                f"Link PLAT finished: {link_counts['links_checked']} checked, "
+                f"{link_counts['links_created']} linked, "
+                f"{link_counts['orgs_merged']} org(s) merged, "
+                f"{len(errors)} error(s)"
+            )
+            _append_plat_sync_log(run_id, "info", summary)
+            for err in errors[:20]:
+                _append_plat_sync_log(run_id, "warn", str(err))
         finally:
             jira.close()
 
@@ -1135,6 +1189,7 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
                 except json.JSONDecodeError:
                     merged = {}
                 merged["_plat_link_counts"] = link_counts
+                merged.pop("_plat_sync_progress", None)
                 run.status = "done"
                 run.result_json = json.dumps(merged)
                 db.add(run)
@@ -1144,6 +1199,7 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
         import traceback
         err_msg = str(e)
         tb_str = traceback.format_exc()
+        _append_plat_sync_log(run_id, "error", f"Link PLAT failed: {err_msg}")
         with db_session() as db:
             run = db.get(ProcessingRun, rid)
             if run:
@@ -1154,6 +1210,7 @@ def link_plat_for_run(run_id: str) -> dict[str, Any]:
                     res = {}
                 res["error"] = err_msg
                 res["traceback"] = tb_str
+                res.pop("_plat_sync_progress", None)
                 run.result_json = json.dumps(res)
                 db.add(run)
                 db.commit()

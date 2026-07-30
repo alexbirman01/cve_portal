@@ -25,6 +25,14 @@ _PLAT_SEARCH_INITIAL_BACKOFF_S = 1.0
 _PLAT_SEARCH_RETRY_STATUS = frozenset({429, 503, 504})
 
 
+def _norm_org_name(s: str) -> str:
+    """Casefold and strip non-alphanumeric characters for fuzzy option matching.
+
+    Allows 'EY Global' to match the PLAT option 'EYGlobal' without a manual alias.
+    """
+    return re.sub(r"[^a-z0-9]", "", (s or "").casefold())
+
+
 class PlatSearchError(Exception):
     """Jira PLAT search failed after retries (fail closed — not equivalent to zero hits)."""
 
@@ -642,12 +650,20 @@ class JiraClient:
             "Accept": "application/json",
         }
         self._client = httpx.Client(headers=self._headers, timeout=30.0, follow_redirects=True)
+        # Per-instance caches — safe because each Celery task creates its own JiraClient.
+        self._org_option_cache: dict[str, tuple[str, str]] | None = None  # norm_name->(id, value)
+        self._jsm_orgs_cache: list[dict[str, Any]] | None = None
+        self._source_org_refs_cache: dict[str, list[dict[str, Any]]] = {}
+        self._plat_search_cache: dict[str, list[dict[str, str]]] = {}
+        self._unresolvable_org_norms: set[str] = set()
 
     def close(self) -> None:
         self._client.close()
 
     def list_jsm_organizations(self) -> list[dict[str, Any]]:
-        """Canonical org list for the site (`GET /rest/servicedeskapi/organization`)."""
+        """Canonical org list for the site (`GET /rest/servicedeskapi/organization`); cached per client instance."""
+        if self._jsm_orgs_cache is not None:
+            return self._jsm_orgs_cache
         out: list[dict[str, Any]] = []
         start = 0
         limit = 50
@@ -665,7 +681,9 @@ class JiraClient:
                     break
                 start += limit
         except Exception:
-            return []
+            self._jsm_orgs_cache = out
+            return out
+        self._jsm_orgs_cache = out
         return out
 
     def _organization_refs_from_jsm_request_api(self, issue_key: str) -> list[dict[str, Any]]:
@@ -761,12 +779,16 @@ class JiraClient:
         src_key = (source_issue_key or "").strip()
         source_refs: list[dict[str, Any]] = []
         if settings.jira_plat_use_source_issue_organizations and src_key:
-            try:
-                source_refs = list(self.get_issue(src_key).organization_refs)
-            except Exception:
-                pass
-            if not source_refs:
-                source_refs = self._organization_refs_from_jsm_request_api(src_key)
+            if src_key in self._source_org_refs_cache:
+                source_refs = self._source_org_refs_cache[src_key]
+            else:
+                try:
+                    source_refs = list(self.get_issue(src_key).organization_refs)
+                except Exception:
+                    pass
+                if not source_refs:
+                    source_refs = self._organization_refs_from_jsm_request_api(src_key)
+                self._source_org_refs_cache[src_key] = source_refs
 
         # Organization on the original portal ticket wins when `source_issue_key` is set.
         if settings.jira_plat_use_source_issue_organizations and source_refs:
@@ -951,13 +973,16 @@ class JiraClient:
         )
 
     def search_plat_security_for_cve(self, cve_id: str) -> list[dict[str, str]]:
-        """
-        Sec-Vuln PLAT rows for this CVE. Each item: {"key", "image_basename"}.
+        """Sec-Vuln PLAT rows for this CVE; result cached per client instance.
+
+        Each item: {"key", "image_basename"}.
         image_basename from correlation custom field (imagename_CVE) or summary [CVE] - [image].
 
         GHSA ids are matched case-insensitively (portal stores uppercase; other
         creators may use GitHub's lowercase form).
         """
+        if cve_id in self._plat_search_cache:
+            return self._plat_search_cache[cve_id]
         jql = (
             f'project = {settings.jira_plat_project_key} AND issuetype = "{settings.jira_plat_issuetype_name}" '
             f"AND {jql_cve_field_equals(cve_id, settings.jira_plat_cve_cf_number)}"
@@ -977,6 +1002,7 @@ class JiraClient:
             if not img:
                 img = image_basename_from_summary(f.get("summary"), cve_id)
             out.append({"key": key, "image_basename": (img or "").strip()})
+        self._plat_search_cache[cve_id] = out
         return out
 
     def search_plat_security_keys(self, cve_id: str) -> list[str]:
@@ -1103,6 +1129,58 @@ class JiraClient:
             out.append(chosen)
         return out
 
+    def _load_org_option_map(self, issue_key: str) -> dict[str, tuple[str, str]]:
+        """Load allowedValues for the PLAT Organization field from editmeta; cached after first fetch.
+
+        Returns {normalized_name: (option_id, option_value)} where normalized_name is produced by
+        `_norm_org_name` (casefold, strip non-alphanumerics).  A name like 'EY Global' therefore
+        maps to the same entry as the option 'EYGlobal'.
+        Optional ``JIRA_PLAT_ORGANIZATION_NAME_ALIASES`` env extends the map with explicit overrides.
+        """
+        if self._org_option_cache is not None:
+            return self._org_option_cache
+        org_fids = _plat_organization_field_ids()
+        cache: dict[str, tuple[str, str]] = {}
+        try:
+            r = self._client.get(
+                f"{self._base}/rest/api/3/issue/{issue_key}/editmeta",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            fields_meta = r.json().get("fields") or {}
+        except Exception as exc:
+            logger.warning("jira_org_editmeta_failed issue=%s: %s", issue_key, exc)
+            self._org_option_cache = cache
+            return cache
+        for fid in org_fids:
+            meta = fields_meta.get(fid) or {}
+            for av in meta.get("allowedValues") or []:
+                if not isinstance(av, dict):
+                    continue
+                opt_id = str(av.get("id") or "").strip()
+                opt_value = str(av.get("value") or av.get("name") or "").strip()
+                if opt_id and opt_value:
+                    cache[_norm_org_name(opt_value)] = (opt_id, opt_value)
+        raw_aliases = (settings.jira_plat_organization_name_aliases or "").strip()
+        if raw_aliases:
+            for pair in raw_aliases.split(","):
+                pair = pair.strip()
+                if "=" not in pair:
+                    continue
+                src, _, tgt = pair.partition("=")
+                src_norm = _norm_org_name(src.strip())
+                tgt_entry = cache.get(_norm_org_name(tgt.strip()))
+                if tgt_entry and src_norm and src_norm not in cache:
+                    cache[src_norm] = tgt_entry
+        logger.info(
+            "jira_org_option_map_loaded issue=%s fids=%s options=%d",
+            issue_key,
+            org_fids,
+            len(cache),
+        )
+        self._org_option_cache = cache
+        return cache
+
     def organization_refs_on_issue(
         self,
         issue_key: str,
@@ -1207,14 +1285,19 @@ class JiraClient:
         organization_refs: list[dict[str, Any]] | None,
         source_issue_key: str | None,
     ) -> bool:
-        """Append the source ticket's orgs to an existing PLAT issue, never removing what is there.
+        """Append the source ticket's orgs to an existing PLAT issue using the field's native add operation.
 
-        Jira has no "add one value" call for this field, so the merged list is written back in full.
-        That makes a bad write destructive, hence: write only when a name is genuinely missing, verify
-        the stored value afterwards, and restore the previous list if Jira dropped it.
+        Resolves wanted org display names to allowedValues option ids (exact or normalised match),
+        reads which ids are already on the ticket, and issues a single PUT with
+        ``{"update": {fid: [{"add": {"id": opt_id}} for opt_id in missing]}}`` per field.
+        Because `add` never removes existing values, a failed or partial write cannot clear the field.
 
-        Returns True when the merge is stored, False when nothing was needed or org management is off.
-        Raises RuntimeError when a write was needed but could not be stored.
+        Unresolvable names are remembered for the lifetime of the client so subsequent tickets skip
+        the write immediately rather than re-trying HTTP calls.
+
+        Returns True when at least one value was appended, False when nothing was needed or org
+        management is disabled.  Raises RuntimeError when the field's option map cannot be loaded,
+        a name has no matching option, or Jira does not store the written value.
         """
         if settings.jira_plat_skip_organization_field_on_create:
             return False
@@ -1223,22 +1306,12 @@ class JiraClient:
         if not org_fids:
             return False
 
-        # Current state of the field we are about to overwrite (not the wider read-only union).
-        existing_refs = self.organization_refs_on_issue(issue_key, org_fids)
-        if existing_refs is None:
-            return False
-        existing_display = [r["name"] for r in existing_refs if r["name"]]
-        existing_tokens = [r["id"] for r in existing_refs if r["id"]]
-        current_names = {n.casefold() for n in existing_display}
-
-        # Resolve the org display names that should be on this ticket.
+        # Resolve wanted display names from the source PLATFORM ticket.
         wanted_display = self._organization_display_names_for_plat_create(
             organization_refs,
             source_issue_key=source_issue_key,
         )
         if not wanted_display:
-            # Ids alone cannot be diffed or verified (the source ids live in a different field's
-            # value space), and writing them would replace the whole field. Skip instead.
             logger.warning(
                 "jira_org_merge_skipped_no_names issue=%s source=%s",
                 issue_key,
@@ -1246,39 +1319,97 @@ class JiraClient:
             )
             return False
 
-        # Diff by name: with nothing new to add there is no reason to touch the field at all.
-        new_display = [n for n in wanted_display if n.strip().casefold() not in current_names]
-        if not new_display:
+        # Load field option map (editmeta; cached after first call).
+        option_map = self._load_org_option_map(issue_key)
+        if not option_map:
+            raise RuntimeError(
+                f"Could not load Organization field options for {org_fids[0]} via {issue_key}/editmeta"
+            )
+
+        # Map each wanted name to an option; skip names already known to be unresolvable.
+        to_add: list[tuple[str, str]] = []  # [(opt_id, opt_value), ...]
+        first_unresolvable: str | None = None
+        for name in wanted_display:
+            norm = _norm_org_name(name)
+            if norm in self._unresolvable_org_norms:
+                logger.debug("jira_org_skip_known_unresolvable issue=%s name=%r", issue_key, name)
+                continue
+            entry = option_map.get(norm)
+            if entry is None:
+                self._unresolvable_org_norms.add(norm)
+                if first_unresolvable is None:
+                    first_unresolvable = name
+                continue
+            to_add.append(entry)
+
+        if first_unresolvable is not None and not to_add:
+            available = sorted({v for _, v in option_map.values()})[:10]
+            raise RuntimeError(
+                f"Organization '{first_unresolvable}' (normalized '{_norm_org_name(first_unresolvable)}') "
+                f"has no matching option on {org_fids[0]}; available: {available}. "
+                f"Set JIRA_PLAT_ORGANIZATION_NAME_ALIASES='{first_unresolvable}=<option_value>'."
+            )
+        if not to_add:
             return False
 
-        merged_display = existing_display + new_display
+        # Read current field state; skip ids / normalised names already stored.
+        existing_refs = self.organization_refs_on_issue(issue_key, org_fids)
+        if existing_refs is None:
+            return False
+        existing_ids = {r["id"] for r in existing_refs if r["id"]}
+        existing_norms = {_norm_org_name(r["name"]) for r in existing_refs if r["name"]}
 
-        if self._apply_organization_field_to_issue(
-            issue_key,
-            org_fids,
-            existing_tokens,
-            organization_display_names=merged_display,
-            verify_names=merged_display,
-        ):
+        missing = [
+            (opt_id, opt_value)
+            for opt_id, opt_value in to_add
+            if opt_id not in existing_ids and _norm_org_name(opt_value) not in existing_norms
+        ]
+        if not missing:
+            return False
+
+        # Single PUT using the field's native `add` operation — safe; never removes existing values.
+        headers = {**self._headers, "Content-Type": "application/json"}
+        body: dict[str, Any] = {
+            "update": {
+                fid: [{"add": {"id": opt_id}} for opt_id, _ in missing]
+                for fid in org_fids
+            }
+        }
+        r = self._client.put(
+            f"{self._base}/rest/api/3/issue/{issue_key}",
+            json=body,
+            headers=headers,
+        )
+        if not r.is_success:
+            raise RuntimeError(
+                f"Jira add Organization {[v for _, v in missing]!r} on {issue_key} failed: "
+                f"{r.status_code} {r.text[:300]}"
+            )
+
+        # Verify once: re-read the field and confirm ids or normalised names are stored.
+        new_refs = self.organization_refs_on_issue(issue_key, org_fids)
+        if new_refs is None:
+            logger.warning(
+                "jira_org_add_verify_unreadable issue=%s added=%s",
+                issue_key,
+                [v for _, v in missing],
+            )
+            return True  # wrote but could not verify
+        new_ids = {r2["id"] for r2 in new_refs if r2["id"]}
+        new_norms = {_norm_org_name(r2["name"]) for r2 in new_refs if r2["name"]}
+        want_ids = {opt_id for opt_id, _ in missing}
+        want_norms = {_norm_org_name(v) for _, v in missing}
+        if want_ids <= new_ids or want_norms <= new_norms:
+            logger.info(
+                "jira_org_merge_ok issue=%s added=%s",
+                issue_key,
+                [v for _, v in missing],
+            )
             return True
 
-        stored = {n.casefold() for n in self.organization_names_on_issue(issue_key, org_fids)}
-        lost = [n for n in existing_display if n.strip().casefold() not in stored]
-        if not lost:
-            raise RuntimeError(
-                f"Jira did not store Organization {merged_display} on {issue_key}; "
-                f"previous values kept ({existing_display or 'none'})"
-            )
-        restored = self._apply_organization_field_to_issue(
-            issue_key,
-            org_fids,
-            existing_tokens,
-            organization_display_names=existing_display,
-            verify_names=existing_display,
-        )
         raise RuntimeError(
-            f"Jira dropped Organization {lost} while merging {new_display} onto {issue_key}; "
-            + ("previous values restored" if restored else "RESTORE FAILED — set them manually")
+            f"Jira did not store Organization {[v for _, v in missing]!r} on {issue_key} after add; "
+            f"stored: {sorted(r2.get('name', r2.get('id', '?')) for r2 in new_refs)}"
         )
 
     def _plat_extra_base_fields(self) -> dict[str, Any]:

@@ -2666,7 +2666,9 @@ function platSyncProgressPhaseLabel(p: NonNullable<JobResult['_plat_sync_progres
   if (phase.includes('Reading')) return 'Reading PLAT fields'
   if (phase.includes('Reading fix')) return 'Reading fix/tag'
   if (phase.includes('label')) return 'Label & due date'
-  if (phase.includes('Linking')) return 'Linking to PLATFORM'
+  if (phase.includes('Linking to PLATFORM')) return 'Linking to PLATFORM'
+  if (phase.includes('Discovering')) return 'Discovering PLAT tickets'
+  if (phase.includes('Linking and merging')) return 'Linking & merging Org'
   return phase
 }
 
@@ -2888,24 +2890,24 @@ function ResultsPanel({
   const linkingPlat = jobIsLinkingPlat(job.status)
 
   useEffect(() => {
-    if (syncingPlat) {
+    if (syncingPlat || linkingPlat) {
       setPlatSyncProgress(job.result?._plat_sync_progress ?? null)
     } else {
       setPlatSyncProgress(null)
     }
     setPlatSyncLog(job.result?._plat_sync_log ?? [])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job.run_id, job.status, job.result?._plat_sync_progress, job.result?._plat_sync_log, syncingPlat])
+  }, [job.run_id, job.status, job.result?._plat_sync_progress, job.result?._plat_sync_log, syncingPlat, linkingPlat])
 
-  // Parent polling stops after initial processing; poll while PLAT sync is in flight.
+  // Parent polling stops after initial processing; poll while PLAT sync or link is in flight.
   useEffect(() => {
-    if (!syncingPlat) return
+    if (!syncingPlat && !linkingPlat) return
     let cancelled = false
     const t = setInterval(() => {
       void onJobRefresh()
         .then((j) => {
           if (cancelled) return
-          if (jobIsSyncingPlat(j.status)) {
+          if (jobIsSyncingPlat(j.status) || jobIsLinkingPlat(j.status)) {
             setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
             setPlatSyncLog(j.result?._plat_sync_log ?? [])
           } else {
@@ -2923,7 +2925,7 @@ function ResultsPanel({
       cancelled = true
       clearInterval(t)
     }
-  }, [syncingPlat, onJobRefresh])
+  }, [syncingPlat, linkingPlat, onJobRefresh])
 
   useEffect(() => {
     const rs = job.result?.cve_rows
@@ -3105,13 +3107,21 @@ function ResultsPanel({
   async function runPlatLink() {
     if (!job.run_id) return
     setPlatLinkErr(null)
+    setPlatSyncProgress(null)
+    setPlatSyncLog([])
     setPlatLinkBusy(true)
     try {
       await apiEnqueuePlatLink(job.run_id)
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise((r) => setTimeout(r, 1500))
         const j = await onJobRefresh()
-        if (jobIsLinkingPlat(j.status)) continue
+        if (jobIsLinkingPlat(j.status)) {
+          setPlatSyncProgress(j.result?._plat_sync_progress ?? null)
+          setPlatSyncLog(j.result?._plat_sync_log ?? [])
+          continue
+        }
+        setPlatSyncProgress(null)
+        setPlatSyncLog(j.result?._plat_sync_log ?? [])
         if (j.status === 'done') {
           const rs = j.result?.cve_rows
           if (rs && Array.isArray(rs)) setRows(rs)
@@ -3126,6 +3136,8 @@ function ResultsPanel({
       setPlatLinkBusy(false)
       try {
         const j = await onJobRefresh()
+        setPlatSyncProgress(null)
+        setPlatSyncLog(j.result?._plat_sync_log ?? [])
         if (j.status === 'done') {
           const rs = j.result?.cve_rows
           if (rs && Array.isArray(rs)) setRows(rs)
@@ -3264,7 +3276,18 @@ function ResultsPanel({
               )}
               {(platLinkBusy || linkingPlat) ? (
                 <span className="platSyncProgressPill" role="status">
-                  Linking PLAT tickets…
+                  Linking PLAT tickets
+                  {platSyncProgress ? (
+                    <>
+                      {' · '}
+                      {platSyncProgressPhaseLabel(platSyncProgress)}
+                      {platSyncProgressCounter(platSyncProgress)
+                        ? ` ${platSyncProgressCounter(platSyncProgress)}`
+                        : ''}
+                    </>
+                  ) : (
+                    '…'
+                  )}
                 </span>
               ) : null}
               {syncingPlat ? (
@@ -3305,7 +3328,7 @@ function ResultsPanel({
           </div>
         )}
         {findingsReady && platSyncLog.length > 0 && (
-          <PlatSyncActivityPanel entries={platSyncLog} defaultOpen={syncingPlat} />
+          <PlatSyncActivityPanel entries={platSyncLog} defaultOpen={syncingPlat || linkingPlat} />
         )}
         <CveTable
           rows={filteredRows}

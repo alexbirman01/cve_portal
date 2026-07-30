@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # When no org is found on the payload, source issue, or JIRA_PLAT_EXTRA_ORGANIZATIONS, use these names for
     # `customfield_10727` as `[{"value": "<name>"}]` (comma-separated). Example: `Humana`
     jira_plat_default_organization_names: str = ""
+    # Comma-separated `source=target` pairs used to map org display names from the PLATFORM parent
+    # to the exact option value in `customfield_10727` allowedValues when normalization alone is not
+    # enough. Example: `Ernst & Young=EY,EY Global=EYGlobal`
+    jira_plat_organization_name_aliases: str = ""
 
     # After creating (or reusing) a PLAT ticket, link it to the source PLATFORM issue via issueLink.
     # Set to false to disable without code changes.
