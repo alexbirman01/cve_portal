@@ -1103,6 +1103,51 @@ class JiraClient:
             out.append(chosen)
         return out
 
+    def organization_refs_on_issue(
+        self,
+        issue_key: str,
+        org_field_ids: list[str],
+    ) -> list[dict[str, str]] | None:
+        """Organization values stored on `org_field_ids` (the fields we write); None when unreadable.
+
+        Unreadable must stay distinct from empty: writes to this field replace the whole list, so a
+        failed read may never be taken as "the ticket has no organizations".
+        """
+        if not org_field_ids:
+            return []
+        try:
+            r = self._client.get(
+                f"{self._base}/rest/api/3/issue/{issue_key}",
+                params={"fields": ",".join(org_field_ids)},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            fields = r.json().get("fields") or {}
+        except Exception:
+            logger.warning("jira_org_read_failed issue=%s fields=%s", issue_key, org_field_ids)
+            return None
+        refs: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for fid in org_field_ids:
+            for o in _normalize_raw_organizations_field(fields.get(fid)):
+                if isinstance(o, dict):
+                    name = str(o.get("name") or o.get("value") or "").strip()
+                    oid = str(o.get("id") or "").strip()
+                else:
+                    name, oid = "", str(o or "").strip()
+                if not name and not oid:
+                    continue
+                key = f"{name.casefold()}|{oid}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs.append({"name": name, "id": oid})
+        return refs
+
+    def organization_names_on_issue(self, issue_key: str, org_field_ids: list[str]) -> list[str]:
+        """Organization display names currently stored on `org_field_ids` (empty when unreadable)."""
+        return [r["name"] for r in (self.organization_refs_on_issue(issue_key, org_field_ids) or []) if r["name"]]
+
     def _apply_organization_field_to_issue(
         self,
         issue_key: str,
@@ -1110,8 +1155,14 @@ class JiraClient:
         org_tokens: list[str],
         *,
         organization_display_names: list[str] | None = None,
+        verify_names: list[str] | None = None,
     ) -> bool:
-        """Set Organization on an existing issue; try v3/v2 and several `update` / `fields` shapes."""
+        """Set Organization on an existing issue; try v3/v2 and several `update` / `fields` shapes.
+
+        Jira answers 2xx for payload shapes it cannot map onto the field and stores nothing, so with
+        `verify_names` the issue is re-read after each accepted PUT and only a stored value counts as
+        success (otherwise the next shape is tried).
+        """
         if not org_field_ids:
             return True
         if not org_tokens and not organization_display_names:
@@ -1125,12 +1176,29 @@ class JiraClient:
             f"{self._base}/rest/api/3/issue/{issue_key}",
             f"{self._base}/rest/api/2/issue/{issue_key}",
         ]
+        want = {n.strip().casefold() for n in (verify_names or []) if n and n.strip()}
         for v in variants:
             for body in _org_field_put_bodies_for_fids(org_field_ids, v):
                 for put_url in put_urls:
                     r = self._client.put(put_url, json=body, headers=headers)
-                    if r.is_success:
+                    if not r.is_success:
+                        continue
+                    if not want:
                         return True
+                    stored = {n.casefold() for n in self.organization_names_on_issue(issue_key, org_field_ids)}
+                    if want <= stored:
+                        logger.info(
+                            "jira_org_write_ok issue=%s payload=%s",
+                            issue_key,
+                            json.dumps(body)[:300],
+                        )
+                        return True
+                    logger.warning(
+                        "jira_org_write_not_stored issue=%s payload=%s stored=%s",
+                        issue_key,
+                        json.dumps(body)[:300],
+                        sorted(stored),
+                    )
         return False
 
     def merge_organization_on_issue(
@@ -1139,15 +1207,14 @@ class JiraClient:
         organization_refs: list[dict[str, Any]] | None,
         source_issue_key: str | None,
     ) -> bool:
-        """Merge (append) new org values onto an existing PLAT issue.
+        """Append the source ticket's orgs to an existing PLAT issue, never removing what is there.
 
-        Reads the current Organization field from the issue, resolves the wanted
-        set using the same path as create, diffs the two, and calls
-        _apply_organization_field_to_issue only when there is something new.
-        Handles both the empty-org case and the already-populated case.
+        Jira has no "add one value" call for this field, so the merged list is written back in full.
+        That makes a bad write destructive, hence: write only when a name is genuinely missing, verify
+        the stored value afterwards, and restore the previous list if Jira dropped it.
 
-        Returns True if a PUT was attempted (regardless of outcome), False if
-        nothing was needed or org management is disabled.
+        Returns True when the merge is stored, False when nothing was needed or org management is off.
+        Raises RuntimeError when a write was needed but could not be stored.
         """
         if settings.jira_plat_skip_organization_field_on_create:
             return False
@@ -1156,63 +1223,62 @@ class JiraClient:
         if not org_fids:
             return False
 
-        # Read current org state from the existing PLAT ticket.
-        try:
-            existing_issue = self.get_issue(issue_key)
-        except Exception:
+        # Current state of the field we are about to overwrite (not the wider read-only union).
+        existing_refs = self.organization_refs_on_issue(issue_key, org_fids)
+        if existing_refs is None:
             return False
-
-        current_names: set[str] = {
-            str(r.get("name") or "").strip().casefold()
-            for r in (existing_issue.organization_refs or [])
-            if isinstance(r, dict) and (r.get("name") or "").strip()
-        }
+        existing_display = [r["name"] for r in existing_refs if r["name"]]
+        existing_tokens = [r["id"] for r in existing_refs if r["id"]]
+        current_names = {n.casefold() for n in existing_display}
 
         # Resolve the org display names that should be on this ticket.
         wanted_display = self._organization_display_names_for_plat_create(
             organization_refs,
             source_issue_key=source_issue_key,
         )
-        wanted_tokens = self._organization_ids_for_plat_create(
-            organization_refs,
-            source_issue_key=source_issue_key,
-        )
-
-        if not wanted_display and not wanted_tokens:
+        if not wanted_display:
+            # Ids alone cannot be diffed or verified (the source ids live in a different field's
+            # value space), and writing them would replace the whole field. Skip instead.
+            logger.warning(
+                "jira_org_merge_skipped_no_names issue=%s source=%s",
+                issue_key,
+                source_issue_key,
+            )
             return False
 
-        # Diff: keep only names not already present.
+        # Diff by name: with nothing new to add there is no reason to touch the field at all.
         new_display = [n for n in wanted_display if n.strip().casefold() not in current_names]
-
-        if not new_display and not wanted_tokens:
+        if not new_display:
             return False
 
-        # Build the merged list: existing names first, then new additions.
-        existing_display = [
-            str(r.get("name") or "").strip()
-            for r in (existing_issue.organization_refs or [])
-            if isinstance(r, dict) and (r.get("name") or "").strip()
-        ]
         merged_display = existing_display + new_display
 
-        # Tokens: include wanted tokens (ids) along with any already on the ticket.
-        existing_tokens: list[str] = [
-            str(r.get("id") or "").strip()
-            for r in (existing_issue.organization_refs or [])
-            if isinstance(r, dict) and (r.get("id") or "").strip()
-        ]
-        seen_tok: set[str] = set(existing_tokens)
-        merged_tokens = list(existing_tokens)
-        for t in wanted_tokens:
-            if t not in seen_tok:
-                seen_tok.add(t)
-                merged_tokens.append(t)
-
-        return self._apply_organization_field_to_issue(
+        if self._apply_organization_field_to_issue(
             issue_key,
             org_fids,
-            merged_tokens,
-            organization_display_names=merged_display or None,
+            existing_tokens,
+            organization_display_names=merged_display,
+            verify_names=merged_display,
+        ):
+            return True
+
+        stored = {n.casefold() for n in self.organization_names_on_issue(issue_key, org_fids)}
+        lost = [n for n in existing_display if n.strip().casefold() not in stored]
+        if not lost:
+            raise RuntimeError(
+                f"Jira did not store Organization {merged_display} on {issue_key}; "
+                f"previous values kept ({existing_display or 'none'})"
+            )
+        restored = self._apply_organization_field_to_issue(
+            issue_key,
+            org_fids,
+            existing_tokens,
+            organization_display_names=existing_display,
+            verify_names=existing_display,
+        )
+        raise RuntimeError(
+            f"Jira dropped Organization {lost} while merging {new_display} onto {issue_key}; "
+            + ("previous values restored" if restored else "RESTORE FAILED — set them manually")
         )
 
     def _plat_extra_base_fields(self) -> dict[str, Any]:
