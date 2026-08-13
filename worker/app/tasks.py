@@ -813,12 +813,23 @@ def process_issue(
             nvd_entry = nvd_by_id.get(cve_id, {})
             imgs = cve_to_images.get(cve_id, [])
 
-            # Package/resource metadata: NVD CPE → Alpine OSV → ticket attachment (one name).
-            # Enrichment phases above populate entry["packages"] before we build rows.
+            # Package/resource metadata: ticket attachment (Excel/JSON/HTML) is the
+            # deterministic source of truth for the primary package name. NVD/Alpine
+            # is used only when the attachment gave no package name, and to backfill
+            # version fields the attachment left blank.
             nvd_pkgs: list[dict] = _dedup_packages(nvd_entry.get("packages") or [])
-            attach_primary = nvd_entry.get("attachment_primary")
-            if attach_primary:
-                primary = attach_primary
+            attachment_pkgs = [p for p in (ticket_pkgs.get(cve_id) or []) if p.get("product")]
+            attachment_primary = _pick_best_nvd_package(attachment_pkgs)
+            if attachment_primary:
+                primary = dict(attachment_primary)
+                nvd_match = next(
+                    (p for p in nvd_pkgs if (p.get("product") or "").lower() == primary["product"].lower()),
+                    None,
+                )
+                if not primary.get("version_start") and nvd_match and nvd_match.get("version_start"):
+                    primary["version_start"] = nvd_match["version_start"]
+                if not primary.get("fixed_version") and nvd_match and nvd_match.get("fixed_version"):
+                    primary["fixed_version"] = nvd_match["fixed_version"]
             elif nvd_pkgs:
                 primary = _pick_best_nvd_package(nvd_pkgs)
             else:
@@ -994,9 +1005,6 @@ def process_issue(
                 row.get("severity"),
                 rows_by_customer_lower,
             )
-
-        for entry in enriched:
-            entry.pop("attachment_product", None)
 
         result = {
             "issue_key": issue.key,
