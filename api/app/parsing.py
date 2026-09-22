@@ -435,6 +435,13 @@ def parse_excel_bytes(
 _AQUA_TAG_SERVICE_RE = re.compile(r"^([\d.]+)_(.+)_(.+)$")
 
 
+def aqua_tag_version(tag: str) -> str:
+    """Bare version of an Aqua transactional tag; the tag unchanged when it is not one."""
+    t = (tag or "").strip()
+    m = _AQUA_TAG_SERVICE_RE.match(t)
+    return m.group(1) if m else t
+
+
 def _aqua_image_basename(image_name: str) -> tuple[str, str]:
     """Return (service_token, tag) extracted from a full Aqua image_name field.
 

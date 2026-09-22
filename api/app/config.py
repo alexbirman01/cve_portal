@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     jira_plat_package_vuln_version_fallback: str = "N/A"
     # PLAT Security Vulnerability: “Tag numbers” (PlainID customer field) — read on sync.
     jira_plat_tag_numbers_field_id: str = "customfield_11210"
+    # PLAT Security Vulnerability: “Affected tags” (labels field) — appended on create and sync.
+    # Empty string disables the write.
+    jira_plat_cf_affected_tags_field_id: str = "customfield_11577"
 
     # PLAT Organization CF — PlainID expects `[{"value": "CustomerName"}]` on `customfield_10727` (create + edit).
     # Comma-separated for mirrors; optional merge appends more CF ids (deduped).

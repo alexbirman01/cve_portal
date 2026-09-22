@@ -1587,6 +1587,31 @@ class JiraClient:
         err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
         raise RuntimeError(f"Jira could not add labels to {key}: {err}")
 
+    def add_affected_tags(self, issue_key: str, tags: list[str]) -> None:
+        """
+        Append values to the PLAT “Affected tags” labels field:
+        PUT .../issue/{key} with {"update": {<cf>: [{"add": "…"}, ...]}}.
+        Additive — Jira labels fields are set-valued, so re-adding a tag is a no-op.
+        """
+        fid = (settings.jira_plat_cf_affected_tags_field_id or "").strip()
+        key = (issue_key or "").strip()
+        adds = [{"add": t.strip()} for t in tags if t and str(t).strip()]
+        if not fid or not key or not adds:
+            return
+        body: dict[str, Any] = {"update": {fid: adds}}
+        headers = {**self._headers, "Content-Type": "application/json"}
+        put_urls = [
+            f"{self._base}/rest/api/3/issue/{key}",
+            f"{self._base}/rest/api/2/issue/{key}",
+        ]
+        last: httpx.Response | None = None
+        for put_url in put_urls:
+            last = self._client.put(put_url, json=body, headers=headers)
+            if last.is_success:
+                return
+        err = (last.text if last is not None else "") or (str(last.status_code) if last else "unknown")
+        raise RuntimeError(f"Jira could not add affected tags to {key}: {err}")
+
     def set_issue_components(self, issue_key: str, component_names: list[str]) -> None:
         """Set issue components via PUT fields.components (replaces current components)."""
         key = (issue_key or "").strip()

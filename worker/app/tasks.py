@@ -48,6 +48,7 @@ from api.app.portal_settings import (
 from api.app.package_name import canonical_single_package_name
 from api.app.cve_row_derived import (
     _image_path_basename,
+    affected_tag_for_basename,
     apply_plat_vendor_fields_from_sync,
     image_basenames_for_cve_row,
     iter_plat_security_package_targets,
@@ -1265,6 +1266,8 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
             "packages_checked": 0,
             "packages_updated": 0,
             "package_names_rewritten": 0,
+            "tags_checked": 0,
+            "tags_written": 0,
         }
         try:
             # PLAT Sec-Vuln keys for this PLATFORM ticket only (per CVE × affected image).
@@ -1338,6 +1341,36 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
 
         finally:
             jira.close()
+
+        # Append the scan tag to “Affected tags”. Unconditional: a PLAT ticket that already
+        # existed is never created through /api/plat, so this is the only path that records
+        # the tag when a later customer reports the same CVE on another version. The write is
+        # additive and Jira no-ops a tag that is already there, so re-syncing is harmless.
+        if (settings.jira_plat_cf_affected_tags_field_id or "").strip():
+            jira_tags = JiraClient()
+            try:
+                for row in cve_rows:
+                    for bn, pk in iter_plat_security_package_targets(row):
+                        if not bn:
+                            continue
+                        tag = affected_tag_for_basename(row, bn)
+                        if not tag:
+                            continue
+                        stats["tags_checked"] += 1
+                        try:
+                            jira_tags.add_affected_tags(pk, [tag])
+                            stats["tags_written"] += 1
+                        except Exception as ex:
+                            err = f"{pk} affected tags: {ex}"
+                            sync_errors.append(err)
+                            _append_plat_sync_log(run_id, "warn", err)
+            finally:
+                jira_tags.close()
+            _append_plat_sync_log(
+                run_id,
+                "info",
+                f"Affected tags: {stats['tags_checked']} checked, {stats['tags_written']} written",
+            )
 
         # Optional rewrite of wrong historical Package Name on PLAT CVE tickets in Jira.
         if get_aqua_processing_enabled() and get_rewrite_plat_package_name_on_sync():

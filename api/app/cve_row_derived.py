@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from api.app.package_name import canonical_single_package_name
+from api.app.parsing import aqua_tag_version
 
 
 def _image_path_basename(image_path: str) -> str:
@@ -55,6 +57,35 @@ def image_path_for_basename(row: dict[str, Any], image_basename: str) -> str | N
     ai = row.get("affected_image")
     if ai and ai != "NA" and _image_path_basename(str(ai)).lower() == fold:
         return str(ai)
+    return None
+
+
+# Jira labels fields reject whitespace; keep to the character class Jira accepts.
+_AFFECTED_TAG_RE = re.compile(r"^[A-Za-z0-9._+~-]{1,255}$")
+_AFFECTED_TAG_SKIP = {"", "na", "n/a", "none", "null", "latest", "unknown"}
+
+
+def normalize_affected_tag(raw: Any) -> str | None:
+    """Version-only tag for the PLAT “Affected tags” field, or None when unusable."""
+    tag = str(raw or "").strip()
+    if ":" in tag:
+        tag = tag.rsplit(":", 1)[1].strip()
+    if tag.casefold() in _AFFECTED_TAG_SKIP:
+        return None
+    tag = aqua_tag_version(tag)
+    return tag if _AFFECTED_TAG_RE.match(tag) else None
+
+
+def affected_tag_for_basename(row: dict[str, Any], image_basename: str) -> str | None:
+    """Scan tag for one image of a CVE row — mirrors image_path_for_basename."""
+    fold = image_basename.lower()
+    imgs = [i for i in (row.get("affected_images") or []) if i.get("image") and i["image"] != "NA"]
+    for i in imgs:
+        if _image_path_basename(str(i["image"])).lower() == fold:
+            return normalize_affected_tag(i.get("tag"))
+    ai = row.get("affected_image")
+    if ai and ai != "NA" and _image_path_basename(str(ai)).lower() == fold:
+        return normalize_affected_tag(row.get("affected_tag"))
     return None
 
 

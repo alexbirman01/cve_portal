@@ -16,6 +16,7 @@ from api.app.config import settings
 from api.app.package_name import canonical_single_package_name
 from api.app.cve_row_derived import (
     _image_path_basename,
+    affected_tag_for_basename,
     cve_rows_from_result,
     derive_cve_state,
     derive_ticket_remediation_status,
@@ -286,6 +287,35 @@ def _aqua_blocks_plat_create(run_id: str | None, cve_id: str, image_basename: st
     return None
 
 
+def _affected_tag_for_plat(run_id: str | None, cve_id: str, *image_basenames: str) -> str | None:
+    """
+    Scan tag for this CVE/image from the run's stored rows, for the PLAT “Affected tags” field.
+    Basenames are tried in order because the create endpoint canonicalizes the image through the
+    alias map while the run rows keep the name as parsed. Never raises — tags must not block create.
+    """
+    if not run_id:
+        return None
+    try:
+        rid = uuid.UUID(run_id)
+    except ValueError:
+        return None
+    with db_session() as db:
+        run = db.get(ProcessingRun, rid)
+        if not run or not run.result_json:
+            return None
+        data = json.loads(run.result_json)
+    for row in data.get("cve_rows") or []:
+        if row.get("cve_id") != cve_id:
+            continue
+        for bn in image_basenames:
+            if not bn:
+                continue
+            tag = affected_tag_for_basename(row, bn)
+            if tag:
+                return tag
+    return None
+
+
 def _plat_create_audit_base(
     *,
     cve_id: str,
@@ -357,6 +387,7 @@ def _plat_create_finish_reuse(
     existing: list[str],
     payload: CreatePlatIn,
     image: str,
+    affected_tag: str | None = None,
 ) -> dict:
     org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
     warnings: list[str] = []
@@ -369,6 +400,11 @@ def _plat_create_finish_reuse(
             )
         except Exception as exc:
             warnings.append(f"org merge on {k}: {exc}")
+        if affected_tag:
+            try:
+                jira.add_affected_tags(k, [affected_tag])
+            except Exception as exc:
+                warnings.append(f"affected tags on {k}: {exc}")
     link_warnings = _link_plat_keys_to_parent(jira, existing, payload.source_issue_key)
     warnings.extend(link_warnings)
     for k in existing:
@@ -410,6 +446,13 @@ def create_plat_ticket(payload: CreatePlatIn):
             detail=f"image '{payload.image_basename.strip()}' is not in the Allowed Images catalog",
         )
 
+    affected_tag = _affected_tag_for_plat(
+        payload.run_id,
+        cve_id,
+        payload.image_basename.strip(),
+        image,
+    )
+
     try:
         try:
             initial_results = jira.search_plat_security_for_cve(cve_id)
@@ -439,7 +482,9 @@ def create_plat_ticket(payload: CreatePlatIn):
             check="initial",
         )
         if reuse:
-            return _plat_create_finish_reuse(jira, existing=reuse, payload=payload, image=image)
+            return _plat_create_finish_reuse(
+                jira, existing=reuse, payload=payload, image=image, affected_tag=affected_tag
+            )
 
         try:
             pre_results = jira.search_plat_security_for_cve(cve_id)
@@ -469,7 +514,9 @@ def create_plat_ticket(payload: CreatePlatIn):
             initial_image_hits=initial_image_hits,
         )
         if reuse:
-            return _plat_create_finish_reuse(jira, existing=reuse, payload=payload, image=image)
+            return _plat_create_finish_reuse(
+                jira, existing=reuse, payload=payload, image=image, affected_tag=affected_tag
+            )
 
         org_refs = [r.model_dump(exclude_none=True) for r in (payload.organizations or [])]
         key = jira.create_plat_security_vulnerability(
@@ -495,6 +542,11 @@ def create_plat_ticket(payload: CreatePlatIn):
             created_key=key,
         )
         warnings = _link_plat_keys_to_parent(jira, [key], payload.source_issue_key)
+        if affected_tag:
+            try:
+                jira.add_affected_tags(key, [affected_tag])
+            except Exception as exc:
+                warnings.append(f"affected tags on {key}: {exc}")
         _persist_plat_key_into_run(
             payload.run_id,
             cve_id,
