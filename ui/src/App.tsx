@@ -12,7 +12,7 @@ import {
   apiSelectSheets,
   apiPatchIssueSyncSchedule,
   vulnDetailUrl,
-  isGhsaId,
+  vulnSourceLabel,
   type SheetChoice,
   apiPatchCveRow,
   apiGet,
@@ -781,15 +781,19 @@ function CveTable({
             <tr key={r.cve_id}>
               {vis.cve ? (
               <td>
-                <a
-                  className="cveId"
-                  href={vulnDetailUrl(r.cve_id)}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={isGhsaId(r.cve_id) ? 'GitHub Security Advisory' : 'NVD'}
-                >
-                  {r.cve_id}
-                </a>
+                {vulnDetailUrl(r.cve_id) ? (
+                  <a
+                    className="cveId"
+                    href={vulnDetailUrl(r.cve_id)}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={vulnSourceLabel(r.cve_id)}
+                  >
+                    {r.cve_id}
+                  </a>
+                ) : (
+                  <span className="cveId" title={vulnSourceLabel(r.cve_id)}>{r.cve_id}</span>
+                )}
               </td>
               ) : null}
               {(vis.platImage || vis.platCve) ? (() => {
@@ -3853,15 +3857,19 @@ function DashboardView({
                           {s.cves.map((c) => (
                             <tr key={c.cve_id}>
                               <td>
-                                <a
-                                  className="cveId"
-                                  href={vulnDetailUrl(c.cve_id)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  title={isGhsaId(c.cve_id) ? 'GitHub Security Advisory' : 'NVD'}
-                                >
-                                  {c.cve_id}
-                                </a>
+                                {vulnDetailUrl(c.cve_id) ? (
+                                  <a
+                                    className="cveId"
+                                    href={vulnDetailUrl(c.cve_id)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title={vulnSourceLabel(c.cve_id)}
+                                  >
+                                    {c.cve_id}
+                                  </a>
+                                ) : (
+                                  <span className="cveId" title={vulnSourceLabel(c.cve_id)}>{c.cve_id}</span>
+                                )}
                               </td>
                               <td>
                                 {c.severity

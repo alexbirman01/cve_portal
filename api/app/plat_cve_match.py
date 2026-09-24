@@ -27,6 +27,10 @@ def vuln_id_search_variants(cve_id: str) -> list[str]:
     return [raw]
 
 
+def is_sonatype_vuln_id(vuln_id: str) -> bool:
+    return (vuln_id or "").strip().lower().startswith("sonatype-")
+
+
 def jql_cve_field_equals(cve_id: str, cfn: int) -> str:
     """JQL clause for cf[CVE] matching ``cve_id``, case-insensitive for GHSA."""
     variants = vuln_id_search_variants(cve_id)
@@ -36,6 +40,18 @@ def jql_cve_field_equals(cve_id: str, cfn: int) -> str:
         return f'cf[{cfn}] = "{variants[0]}"'
     joined = ", ".join(f'"{v}"' for v in variants)
     return f"cf[{cfn}] IN ({joined})"
+
+
+def jql_plat_vuln_id_clause(vuln_id: str, cve_cfn: int, correlation_cfn: int | None = None) -> str:
+    """JQL locating PLAT tickets for a vuln id.
+
+    Sonatype advisories all carry the same placeholder in the CVE field, so the field
+    cannot identify one; they are located through the correlation field (`image_vulnid`).
+    """
+    raw = (vuln_id or "").strip()
+    if raw and correlation_cfn and is_sonatype_vuln_id(raw):
+        return f'cf[{correlation_cfn}] ~ "{raw}"'
+    return jql_cve_field_equals(raw, cve_cfn)
 
 
 def image_basename_from_correlation(correlation_id: str | None, cve_id: str) -> str | None:

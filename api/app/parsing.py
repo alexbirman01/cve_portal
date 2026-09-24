@@ -12,13 +12,15 @@ import pdfplumber
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 _GHSA_RE = re.compile(r"GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}", re.IGNORECASE)
-# Structured Vulnerability column: CVE or GitHub Security Advisory.
+# Sonatype/Nexus IQ proprietary advisories — no CVE, no external enrichment source.
+_SONATYPE_RE = re.compile(r"sonatype-\d{4}-\d{4,7}", re.IGNORECASE)
+# Structured Vulnerability column: CVE, GitHub Security Advisory, or Sonatype advisory.
 _VULN_ID_RE = re.compile(
-    rf"^(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern})$",
+    rf"^(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern}|{_SONATYPE_RE.pattern})$",
     re.IGNORECASE,
 )
 _VULN_ID_FIND_RE = re.compile(
-    rf"(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern})",
+    rf"(?:{_CVE_RE.pattern}|{_GHSA_RE.pattern}|{_SONATYPE_RE.pattern})",
     re.IGNORECASE,
 )
 
@@ -196,12 +198,18 @@ def _parse_fix_version(raw: str | None) -> str | None:
 
 # ─── public extraction helpers ───────────────────────────────────────────────
 
+def canonical_vuln_id_case(vuln_id: str) -> str:
+    """Sonatype advisory ids are canonically lowercase; CVE and GHSA are uppercase."""
+    s = (vuln_id or "").strip()
+    return s.lower() if _SONATYPE_RE.fullmatch(s) else s.upper()
+
+
 def normalize_vuln_id(raw: str) -> str | None:
-    """Return normalized CVE/GHSA id, or None if not a supported vuln id."""
+    """Return normalized CVE/GHSA/Sonatype id, or None if not a supported vuln id."""
     s = (raw or "").strip()
     if not s or not _VULN_ID_RE.match(s):
         return None
-    return s.upper()
+    return canonical_vuln_id_case(s)
 
 
 def is_ghsa_id(vuln_id: str) -> bool:
@@ -212,10 +220,14 @@ def is_cve_id(vuln_id: str) -> bool:
     return bool(_CVE_RE.fullmatch((vuln_id or "").strip()))
 
 
+def is_sonatype_id(vuln_id: str) -> bool:
+    return bool(_SONATYPE_RE.fullmatch((vuln_id or "").strip()))
+
+
 def extract_cves(text: str, source: str) -> list[ExtractedCve]:
-    """Extract CVE and GHSA identifiers from free text (normalized uppercase)."""
+    """Extract CVE, GHSA and Sonatype identifiers from free text."""
     return [
-        ExtractedCve(cve_id=m.group(0).upper(), source=source)
+        ExtractedCve(cve_id=canonical_vuln_id_case(m.group(0)), source=source)
         for m in _VULN_ID_FIND_RE.finditer(text or "")
     ]
 
@@ -576,6 +588,149 @@ def parse_aqua_json_bytes(
     )
 
 
+# ─── Sonatype / Nexus IQ JSON report parser ──────────────────────────────────
+
+# Image and tag are only present as the leading archive segment of a component
+# pathname, e.g. "plainid-theruntime_5.2637.7.2.tar/<layer>/app/....jar/...".
+_SONATYPE_PATH_RE = re.compile(r"^(?P<img>[A-Za-z0-9][A-Za-z0-9._-]*?)_(?P<tag>\d[\w.]*)\.tar/")
+
+# Sonatype grades threat by band, not by the CRITICAL/HIGH/… labels used elsewhere.
+_SONATYPE_THREAT_SEVERITY = {
+    "critical": "CRITICAL",
+    "severe": "HIGH",
+    "moderate": "MEDIUM",
+    "low": "LOW",
+    "none": None,
+}
+
+
+def sonatype_image_tag_from_pathnames(pathnames: list[Any]) -> tuple[str, str] | None:
+    """(image_basename, tag) from the first component pathname that carries them."""
+    for raw in pathnames or []:
+        m = _SONATYPE_PATH_RE.match(str(raw or "").strip())
+        if not m:
+            continue
+        img = m.group("img").strip()
+        # Reports name the archive "plainid-<image>"; the catalog knows it as "<image>".
+        if img.lower().startswith("plainid-"):
+            img = img[len("plainid-"):]
+        if img:
+            return img, m.group("tag").strip()
+    return None
+
+
+def sonatype_severity_from_threat(raw: Any) -> str | None:
+    return _SONATYPE_THREAT_SEVERITY.get(str(raw or "").strip().lower())
+
+
+def parse_sonatype_json_bytes(
+    raw: Any,
+    source: str,
+    attachment_id: str,
+    filename: str,
+    mime_type: str | None,
+    *,
+    alias_map: dict[str, str] | None = None,
+) -> ParsedAttachment | None:
+    """
+    Parse a Sonatype/Nexus IQ component report (``components[].securityData``).
+
+    Returns None when `raw` is not this format, so the caller can try other parsers.
+    """
+    if not isinstance(raw, dict):
+        return None
+    components = raw.get("components")
+    if not isinstance(components, list):
+        return None
+
+    amap = alias_map or {}
+    seen_facts: set[tuple[str, str, str]] = set()
+    seen_pkgs: set[tuple[str, str, str | None]] = set()
+    cve_image_facts: list[CveImageFact] = []
+    packages: list[ExtractedPackage] = []
+    all_vuln_ids: list[str] = []
+    skipped_ids: set[str] = set()
+    images_seen: list[str] = []
+
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        issues = ((comp.get("securityData") or {}) if isinstance(comp.get("securityData"), dict) else {}).get(
+            "securityIssues"
+        )
+        if not isinstance(issues, list) or not issues:
+            continue
+
+        found = sonatype_image_tag_from_pathnames(comp.get("pathnames") or [])
+        if not found:
+            continue
+        image_token, tag = found
+        canonical = amap.get(image_token.lower(), image_token)
+        if canonical not in images_seen:
+            images_seen.append(canonical)
+
+        coords = (comp.get("componentIdentifier") or {}).get("coordinates") or {}
+        group = str(coords.get("groupId") or "").strip()
+        artifact = str(coords.get("artifactId") or "").strip()
+        pkg_name = f"{group}:{artifact}" if group and artifact else (artifact or group)
+        pkg_version = str(coords.get("version") or "").strip() or None
+
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            vuln_id = normalize_vuln_id(str(issue.get("reference") or ""))
+            if not vuln_id:
+                ref = str(issue.get("reference") or "").strip()
+                if ref:
+                    skipped_ids.add(ref)
+                continue
+            all_vuln_ids.append(vuln_id)
+
+            fact_key = (vuln_id, canonical, tag)
+            if fact_key not in seen_facts:
+                seen_facts.add(fact_key)
+                cve_image_facts.append(CveImageFact(
+                    cve_id=vuln_id,
+                    image=canonical,
+                    tag=tag,
+                    source=source,
+                    severity=sonatype_severity_from_threat(issue.get("threatCategory")),
+                    score=normalize_customer_score(issue.get("severity")),
+                ))
+
+            # Keyed on version too: one advisory legitimately spans several versions
+            # of the same artifact, and dropping them would be arbitrary.
+            if pkg_name:
+                pkg_key = (vuln_id, pkg_name, pkg_version)
+                if pkg_key not in seen_pkgs:
+                    seen_pkgs.add(pkg_key)
+                    packages.append(ExtractedPackage(
+                        cve_id=vuln_id,
+                        package_name=pkg_name,
+                        package_version=pkg_version,
+                        fixed_version=None,
+                        source=source,
+                    ))
+
+    if not cve_image_facts:
+        return ParsedAttachment(
+            attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+            status="unparsed", text_preview=None,
+            cves=[], images=[], packages=[], cve_image_facts=[],
+        )
+
+    label = "/".join(images_seen) or "?"
+    preview = f"Sonatype JSON: {label} — {len(cve_image_facts)} finding(s)"
+    if skipped_ids:
+        preview += f", {len(skipped_ids)} unrecognized advisory id(s) skipped"
+    cves = [ExtractedCve(cve_id=c, source=source) for c in dict.fromkeys(all_vuln_ids)]
+    return ParsedAttachment(
+        attachment_id=attachment_id, filename=filename, mime_type=mime_type,
+        status="ok", text_preview=preview,
+        cves=cves, images=[], packages=packages, cve_image_facts=cve_image_facts,
+    )
+
+
 # ─── Aqua Security HTML report parser ─────────────────────────────────────────
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -792,6 +947,16 @@ def parse_attachment_bytes(
         return parse_pdf_bytes(data, source, attachment_id, filename, mime_type)
 
     if lower.endswith(".json"):
+        try:
+            decoded = json.loads(data.decode("utf-8", errors="replace"))
+        except Exception:
+            decoded = None
+        if decoded is not None:
+            sonatype = parse_sonatype_json_bytes(
+                decoded, source, attachment_id, filename, mime_type, alias_map=alias_map,
+            )
+            if sonatype is not None:
+                return sonatype
         return parse_aqua_json_bytes(data, source, attachment_id, filename, mime_type, alias_map=alias_map)
 
     if lower.endswith((".html", ".htm")) or (mime_type or "").split(";")[0].strip().lower() in (

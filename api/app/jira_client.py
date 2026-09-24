@@ -15,7 +15,9 @@ from api.app.config import settings
 from api.app.plat_cve_match import (
     image_basename_from_correlation,
     image_basename_from_summary,
+    is_sonatype_vuln_id,
     jql_cve_field_equals,
+    jql_plat_vuln_id_clause,
 )
 from api.app.plat_organization_labels import plat_organization_name_allowed
 from api.app.sla_commitment import parse_jira_created
@@ -979,13 +981,14 @@ class JiraClient:
         image_basename from correlation custom field (imagename_CVE) or summary [CVE] - [image].
 
         GHSA ids are matched case-insensitively (portal stores uppercase; other
-        creators may use GitHub's lowercase form).
+        creators may use GitHub's lowercase form). Sonatype advisories are matched on
+        the correlation field, since their CVE field holds a shared placeholder.
         """
         if cve_id in self._plat_search_cache:
             return self._plat_search_cache[cve_id]
         jql = (
             f'project = {settings.jira_plat_project_key} AND issuetype = "{settings.jira_plat_issuetype_name}" '
-            f"AND {jql_cve_field_equals(cve_id, settings.jira_plat_cve_cf_number)}"
+            f"AND {jql_plat_vuln_id_clause(cve_id, settings.jira_plat_cve_cf_number, settings.jira_plat_internal_cf_number)}"
         )
         fields = ["key", "summary"]
         fid = settings.jira_plat_cf_internal_id
@@ -1793,11 +1796,16 @@ class JiraClient:
         summary = f"[{cve_id}] - [{image_basename}]"
         internal = f"{image_basename}_{cve_id}"
         pkg = (package_name or "").strip() or cve_id
+        # "CVE ID" is required and expects a CVE; a Sonatype advisory has none, so it
+        # gets the placeholder and stays identifiable through the correlation field.
+        cve_field_value = (
+            settings.jira_plat_cve_id_placeholder if is_sonatype_vuln_id(cve_id) else cve_id
+        )
 
         base_fields: dict[str, Any] = {
             "project": {"key": settings.jira_plat_project_key},
             "summary": summary,
-            settings.jira_plat_cf_cve_id: cve_id,
+            settings.jira_plat_cf_cve_id: cve_field_value,
         }
         if settings.jira_plat_issuetype_id and str(settings.jira_plat_issuetype_id).strip():
             base_fields["issuetype"] = {"id": str(settings.jira_plat_issuetype_id).strip()}

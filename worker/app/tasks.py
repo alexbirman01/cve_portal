@@ -33,6 +33,7 @@ from api.app.parsing import (
     extract_images,
     is_cve_id,
     is_ghsa_id,
+    is_sonatype_id,
     list_excel_sheets,
     normalize_description,
     parse_attachment_bytes,
@@ -510,6 +511,18 @@ def process_issue(
                             )
                         continue
 
+                    # Sonatype advisories exist in no public feed; NVD answers 400 and the
+                    # client would retry it five times. Severity/score come from the report.
+                    if is_sonatype_id(cve_id):
+                        enriched.append(
+                            {
+                                "cve_id": cve_id,
+                                "state": "unknown",
+                                "enrichment_source": "sonatype",
+                            }
+                        )
+                        continue
+
                     cached = db.get(CveCache, cve_id)
                     if cached and cached.state == "ok":
                         # Re-parse packages from cached raw_json.
@@ -582,7 +595,8 @@ def process_issue(
             alpine = AlpineClient()
             try:
                 for entry in enriched:
-                    if is_ghsa_id(entry.get("cve_id") or ""):
+                    vid = entry.get("cve_id") or ""
+                    if is_ghsa_id(vid) or is_sonatype_id(vid):
                         continue
                     pkgs = entry.get("packages") or []
                     if pkgs and any((p.get("product") or "").strip() for p in pkgs if isinstance(p, dict)):
@@ -598,7 +612,8 @@ def process_issue(
             rh = RedHatClient()
             try:
                 for entry in enriched:
-                    if is_ghsa_id(entry.get("cve_id") or ""):
+                    vid = entry.get("cve_id") or ""
+                    if is_ghsa_id(vid) or is_sonatype_id(vid):
                         continue
                     # Only call Red Hat when NVD is missing packages or severity/score.
                     if entry.get("packages") and entry.get("severity") and entry.get("score"):
@@ -623,7 +638,8 @@ def process_issue(
             cve5 = Cve5Client()
             try:
                 for entry in enriched:
-                    if is_ghsa_id(entry.get("cve_id") or ""):
+                    vid = entry.get("cve_id") or ""
+                    if is_ghsa_id(vid) or is_sonatype_id(vid):
                         continue
                     if entry.get("packages") and all(
                         p.get("version_start") or p.get("fixed_version")

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # PLAT correlation custom field (imagename_CVE-…) — PlainID uses `customfield_10744`.
     # Must not match any id in `jira_plat_organization_field_id` (comma-separated list).
     jira_plat_cf_internal_id: str = "customfield_10744"
+    jira_plat_internal_cf_number: int = 10744
+    # Sonatype advisories have no CVE; the required "CVE ID" field gets this placeholder.
+    jira_plat_cve_id_placeholder: str = "CVE-0000-00000"
     jira_plat_cf_package_name: str = "customfield_11243"
     jira_plat_cf_package_vuln_version: str = "customfield_11246"
     jira_plat_cf_vendor_fix_version: str = "customfield_11247"

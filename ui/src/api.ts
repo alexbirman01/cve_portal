@@ -1236,8 +1236,12 @@ export async function apiSelectSheets(
   return apiPost(`/api/jobs/${encodeURIComponent(runId)}/select-sheets`, { selections })
 }
 
+/** Public advisory page, or '' when the id has none (Sonatype lives on the customer's private IQ server). */
 export function vulnDetailUrl(cveId: string): string {
   const id = (cveId || '').trim()
+  if (isSonatypeId(id)) {
+    return ''
+  }
   if (/^GHSA-/i.test(id)) {
     return `https://github.com/advisories/${encodeURIComponent(id.toUpperCase())}`
   }
@@ -1246,6 +1250,16 @@ export function vulnDetailUrl(cveId: string): string {
 
 export function isGhsaId(id: string): boolean {
   return /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/i.test((id || '').trim())
+}
+
+export function isSonatypeId(id: string): boolean {
+  return /^sonatype-\d{4}-\d{4,7}$/i.test((id || '').trim())
+}
+
+/** Source label for a finding id, used as the link tooltip. */
+export function vulnSourceLabel(id: string): string {
+  if (isSonatypeId(id)) return 'Sonatype advisory'
+  return isGhsaId(id) ? 'GitHub Security Advisory' : 'NVD'
 }
 
 export type IssueSyncScheduleResponse = {
