@@ -2018,11 +2018,18 @@ class JiraClient:
         The comment is customer-visible, so it carries no marker text. It is located by
         the id we stored when creating it, falling back to a marker scan so comments
         posted by earlier versions are still adopted rather than duplicated.
+
+        A stored id whose comment was deleted in Jira must not wedge the ticket: a 404
+        means it is gone, so fall through and post a fresh one.
         """
         known = (known_comment_id or "").strip()
         if known:
-            jira = self._push_customer_status_adf(issue_key, comment_text, known, internal)
-            return {"action": "updated", "comment_id": known, "jira": jira}
+            try:
+                jira = self._push_customer_status_adf(issue_key, comment_text, known, internal)
+                return {"action": "updated", "comment_id": known, "jira": jira}
+            except httpx.HTTPStatusError as exc:
+                if exc.response is None or exc.response.status_code != 404:
+                    raise
         comments = self.list_issue_comments(issue_key)
         existing_id = self.find_customer_status_comment_id(comments)
         if existing_id:

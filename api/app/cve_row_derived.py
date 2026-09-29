@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from api.app.package_name import canonical_single_package_name
-from api.app.parsing import aqua_tag_version
+from api.app.parsing import aqua_tag_version, canonical_vuln_id_case
 
 
 def _image_path_basename(image_path: str) -> str:
@@ -87,6 +87,29 @@ def affected_tag_for_basename(row: dict[str, Any], image_basename: str) -> str |
     if ai and ai != "NA" and _image_path_basename(str(ai)).lower() == fold:
         return normalize_affected_tag(row.get("affected_tag"))
     return None
+
+
+def ticket_packages_by_vuln_id(
+    parsed_attachments: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Packages parsed from attachments, keyed by vulnerability id.
+
+    The key must be canonicalised the same way finding ids are: Sonatype ids stay
+    lowercase, so uppercasing here silently drops every Sonatype package.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    for att in parsed_attachments:
+        for p in att.get("packages") or []:
+            vuln_id = canonical_vuln_id_case((p.get("cve_id") or "").strip())
+            if not vuln_id:
+                continue
+            out.setdefault(vuln_id, []).append({
+                "vendor": "ticket",
+                "product": canonical_single_package_name((p.get("package_name") or "").strip()) or "",
+                "version_start": (p.get("package_version") or "").strip() or None,
+                "fixed_version": (p.get("fixed_version") or "").strip() or None,
+            })
+    return out
 
 
 def package_entry_for_image(row: dict[str, Any], image_basename: str) -> dict[str, Any]:

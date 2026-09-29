@@ -28,6 +28,7 @@ from api.app.alpine_client import AlpineClient
 from api.app.redhat_client import RedHatClient
 from api.app.cve5_client import Cve5Client
 from api.app.parsing import (
+    canonical_vuln_id_case,
     cve_ids_from_attachment_facts,
     extract_cves,
     extract_images,
@@ -58,6 +59,7 @@ from api.app.cve_row_derived import (
     plat_jira_package_name_for_row,
     plat_sec_keys_scoped_to_run,
     release_code_from_fix_versions,
+    ticket_packages_by_vuln_id,
 )
 from worker.app.celery_app import celery_app
 
@@ -671,18 +673,7 @@ def process_issue(
 
         # Ticket attachment fallback: package name only when NVD + Alpine left packages empty;
         # version fields may still be merged from attachment when missing.
-        ticket_pkgs: dict[str, list[dict[str, Any]]] = {}
-        for att in parsed_attachments:
-            for p in att.get("packages") or []:
-                cve = (p.get("cve_id") or "").strip().upper()
-                if not cve:
-                    continue
-                ticket_pkgs.setdefault(cve, []).append({
-                    "vendor": "ticket",
-                    "product": canonical_single_package_name((p.get("package_name") or "").strip()) or "",
-                    "version_start": (p.get("package_version") or "").strip() or None,
-                    "fixed_version": (p.get("fixed_version") or "").strip() or None,
-                })
+        ticket_pkgs = ticket_packages_by_vuln_id(parsed_attachments)
         for entry in enriched:
             t_pkgs = ticket_pkgs.get(entry["cve_id"])
             if not t_pkgs:
