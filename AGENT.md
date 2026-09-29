@@ -33,6 +33,7 @@ Create path: initial Jira search → pre-create search (if no match) → create 
 - **Invalid PLAT status** → Expected release date + Tag numbers = `N/A`
 - **Pending Vendor Fix** → Expected release date = `Pending Vendor Fix`, Tag numbers = `N/A`
 - Column renamed: **PLAT fix version** → **Expected release date**
+- **Sync PLAT** copies **Package Name**, Package vulnerable version and Vendor fix version from the PLAT ticket onto the row — Jira wins, so a name corrected by hand there shows in the portal. The scan file still supplies the name at processing time
 - **Tag numbers** come from the Jira **Fix Versions** name (`… (5.2642.x)` → `5.2642.x`), not `customfield_11210`, which is no longer read. No release code in the version → `In progress`
 - **Suggested comment:** package column shows NVD name; `Package not found` only on Expected release date when **Invalid**; fix/tag use PLAT values when status is not Invalid
 - **ADF tables** in Jira customer status comments (aligned columns, no extra blank intro lines)

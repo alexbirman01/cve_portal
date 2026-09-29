@@ -238,10 +238,17 @@ def plat_sync_entry_for_row_primary(row: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def apply_plat_vendor_fields_from_sync(row: dict[str, Any]) -> None:
-    """Overwrite row affected_version / fixed_version from Jira when PLAT sync has values."""
+    """Overwrite row package / version fields from Jira when PLAT sync has values.
+
+    Jira wins: a Package Name corrected by hand on the PLAT ticket should show in the
+    portal, the same way the version fields already behave.
+    """
     entry = plat_sync_entry_for_row_primary(row)
     if not entry:
         return
+    pn = _plat_sync_field_usable(entry.get("package_name"))
+    if pn:
+        row["affected_resource"] = pn
     pv = _plat_sync_field_usable(entry.get("package_vuln_version"))
     if pv:
         row["affected_version"] = pv

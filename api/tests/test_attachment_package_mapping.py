@@ -131,3 +131,47 @@ def test_non_404_errors_still_surface() -> None:
             "PLATFORM-2350", "body", internal=False, known_comment_id="284920",
         )
     assert fake.posts == []
+
+
+# ─── package name from PLAT sync ─────────────────────────────────────────────
+
+from api.app.cve_row_derived import apply_plat_vendor_fields_from_sync  # noqa: E402
+
+
+def _synced_row(**entry: Any) -> dict[str, Any]:
+    return {
+        "cve_id": "sonatype-2025-000535",
+        "plat_security_keys": ["PLAT-32379"],
+        "plat_security_for_images": {"theruntime": ["PLAT-32379"]},
+        "affected_images": [{"image": "theruntime", "tag": "5.2637.7.2"}],
+        "plat_security_field_sync": {"PLAT-32379": entry},
+    }
+
+
+def test_package_name_is_taken_from_the_plat_ticket() -> None:
+    """PLATFORM-2350: sync read 'gson' from Jira but never put it on the row."""
+    row = _synced_row(package_name="gson", package_vuln_version="2.13.1")
+    apply_plat_vendor_fields_from_sync(row)
+    assert row["affected_resource"] == "gson"
+    assert row["affected_version"] == "2.13.1"
+
+
+def test_a_hand_corrected_name_in_jira_wins() -> None:
+    row = _synced_row(package_name="corrected-name")
+    row["affected_resource"] = "com.google.code.gson:gson"
+    apply_plat_vendor_fields_from_sync(row)
+    assert row["affected_resource"] == "corrected-name"
+
+
+@pytest.mark.parametrize("empty", ["", "None", "none", None])
+def test_an_empty_jira_name_leaves_the_scan_file_value_alone(empty) -> None:
+    row = _synced_row(package_name=empty)
+    row["affected_resource"] = "com.google.code.gson:gson"
+    apply_plat_vendor_fields_from_sync(row)
+    assert row["affected_resource"] == "com.google.code.gson:gson"
+
+
+def test_no_sync_data_changes_nothing() -> None:
+    row = {"cve_id": "CVE-1", "affected_resource": "openssl"}
+    apply_plat_vendor_fields_from_sync(row)
+    assert row["affected_resource"] == "openssl"
