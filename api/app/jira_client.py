@@ -118,22 +118,6 @@ def _jira_fix_versions_display(raw: Any) -> str:
     return ", ".join(names)
 
 
-def _jira_tag_numbers_display(raw: Any) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, (str, int, float)):
-        return str(raw).strip()
-    if isinstance(raw, dict):
-        v = raw.get("value")
-        if v is None:
-            v = raw.get("name")
-        return str(v).strip() if v is not None else ""
-    if isinstance(raw, list):
-        parts = [_jira_tag_numbers_display(x) for x in raw]
-        return ", ".join(p for p in parts if p)
-    return str(raw).strip()
-
-
 def _jira_duedate_str(raw: str | None) -> str | None:
     """Normalize SLA/API date to Jira system field `duedate` (YYYY-MM-DD)."""
     if raw is None:
@@ -1649,17 +1633,18 @@ class JiraClient:
         return str(raw).strip()
 
     def get_issue_platsync_fields(self, issue_key: str) -> dict[str, Any]:
-        """Read fixVersions, tag CF, labels, duedate, issuetype, workflow status for PLAT↔portal sync."""
+        """Read fixVersions, labels, duedate, issuetype, workflow status for PLAT↔portal sync.
+
+        The release number is derived from the fix-version name, so the Tag Numbers
+        custom field is no longer read.
+        """
         key = (issue_key or "").strip()
         if not key:
             return {}
-        tag_fid = (settings.jira_plat_tag_numbers_field_id or "").strip()
         pkg_fid = (settings.jira_plat_cf_package_name or "").strip()
         ver_fid = (settings.jira_plat_cf_package_vuln_version or "").strip()
         vf_fid = (settings.jira_plat_cf_vendor_fix_version or "").strip()
         field_list = ["fixVersions", "labels", "duedate", "issuetype", "status"]
-        if tag_fid:
-            field_list.append(tag_fid)
         if pkg_fid:
             field_list.append(pkg_fid)
         if ver_fid:
@@ -1673,10 +1658,8 @@ class JiraClient:
                 if not r.is_success:
                     continue
                 fields = r.json().get("fields") or {}
-                tag_raw = fields.get(tag_fid) if tag_fid else None
                 return {
                     "fix_versions": _jira_fix_versions_display(fields.get("fixVersions")),
-                    "tag_numbers": _jira_tag_numbers_display(tag_raw) if tag_fid else "",
                     "labels": [str(x) for x in (fields.get("labels") or [])],
                     "duedate": fields.get("duedate"),
                     "issuetype": (fields.get("issuetype") or {}).get("name"),
@@ -2002,15 +1985,16 @@ class JiraClient:
         """Create (POST) or update (PUT) the customer-status comment using REST v3 + ADF table.
 
         Always uses /rest/api/3 regardless of JIRA_USE_JSM_INTERNAL_COMMENTS so that the
-        ADF table structure is preserved.  Internal visibility is set via the
-        sd.public.comment property when internal=True.
+        ADF table structure is preserved.  Visibility is always asserted through the
+        sd.public.comment property — omitting it leaves JSM to guess.
         """
         adf_body = customer_status_comment_to_adf(comment_text)
-        payload: dict[str, Any] = {"body": adf_body}
-        if internal:
-            payload["properties"] = [
-                {"key": "sd.public.comment", "value": {"internal": True}},
-            ]
+        payload: dict[str, Any] = {
+            "body": adf_body,
+            "properties": [
+                {"key": "sd.public.comment", "value": {"internal": internal}},
+            ],
+        }
         headers = dict(self._headers)
         headers["Content-Type"] = "application/json"
         if comment_id:
@@ -2026,11 +2010,19 @@ class JiraClient:
         self,
         issue_key: str,
         comment_text: str,
-        internal: bool = True,
+        internal: bool = False,
+        known_comment_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create or update the portal-managed customer status table comment."""
-        if CUSTOMER_STATUS_COMMENT_MARKER not in comment_text:
-            comment_text = f"{CUSTOMER_STATUS_COMMENT_MARKER}\n{comment_text}"
+        """Create or update the portal-managed customer status table comment.
+
+        The comment is customer-visible, so it carries no marker text. It is located by
+        the id we stored when creating it, falling back to a marker scan so comments
+        posted by earlier versions are still adopted rather than duplicated.
+        """
+        known = (known_comment_id or "").strip()
+        if known:
+            jira = self._push_customer_status_adf(issue_key, comment_text, known, internal)
+            return {"action": "updated", "comment_id": known, "jira": jira}
         comments = self.list_issue_comments(issue_key)
         existing_id = self.find_customer_status_comment_id(comments)
         if existing_id:

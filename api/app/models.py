@@ -102,13 +102,17 @@ class AquaImagePackages(Base):
 
 
 class IssueSyncSchedule(Base):
-    """Per-ticket optional daily Sync PLAT schedule (dashboard checkbox)."""
+    """Per-ticket daily Sync PLAT / status-comment schedule (dashboard checkboxes)."""
 
     __tablename__ = "issue_sync_schedules"
 
     issue_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     daily_sync_enabled: Mapped[bool] = mapped_column(default=False)
     last_auto_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    daily_comment_enabled: Mapped[bool] = mapped_column(default=False)
+    last_auto_comment_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Jira id of the portal-managed status comment, so it is updated rather than duplicated.
+    status_comment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: dt.datetime.now(dt.UTC),

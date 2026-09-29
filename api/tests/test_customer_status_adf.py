@@ -9,15 +9,10 @@ from api.app.jira_client import (
 from api.app.parsing import _adf_node_to_text
 
 SAMPLE_COMMENT = """\
-<!-- CVE-Portal-Customer-Status v1 -->
-
-CVE Status Report - May 27, 2026
+This CVE report is updated daily.
+Last updated: May 27, 2026
 
 Note: The "Expected Release Date" is an estimate and may be subject to change.
-
-Status definitions:
-- In progress: CVE is under evaluation or no vendor fix is available yet
-- N/A: Package not present in this image
 
 CVE          | Image                | Package | Expected release date | Fix Version
 -------------+----------------------+---------+-----------------------+------------
@@ -75,10 +70,13 @@ def test_customer_status_comment_to_adf_column_count():
     assert len(header_row["content"]) == 5  # CVE | Image | Package | Expected... | Fix Version
 
 
-def test_adf_round_trip_contains_marker():
+def test_adf_round_trip_preserves_header_text():
+    """The comment is customer-visible now, so it carries no marker — the header must survive."""
     doc = customer_status_comment_to_adf(SAMPLE_COMMENT)
     text = _adf_node_to_text(doc)
-    assert "CVE-Portal-Customer-Status v1" in text
+    assert "This CVE report is updated daily." in text
+    assert "Last updated: May 27, 2026" in text
+    assert "CVE-Portal-Customer-Status" not in text
 
 
 def test_adf_round_trip_table_cells():

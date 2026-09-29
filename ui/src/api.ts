@@ -435,6 +435,8 @@ export type IssueCveStatusSummary = {
   /** Dashboard checkbox: run Sync PLAT automatically once every 24 hours */
   daily_sync_enabled?: boolean
   last_auto_sync_at?: string | null
+  daily_comment_enabled?: boolean
+  last_auto_comment_at?: string | null
   /** PLAT-xxx keys from linked Jira tickets in the last run result */
   plat_keys?: string[]
   cves: IssueCveStatusEntry[]
@@ -1266,11 +1268,13 @@ export type IssueSyncScheduleResponse = {
   issue_key: string
   daily_sync_enabled: boolean
   last_auto_sync_at?: string | null
+  daily_comment_enabled: boolean
+  last_auto_comment_at?: string | null
 }
 
 export async function apiPatchIssueSyncSchedule(
   issueKey: string,
-  body: { daily_sync_enabled: boolean },
+  body: { daily_sync_enabled?: boolean; daily_comment_enabled?: boolean },
 ): Promise<IssueSyncScheduleResponse> {
   const res = await fetch(`/api/issues/${encodeURIComponent(issueKey)}/sync-schedule`, {
     method: 'PATCH',
@@ -1412,15 +1416,13 @@ function formatCustomerStatusReportDate(d: Date = new Date()): string {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
 }
 
-/** Title, note, and status definitions included before the CVE table in the comment. */
+/** Header lines before the CVE table. Kept in sync with build_customer_status_comment_intro (Python). */
 export function formatCustomerStatusCommentIntro(reportDate: Date = new Date()): string[] {
   return [
-    `CVE Status Report - ${formatCustomerStatusReportDate(reportDate)}`,
+    'This CVE report is updated daily.',
+    `Last updated: ${formatCustomerStatusReportDate(reportDate)}`,
     '',
     CUSTOMER_STATUS_NOTE,
-    '',
-    'Status definitions:',
-    ...CUSTOMER_STATUS_DEFINITIONS.map((line) => `- ${line}`),
     '',
   ]
 }
@@ -1438,6 +1440,37 @@ export function plainIdExpectedReleaseDate(fix: string, tag: string): string {
   const tagIn = isPlatSyncUnavailableValue(tag) ? '' : tag
   const { display } = resolvePlatFixReleaseDateDisplay(fixIn, tagIn)
   return display || CUSTOMER_STATUS_IN_PROGRESS
+}
+
+/** Release number out of a Jira fix-version name — 'MNG (Q4RC1) - October-11th (5.2642.x)' → '5.2642.x'. */
+export function releaseCodeFromFixVersions(fixVersions: string): string | null {
+  if (!fixVersions) return null
+  const regex = /\b\d\.\d{4}\.[xX\d]+\b/g
+  const codes: string[] = []
+  let match
+  while ((match = regex.exec(fixVersions)) !== null) {
+    if (!codes.includes(match[0])) codes.push(match[0])
+  }
+  return codes.length > 0 ? codes.join(', ') : null
+}
+
+/** Release code straight off the fix-version name, so stale runs are right without a re-sync. */
+export function releaseVersionForComment(fix: string, tag: string): string {
+  const fixIn = isPlatSyncUnavailableValue(fix) ? '' : normalizePlatSyncFieldValue(fix)
+  const fromFix = fixIn ? releaseCodeFromFixVersions(fixIn) : null
+  if (fromFix) return fromFix
+  return plainIdReleaseVersion(tag)
+}
+
+/** Only a real translated date, never the raw version name — this goes to the customer. */
+export function expectedReleaseForComment(fix: string, tag: string): string {
+  for (const raw of [fix, tag]) {
+    if (isPlatSyncUnavailableValue(raw)) continue
+    const v = normalizePlatSyncFieldValue(raw)
+    const date = v ? translateFixVersionToReleaseDate(v) : null
+    if (date) return date
+  }
+  return CUSTOMER_STATUS_IN_PROGRESS
 }
 
 /** PlainID release version — same as findings Tag numbers column (raw tag, not translated). */
@@ -1474,7 +1507,7 @@ export async function apiUpsertCustomerStatusComment(
   const res = await fetch(`/api/issues/${encodeURIComponent(issueKey)}/comment/status`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body, internal: true }),
+    body: JSON.stringify({ body, internal: false }),
   })
   if (!res.ok) throw new Error(await res.text())
   return (await res.json()) as UpsertCustomerStatusCommentResponse
@@ -1567,9 +1600,9 @@ function collectCustomerStatusRows(result: JobResult): CustomerStatusTableRow[] 
             : 'N/A'
           : platPendingVendorFix
             ? 'Pending Vendor Fix'
-            : plainIdExpectedReleaseDate(fix, tag),
+            : expectedReleaseForComment(fix, tag),
         fixVersion:
-          platInvalid || platPendingVendorFix ? 'N/A' : plainIdReleaseVersion(tag),
+          platInvalid || platPendingVendorFix ? 'N/A' : releaseVersionForComment(fix, tag),
       })
     }
 
@@ -1702,8 +1735,8 @@ export function buildCustomerStatusComment(
   columns?: Partial<CustomerStatusCommentColumnVisibility>,
 ): string {
   const vis = resolveCustomerStatusCommentColumns(columns)
-  const lines: string[] = [CUSTOMER_STATUS_COMMENT_MARKER, '']
-  lines.push(...formatCustomerStatusCommentIntro())
+  // No marker line: this comment is customer-visible, and it is located by stored id.
+  const lines: string[] = [...formatCustomerStatusCommentIntro()]
 
   const tableRows = collectCustomerStatusRows(result)
   if (tableRows.length === 0) {

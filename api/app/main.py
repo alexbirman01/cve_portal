@@ -51,7 +51,7 @@ app = FastAPI(title="CVE Portal API", version="0.1.0")
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
-    # Add aliases column if upgrading from a schema that predates it.
+    # create_all does not alter existing tables, so columns added later need this.
     with engine.connect() as conn:
         conn.execute(
             text(
@@ -59,6 +59,12 @@ def _startup() -> None:
                 "aliases VARCHAR(1024) NOT NULL DEFAULT ''"
             )
         )
+        for ddl in (
+            "ADD COLUMN IF NOT EXISTS daily_comment_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ADD COLUMN IF NOT EXISTS last_auto_comment_at TIMESTAMPTZ",
+            "ADD COLUMN IF NOT EXISTS status_comment_id VARCHAR(64)",
+        ):
+            conn.execute(text(f"ALTER TABLE issue_sync_schedules {ddl}"))
         conn.commit()
 
 
@@ -584,16 +590,28 @@ def post_comment(issue_key: str, payload: CommentIn):
 @app.put("/api/issues/{issue_key}/comment/status")
 def upsert_customer_status_comment(issue_key: str, payload: CommentIn):
     """Create or update the single portal-managed customer status table comment."""
+    key = _normalize_issue_key(issue_key)
+    with db_session() as db:
+        sched = db.get(IssueSyncSchedule, key)
+        known_id = sched.status_comment_id if sched else None
     jira = JiraClient()
     try:
         res = jira.upsert_customer_status_comment(
-            issue_key, payload.body, internal=payload.internal
+            issue_key, payload.body, internal=payload.internal, known_comment_id=known_id
         )
-        return {"ok": True, **res}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         jira.close()
+    # Remember the comment so the daily job edits this one instead of posting another.
+    comment_id = str(res.get("comment_id") or "").strip()
+    if comment_id and comment_id != (known_id or ""):
+        with db_session() as db:
+            row = db.get(IssueSyncSchedule, key) or IssueSyncSchedule(issue_key=key)
+            row.status_comment_id = comment_id
+            db.add(row)
+            db.commit()
+    return {"ok": True, **res}
 
 
 @app.post("/api/issues/{issue_key}/process")
@@ -771,6 +789,12 @@ def list_jobs_cve_status(limit: int = 50):
                     if sched and sched.last_auto_sync_at
                     else None
                 ),
+                "daily_comment_enabled": bool(sched.daily_comment_enabled) if sched else False,
+                "last_auto_comment_at": (
+                    sched.last_auto_comment_at.isoformat()
+                    if sched and sched.last_auto_comment_at
+                    else None
+                ),
                 "cves": cves,
             }
         )
@@ -815,7 +839,10 @@ def delete_processing_runs_for_issue(issue_key: str):
 
 
 class IssueSyncScheduleIn(BaseModel):
-    daily_sync_enabled: bool
+    """Both toggles are optional so one PATCH can set either independently."""
+
+    daily_sync_enabled: bool | None = None
+    daily_comment_enabled: bool | None = None
 
 
 def _normalize_issue_key(raw: str) -> str:
@@ -831,9 +858,11 @@ def patch_issue_sync_schedule(issue_key: str, payload: IssueSyncScheduleIn):
     with db_session() as db:
         row = db.get(IssueSyncSchedule, key)
         if not row:
-            row = IssueSyncSchedule(issue_key=key, daily_sync_enabled=payload.daily_sync_enabled)
-        else:
+            row = IssueSyncSchedule(issue_key=key)
+        if payload.daily_sync_enabled is not None:
             row.daily_sync_enabled = payload.daily_sync_enabled
+        if payload.daily_comment_enabled is not None:
+            row.daily_comment_enabled = payload.daily_comment_enabled
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -842,6 +871,10 @@ def patch_issue_sync_schedule(issue_key: str, payload: IssueSyncScheduleIn):
             "daily_sync_enabled": row.daily_sync_enabled,
             "last_auto_sync_at": (
                 row.last_auto_sync_at.isoformat() if row.last_auto_sync_at else None
+            ),
+            "daily_comment_enabled": row.daily_comment_enabled,
+            "last_auto_comment_at": (
+                row.last_auto_comment_at.isoformat() if row.last_auto_comment_at else None
             ),
         }
 

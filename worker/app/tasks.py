@@ -47,6 +47,7 @@ from api.app.portal_settings import (
     get_rewrite_plat_package_name_on_sync,
 )
 from api.app.package_name import canonical_single_package_name
+from api.app.customer_status_comment import build_customer_status_comment
 from api.app.cve_row_derived import (
     _image_path_basename,
     affected_tag_for_basename,
@@ -56,6 +57,7 @@ from api.app.cve_row_derived import (
     plat_issue_status_is_invalid,
     plat_jira_package_name_for_row,
     plat_sec_keys_scoped_to_run,
+    release_code_from_fix_versions,
 )
 from worker.app.celery_app import celery_app
 
@@ -1337,7 +1339,8 @@ def sync_plat_for_run(run_id: str) -> dict[str, Any]:
 
                     issue_status = _sync_val(m.get("issue_status"))
                     fix_versions = _sync_val(m.get("fix_versions"))
-                    tag_numbers = _sync_val(m.get("tag_numbers"))
+                    # Release number comes from the fix-version name, not the Tag Numbers field.
+                    tag_numbers = _sync_val(release_code_from_fix_versions(fix_versions))
                     if plat_issue_status_is_invalid(issue_status):
                         fix_versions = "N/A"
                         tag_numbers = "N/A"
@@ -1611,4 +1614,76 @@ def run_due_plat_syncs() -> dict[str, Any]:
         enqueued.append(issue_key)
 
     return {"enqueued": enqueued, "skipped": skipped, "checked_at": now.isoformat()}
+
+
+@celery_app.task(name="post_due_status_comments")
+def post_due_status_comments() -> dict[str, Any]:
+    """Re-publish the customer status comment once a day for each opted-in ticket.
+
+    Posted unconditionally so the "Last updated" line always reflects today; the
+    upsert edits the existing comment, so a double-fire cannot duplicate it.
+    """
+    now = dt.datetime.now(dt.UTC)
+    posted: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+
+    with db_session() as db:
+        schedules = (
+            db.query(IssueSyncSchedule)
+            .filter(IssueSyncSchedule.daily_comment_enabled.is_(True))
+            .all()
+        )
+        items = [(s.issue_key, s.last_auto_comment_at, s.status_comment_id) for s in schedules]
+
+    for issue_key, last_at, comment_id in items:
+        if last_at and (now - last_at) < _DAILY_SYNC_INTERVAL:
+            skipped.append(issue_key)
+            continue
+        with db_session() as db:
+            run = (
+                db.query(ProcessingRun)
+                .filter(
+                    func.lower(ProcessingRun.issue_key) == issue_key.casefold(),
+                    ProcessingRun.status == "done",
+                    ProcessingRun.result_json.isnot(None),
+                )
+                .order_by(ProcessingRun.created_at.desc())
+                .first()
+            )
+            result = json.loads(run.result_json) if run and run.result_json else None
+        if not result:
+            skipped.append(issue_key)
+            continue
+
+        jira = JiraClient()
+        try:
+            body = build_customer_status_comment(result)
+            out = jira.upsert_customer_status_comment(
+                issue_key, body, internal=False, known_comment_id=comment_id,
+            )
+        except Exception as exc:
+            errors.append(f"{issue_key}: {exc}")
+            logger.exception("daily status comment failed for %s", issue_key)
+            continue
+        finally:
+            jira.close()
+
+        with db_session() as db:
+            row = db.get(IssueSyncSchedule, issue_key)
+            if row:
+                row.last_auto_comment_at = now
+                new_id = str(out.get("comment_id") or "").strip()
+                if new_id:
+                    row.status_comment_id = new_id
+                db.add(row)
+                db.commit()
+        posted.append(issue_key)
+
+    return {
+        "posted": posted,
+        "skipped": skipped,
+        "errors": errors,
+        "checked_at": now.isoformat(),
+    }
 

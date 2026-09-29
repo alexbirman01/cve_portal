@@ -20,11 +20,16 @@ celery_app.conf.update(
     task_routes={
         "sync_plat_for_run": {"queue": "plat_sync"},
         "link_plat_for_run": {"queue": "plat_sync"},
+        "post_due_status_comments": {"queue": "plat_sync"},
     },
     beat_schedule={
         "run-due-plat-syncs": {
             "task": "run_due_plat_syncs",
             "schedule": 3600.0,  # every 1 hour (24h window, no need to poll every 15 min)
+        },
+        "post-due-status-comments": {
+            "task": "post_due_status_comments",
+            "schedule": 3600.0,  # hourly poll, 24h window enforced in the task
         },
     },
 )

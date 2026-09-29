@@ -398,6 +398,21 @@ def _translate_fix_version_to_release_date(fix_version: str) -> str | None:
     return dates[0] if dates else None
 
 
+_RELEASE_CODE_RE = _re.compile(r"\b\d\.\d{4}\.[xX\d]+\b")
+
+
+def release_code_from_fix_versions(fix_versions: str) -> str | None:
+    """Release number out of a Jira fix-version name — 'MNG (Q4RC1) - October-11th (5.2642.x)' → '5.2642.x'."""
+    if not fix_versions:
+        return None
+    codes: list[str] = []
+    for m in _RELEASE_CODE_RE.finditer(fix_versions):
+        code = m.group(0)
+        if code not in codes:
+            codes.append(code)
+    return ", ".join(codes) if codes else None
+
+
 def _plain_id_expected_release_date(fix: str, tag: str) -> str:
     """'In progress' when no week-code can be resolved — mirrors plainIdExpectedReleaseDate in api.ts."""
     fix_in = _normalize_plat_sync_field_value(fix)

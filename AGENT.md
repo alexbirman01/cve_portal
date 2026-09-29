@@ -33,8 +33,10 @@ Create path: initial Jira search → pre-create search (if no match) → create 
 - **Invalid PLAT status** → Expected release date + Tag numbers = `N/A`
 - **Pending Vendor Fix** → Expected release date = `Pending Vendor Fix`, Tag numbers = `N/A`
 - Column renamed: **PLAT fix version** → **Expected release date**
+- **Tag numbers** come from the Jira **Fix Versions** name (`… (5.2642.x)` → `5.2642.x`), not `customfield_11210`, which is no longer read. No release code in the version → `In progress`
 - **Suggested comment:** package column shows NVD name; `Package not found` only on Expected release date when **Invalid**; fix/tag use PLAT values when status is not Invalid
 - **ADF tables** in Jira customer status comments (aligned columns, no extra blank intro lines)
+- Customer status comment is **external** (`sd.public.comment` always sent explicitly), carries **no marker** (located by `issue_sync_schedules.status_comment_id`, with a legacy marker-scan fallback), and can republish daily via the **Daily comment** dashboard toggle (`post_due_status_comments` beat task, body built server-side in `api/app/customer_status_comment.py`)
 
 ### Aqua
 - **Optional Aqua processing** (portal setting `aqua_processing_enabled`, **default off**)

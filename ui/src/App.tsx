@@ -388,6 +388,9 @@ function PlatSyncStripCell({
       </span>
     )
   }
+  if (strip.secKeyCount > 0) {
+    return <span className="platSyncStripText muted small">{CUSTOMER_STATUS_IN_PROGRESS}</span>
+  }
   return <Dash />
 }
 
@@ -3597,10 +3600,13 @@ function DashboardView({
     return sortDashboardSummaries(filtered, dashSort)
   }, [summaries, dashSearch, dashSort])
 
-  async function toggleDailySync(issueKey: string, enabled: boolean) {
+  async function patchSchedule(
+    issueKey: string,
+    body: { daily_sync_enabled?: boolean; daily_comment_enabled?: boolean },
+  ) {
     setScheduleBusyKey(issueKey)
     try {
-      const updated = await apiPatchIssueSyncSchedule(issueKey, { daily_sync_enabled: enabled })
+      const updated = await apiPatchIssueSyncSchedule(issueKey, body)
       setSummaries((prev) =>
         prev.map((s) =>
           s.issue_key === issueKey
@@ -3608,6 +3614,8 @@ function DashboardView({
                 ...s,
                 daily_sync_enabled: updated.daily_sync_enabled,
                 last_auto_sync_at: updated.last_auto_sync_at ?? s.last_auto_sync_at,
+                daily_comment_enabled: updated.daily_comment_enabled,
+                last_auto_comment_at: updated.last_auto_comment_at ?? s.last_auto_comment_at,
               }
             : s,
         ),
@@ -3775,10 +3783,25 @@ function DashboardView({
                           checked={s.daily_sync_enabled ?? false}
                           disabled={scheduleBusyKey === s.issue_key}
                           onChange={(e) => {
-                            void toggleDailySync(s.issue_key, e.target.checked)
+                            void patchSchedule(s.issue_key, { daily_sync_enabled: e.target.checked })
                           }}
                         />
                         Daily sync
+                      </label>
+                      <label
+                        className="dashDailySyncToggle"
+                        title="Publish the CVE status comment to this ticket once every 24 hours"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={s.daily_comment_enabled ?? false}
+                          disabled={scheduleBusyKey === s.issue_key}
+                          onChange={(e) => {
+                            void patchSchedule(s.issue_key, { daily_comment_enabled: e.target.checked })
+                          }}
+                        />
+                        Daily comment
                       </label>
                       <span className="dashIssueActionBtns">
                         <button
